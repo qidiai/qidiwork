@@ -1,0 +1,54 @@
+/* 设计令牌:办公风格,浅色为默认(深色主题在 P2 引入) */
+:root {
+  --bg-base: #f5f6f8;
+  --bg-panel: #ffffff;
+  --bg-hover: #eef1f6;
+  --bg-active: #e3eaf9;
+  --border: #e2e4e9;
+  --text-primary: #1f2329;
+  --text-secondary: #646a73;
+  --text-disabled: #a9aeb8;
+  --accent: #3370ff;
+  --accent-soft: #e3eaf9;
+  --success: #34c724;
+  --warning: #ff8800;
+  --danger: #f54a45;
+  --radius: 8px;
+  --font-size-base: 14px;
+  --font-size-lg: 16px;
+  --font-size-sm: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: var(--font-size-base);
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* 通用空状态 */
+.empty-hint {
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+  line-height: 1.7;
+}

@@ -1,0 +1,44 @@
+[package]
+name = "qidiwork-gui"
+version = "0.1.0"
+description = "QidiWork 办公工作台 —— QIDI Code 的原生 GUI 办公界面"
+edition = "2024"
+rust-version = "1.85"
+
+# 独立 workspace:主工程(G:\qidiwork\Cargo.toml 已 exclude 本目录)内存敏感,
+# 并入 Tauri 依赖树会显著拖慢主工程 cargo check(docs/操作手册.md 5.1)。
+# cf-acp-lib 等主工程 crate 通过 path 依赖引入(M2 起),跨 workspace 解析不受影响。
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# 特性集对齐主工程 windows 0.62(见 G:\qidiwork\Cargo.toml workspace deps)
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+# 维持 deny:M2 的 Job Object(windows crate)在具体 unsafe 块上用
+# #[allow(unsafe_code)] + SAFETY 注释逐处放行,不做全局放宽
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"

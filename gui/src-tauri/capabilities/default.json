@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口能力集。授权纪律:新增插件/命令时逐条追加,禁止批量放开(方案 v2 D4 安全基线)。",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:default",
+    "core:app:default",
+    "core:window:default"
+  ]
+}

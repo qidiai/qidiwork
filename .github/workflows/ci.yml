@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  PROTOC: ${{ github.workspace }}/bin/bin/protoc.exe
 
 jobs:
   check:
@@ -18,6 +17,14 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
+
+      # cf-proto-build's find_protoc falls back to `protoc` on $PATH;
+      # the repo's bin/protoc.exe is gitignored (local dev only, see .gitignore)
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.5"
+          registry-host: github.com
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -88,6 +95,12 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.5"
+          registry-host: github.com
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

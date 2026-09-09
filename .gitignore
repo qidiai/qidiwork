@@ -7,6 +7,8 @@ bin/protoc-*.tar.gz
 reference/
 *.phase3
 *.bak.phase3
+# 备份/损坏文件不入库,历史交给 git 管理
+*.bak*
 
 # External tool caches & local run artifacts (not part of the codebase)
 .hologram/

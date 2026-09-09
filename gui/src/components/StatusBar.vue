@@ -1,11 +1,30 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
 
-// 底部状态栏。左侧内核状态由 M2(ACP 桥)驱动;右侧版本号通过
-// IPC 命令 app_version 取回,同时充当 M1 的 IPC 通路冒烟验证。
+// 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
+const { connected, sessionId } = useAgentState();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
+const recovering = ref(false);
+
+const kernelLabel = computed(() =>
+  connected.value ? `已连接 · ${sessionId.value || "会话就绪"}` : "未连接",
+);
+
+async function recover() {
+  recovering.value = true;
+  try {
+    await recoverAgent();
+  } finally {
+    recovering.value = false;
+  }
+}
+
+async function newSession() {
+  await startSession();
+}
 
 onMounted(async () => {
   try {
@@ -20,9 +39,13 @@ onMounted(async () => {
 <template>
   <footer class="status-bar">
     <span class="status-item">
-      <span class="dot off"></span>
-      内核未连接
+      <span class="dot" :class="connected ? 'on' : 'off'"></span>
+      {{ kernelLabel }}
     </span>
+    <button v-if="!connected" class="link-btn" :disabled="recovering" @click="recover">
+      {{ recovering ? "恢复中…" : "恢复会话" }}
+    </button>
+    <button v-else class="link-btn" @click="newSession">新会话</button>
     <span class="spacer"></span>
     <span class="status-item muted">
       GUI v{{ guiVersion }}
@@ -66,5 +89,17 @@ onMounted(async () => {
 
 .dot.off {
   background: var(--text-disabled);
+}
+
+.dot.on {
+  background: var(--success);
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: var(--font-size-sm);
+  padding: 0;
 }
 </style>

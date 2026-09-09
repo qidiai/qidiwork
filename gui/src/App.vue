@@ -3,6 +3,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import MainTabs from "./components/MainTabs.vue";
 import ArtifactPanel from "./components/ArtifactPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
+import PermissionDialog from "./components/PermissionDialog.vue";
 </script>
 
 <template>
@@ -13,6 +14,7 @@ import StatusBar from "./components/StatusBar.vue";
       <ArtifactPanel />
     </div>
     <StatusBar />
+    <PermissionDialog />
   </div>
 </template>
 

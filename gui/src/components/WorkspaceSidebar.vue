@@ -1,19 +1,30 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted } from "vue";
+import { startSession, pushSystem, useAgentState } from "../composables/useAgent";
+import { initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 
-// 左区:任务工作区列表 + 常用技能入口。
-// M1 为静态骨架;工作区数据与技能发现分别在 P1 接入(读 ~/.qidi/office-workspaces 与 SKILL.md)。
-interface WorkspaceItem {
-  id: string;
-  name: string;
-  active: boolean;
+async function newSession() {
+  try {
+    await startSession();
+  } catch (e) {
+    pushSystem(`开启会话失败:${String(e)}`);
+  }
 }
 
-// 占位数据:真实列表由 M2 内核接入后的 P1 模块替换
-const workspaces = ref<WorkspaceItem[]>([
-  { id: "default", name: "default", active: true },
-]);
+const { connected } = useAgentState();
+
+const { workspaces, currentTask } = useOfficeState();
+
+onMounted(async () => {
+  await initOffice();
+});
+
+// 左区:任务工作区列表(真实数据)+ 常用技能入口(技能面板 P1b 接入)。
 const skills = ["标书编写", "周报汇总", "文档转换", "图纸生成"];
+
+function pick(name: string): void {
+  if (name !== currentTask.value) void switchTask(name);
+}
 </script>
 
 <template>
@@ -22,16 +33,25 @@ const skills = ["标书编写", "周报汇总", "文档转换", "图纸生成"];
       <div class="section-row">
         <span class="section-title">任务工作区</span>
       </div>
-      <button class="new-task" disabled title="内核接入后可用(P0/M2)">+ 新建任务</button>
+      <button
+        class="new-task"
+        :disabled="!connected"
+        :title="connected ? '开启新会话' : '内核未连接,发送任务后自动开启'"
+        @click="newSession"
+      >
+        + 新建任务
+      </button>
       <ul class="ws-list">
         <li
           v-for="ws in workspaces"
-          :key="ws.id"
+          :key="ws.name"
           class="ws-item"
-          :class="{ active: ws.active }"
+          :class="{ active: ws.name === currentTask }"
+          @click="pick(ws.name)"
         >
-          <span class="ws-dot" :class="{ on: ws.active }"></span>
+          <span class="ws-dot" :class="{ on: ws.name === currentTask }"></span>
           <span class="ws-name">{{ ws.name }}</span>
+          <span class="ws-count">{{ ws.artifact_count }}</span>
         </li>
       </ul>
     </div>
@@ -44,7 +64,7 @@ const skills = ["标书编写", "周报汇总", "文档转换", "图纸生成"];
           :key="skill"
           class="skill-chip"
           disabled
-          title="内核接入后可用(P0/M2)"
+          title="技能面板在 P1 接入(读取 ~/.qidi/skills)"
         >
           {{ skill }}
         </button>

@@ -1,25 +1,98 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, nextTick, computed } from "vue";
+import { useAgentState, sendTask, cancelTurn, initAgent } from "../composables/useAgent";
+import { renderMarkdown, handleLinkClick } from "../services/render";
 
-// 对话区。M1 为静态骨架:内核状态由 M2(ACP 桥)接入后启用输入,
-// 消息流 / 工具调用折叠 / 流式渲染在 M4 实现。
+const { messages, connected, turnInProgress, permission } = useAgentState();
 const draft = ref("");
+const msgBox = ref<HTMLElement | null>(null);
 
-function send() {
-  // M2/M3 接入 ACP session/prompt 后实现
+// 外链点击统一拦截(系统浏览器打开,webview 不导航)。
+function onMsgClick(e: MouseEvent): void {
+  handleLinkClick(e);
 }
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case "completed":
+      return "✓ 完成";
+    case "failed":
+      return "✗ 失败";
+    case "in_progress":
+      return "运行中…";
+    default:
+      return status || "等待中…";
+  }
+}
+
+async function send() {
+  const text = draft.value.trim();
+  if (!text || turnInProgress.value) return;
+  draft.value = "";
+  await sendTask(text);
+  await scrollToBottom();
+}
+
+async function scrollToBottom() {
+  await nextTick();
+  msgBox.value?.scrollTo({ top: msgBox.value.scrollHeight });
+}
+
+const placeholder = computed(() =>
+  connected.value
+    ? "输入任务…(Ctrl+Enter 发送)"
+    : "发送任务将自动连接内核并开启会话",
+);
+
+// 首次进入即初始化事件监听(幂等)
+void initAgent();
 </script>
 
 <template>
   <div class="chat-view">
-    <div class="chat-scroll">
-      <div class="welcome">
+    <div ref="msgBox" class="chat-scroll" @click="onMsgClick" @scroll.passive>
+      <div v-if="messages.length === 0" class="welcome">
         <div class="welcome-icon">Q</div>
         <h1 class="welcome-title">QIDI 办公工作台</h1>
         <p class="welcome-sub">用一句话下达办公任务:写标书、做周报、转换文档、生成图纸</p>
         <div class="welcome-tips">
           <span class="tip">试试:「根据附件大纲生成立标函初稿」</span>
           <span class="tip">试试:「把这周会议纪要整理成周报」</span>
+        </div>
+      </div>
+
+      <div v-for="msg in messages" :key="msg.id" class="msg-row" :class="msg.role">
+        <span class="msg-badge">{{
+          msg.role === "user" ? "我" : msg.role === "assistant" ? "QIDI" : "系统"
+        }}</span>
+        <div class="msg-body">
+          <!-- eslint-disable-next-line vue/no-v-html: 内容已经 DOMPurify 消毒 -->
+          <div
+            v-if="msg.role !== 'user'"
+            class="msg-content md"
+            v-html="renderMarkdown(msg.content)"
+          ></div>
+          <div v-else class="msg-content user-text">{{ msg.content }}</div>
+
+          <details
+            v-for="tool in msg.toolCalls"
+            :key="tool.toolCallId"
+            class="tool-call"
+          >
+            <summary>
+              <span class="tool-status" :data-status="tool.status">{{
+                statusLabel(tool.status)
+              }}</span>
+              {{ tool.title }}
+            </summary>
+            <pre class="tool-raw">{{ JSON.stringify(tool.raw, null, 2) }}</pre>
+          </details>
+
+          <span
+            v-if="msg.role === 'assistant' && !msg.done"
+            class="typing"
+            aria-label="生成中"
+          ></span>
         </div>
       </div>
     </div>
@@ -29,10 +102,22 @@ function send() {
         v-model="draft"
         class="composer-input"
         rows="2"
-        placeholder="内核未连接 · ACP 桥接入后可用(方案 P0/M2)"
-        disabled
+        :placeholder="placeholder"
+        :disabled="turnInProgress || !!permission"
+        @keydown.ctrl.enter.prevent="send"
+        @keydown.meta.enter.prevent="send"
       ></textarea>
-      <button class="composer-send" :disabled="true" @click="send">发送</button>
+      <button
+        v-if="!turnInProgress"
+        class="composer-send"
+        :disabled="!draft.trim() || !!permission"
+        @click="send"
+      >
+        发送
+      </button>
+      <button v-else class="composer-send cancel" @click="cancelTurn()">
+        中止
+      </button>
     </div>
   </div>
 </template>
@@ -48,15 +133,13 @@ function send() {
 .chat-scroll {
   flex: 1;
   overflow-y: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  padding: 18px 20px;
 }
 
 .welcome {
   text-align: center;
   max-width: 520px;
-  padding: 24px;
+  margin: 8vh auto 0;
 }
 
 .welcome-icon {
@@ -97,6 +180,105 @@ function send() {
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 4px 12px;
+}
+
+.msg-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+  align-items: flex-start;
+}
+
+.msg-badge {
+  flex: none;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  margin-top: 2px;
+}
+
+.msg-row.user .msg-badge {
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+}
+
+.msg-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.msg-content {
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.msg-row.assistant .msg-content {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.msg-row.system .msg-content {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.user-text {
+  white-space: pre-wrap;
+}
+
+.tool-call {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: var(--font-size-sm);
+}
+
+.tool-call summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+}
+
+.tool-status {
+  margin-right: 6px;
+  color: var(--accent);
+}
+
+.tool-status[data-status="failed"] {
+  color: var(--danger);
+}
+
+.tool-status[data-status="completed"] {
+  color: var(--success);
+}
+
+.tool-raw {
+  margin: 0;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  max-height: 220px;
+  overflow: auto;
+  font-size: var(--font-size-sm);
+}
+
+/* 极简打点动画 */
+.typing::after {
+  content: "…";
+  animation: blink 1.2s steps(3) infinite;
+  color: var(--text-disabled);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0.3;
+  }
 }
 
 .composer {
@@ -141,5 +323,9 @@ function send() {
 .composer-send:disabled {
   background: var(--accent-soft);
   color: var(--text-disabled);
+}
+
+.composer-send.cancel {
+  background: var(--danger);
 }
 </style>

@@ -25,30 +25,21 @@ async fn recv_line(rx: &mut tokio::sync::mpsc::Receiver<String>) -> String {
 }
 
 #[tokio::test]
-async fn spawn_mock_echo_roundtrip() {
+async fn spawn_mock_jsonrpc_roundtrip() {
     let proc = AgentProcess::spawn(mock_cfg()).await.unwrap();
     assert!(proc.is_running());
     let mut rx = proc.take_line_receiver().unwrap();
 
-    let lines = vec![
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":2,"method":"session/new"}"#.to_string(),
-        r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt"}"#.to_string(),
-    ];
-    for line in &lines {
-        proc.send(line.clone()).unwrap();
-    }
-
-    // mock 对每行先发一条通知再回显应答 → 共 6 行,应答 id 可回查。
-    let mut ids = Vec::new();
-    for _ in 0..(lines.len() * 2) {
-        let line = recv_line(&mut rx).await;
-        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
-        if v.get("result").is_some() {
-            ids.push(v["id"].as_i64().unwrap());
-        }
-    }
-    assert_eq!(ids, vec![1, 2, 3]);
+    // mock 现为迷你 ACP 服务器:initialize 握手应答 protocolVersion=1
+    // (旧 echo 语义已随 M3 协议化移除,详见 mock_agent.rs)。
+    proc.send(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}"#.into(),
+    )
+    .unwrap();
+    let line = recv_line(&mut rx).await;
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["result"]["protocolVersion"], 1);
 
     proc.shutdown().await;
     assert!(!proc.is_running());

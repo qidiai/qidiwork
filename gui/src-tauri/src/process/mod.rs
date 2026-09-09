@@ -43,7 +43,11 @@ impl SpawnConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "qidi".to_string()),
-            args: vec!["agent".into(), "--stdio".into()],
+            // 参数同样可覆盖(联调指向本二进制 --mock-agent 时使用)
+            args: std::env::var("QIDIWORK_AGENT_ARGS")
+                .ok()
+                .map(|a| a.split_whitespace().map(String::from).collect())
+                .unwrap_or_else(|| vec!["agent".into(), "--stdio".into()]),
             cwd,
         }
     }
@@ -218,23 +222,25 @@ impl AgentTransport for AgentProcess {
         self.kill.try_send(()).ok();
     }
 
-    async fn shutdown(&self) {
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         // 先订阅后终止:否则快速退出的 ExitInfo 会在 subscribe 之前发出,
         // 被错过,导致本函数空等 10s 超时(k3 M2 审计 P0-3)。
-        let mut rx = self.exit.subscribe();
-        self.terminate();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(_)) => return,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
-                Err(_) => {
-                    tracing::warn!("agent 退出等待超时(10s),继续");
-                    return;
+        Box::pin(async move {
+            let mut rx = self.exit.subscribe();
+            self.terminate();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Ok(_)) => return,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+                    Err(_) => {
+                        tracing::warn!("agent 退出等待超时(10s),继续");
+                        return;
+                    }
                 }
             }
-        }
+        })
     }
 }
 

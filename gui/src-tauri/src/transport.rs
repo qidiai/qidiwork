@@ -78,6 +78,6 @@ pub trait AgentTransport: Send + Sync + 'static {
     /// 退出通知仍会经 `subscribe_exit` 送达。
     fn terminate(&self);
     /// 终止并等待进程完全退出。
-    /// (RPITIT 而非 `async fn`,显式要求 Send——Tauri 侧要 spawn 它。)
-    fn shutdown(&self) -> impl std::future::Future<Output = ()> + Send;
+    /// 装箱 Future(RPITIT 不可 dyn,桥需要 `Arc<dyn AgentTransport>`)。
+    fn shutdown(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }

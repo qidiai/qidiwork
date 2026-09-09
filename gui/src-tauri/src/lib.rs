@@ -4,10 +4,13 @@
 //! `--mock-agent` 分支不可达;拆分后集成测试经 `CARGO_BIN_EXE_qidiwork-gui`
 //! 拿到真实应用二进制,传输层测试spawn 真实 exe 的 mock 分支。
 
+pub mod acp;
 pub mod commands;
 pub mod logging;
 #[cfg(any(test, debug_assertions))]
 pub mod mock_agent; // 生产 release 不暴露 --mock-agent 分支(缩小暴露面)
+pub mod office;
+pub mod persist;
 pub mod process;
 pub mod transport;
 
@@ -18,6 +21,7 @@ pub fn run() -> i32 {
     let builder = tauri::Builder::default()
         // single-instance 必须第一个注册(审计决策:办公场景禁止多开,
         // 多开 = 多 agent 进程 + office-workspaces 重复 fsnotify)。
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -27,15 +31,26 @@ pub fn run() -> i32 {
             app_version,
             commands::agent_start,
             commands::agent_stop,
-            commands::agent_send,
-            commands::agent_status
+            commands::agent_status,
+            commands::session_start,
+            commands::session_prompt,
+            commands::session_cancel,
+            commands::permission_respond,
+            commands::permission_cancel,
+            commands::agent_recover,
+            commands::office_scan,
+            commands::office_artifacts,
+            commands::office_open,
+            commands::office_watch_start
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "QidiWork GUI 启动");
             Ok(())
         })
-        .manage(commands::AgentState::default());
+        .manage(commands::AgentState::default())
+        .manage(commands::BridgeState::default())
+        .manage(commands::OfficeState::default());
 
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,

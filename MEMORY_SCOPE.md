@@ -9,7 +9,7 @@
 | 跨项目全局记忆 `~/.qidi/memory/MEMORY.md` | ✅ 有效 |
 | `qidi memory clear/status` 命令 | ✅ 有效 |
 | `/memory` 浏览器(TUI 内) | ✅ 有效 |
-| `[memory] scope` 配置键 | ❌ **无效占位**(解析器无此字段,静默忽略) |
+| `[memory] scope` 配置键 | ❌ **无效占位**(解析时警告但忽略,实际行为始终为 workspace-hash + 全局 MEMORY.md) |
 | `qidi memory scope <mode>` | ❌ 只打印提示,不落盘不生效 |
 | `QIDI_MEMORY_SCOPE` 环境变量 | ❌ 代码中不存在 |
 | `instance-{pid}/`、`shared/` 目录 | ❌ 从未实现 |

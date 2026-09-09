@@ -53,12 +53,6 @@ pub struct MemoryConfig {
     /// Per-agent memory root override (e.g. `~/.qidi/agent-memory/<name>/`).
     #[serde(skip)]
     pub root_dir_override: Option<std::path::PathBuf>,
-    /// **Not implemented.** `[memory] scope` is parsed only so that setting it
-    /// produces an explicit warning instead of being silently ignored by
-    /// serde. Memory is always workspace-hash scoped plus a global
-    /// `~/.qidi/memory/MEMORY.md`; there is no user-selectable scope mode.
-    #[serde(default)]
-    pub scope: Option<String>,
     /// When true, the root is already project-scoped so MemoryStorage should
     /// skip the workspace hash subdirectory (use `new_flat` instead of `new`).
     #[serde(skip)]
@@ -86,7 +80,7 @@ impl MemoryConfig {
             .get("memory")
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
-        if result.scope.is_some() {
+        if config.get("memory").and_then(|m| m.get("scope")).is_some() {
             tracing::warn!(
                 target: "config",
                 "[memory] scope is set in config.toml but NOT implemented; \

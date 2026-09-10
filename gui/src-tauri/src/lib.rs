@@ -41,6 +41,7 @@ pub fn run() -> i32 {
             commands::office_scan,
             commands::office_artifacts,
             commands::office_open,
+            commands::office_read_file,
             commands::office_watch_start
         ])
         .setup(|app| {

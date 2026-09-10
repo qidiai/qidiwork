@@ -42,6 +42,8 @@ tools/media-gen-agent/agnes_config.json.*
 # ---- Tauri / Vue 前端 (qidiwork GUI) ----
 gui/node_modules/
 gui/dist/
+# docx 预览保真度 spike(一次性验证,结论留档 docs/ 工作记录,不入库)
+gui/spike-docx/
 gui/src-tauri/target/
 gui/src-tauri/gen/schemas/
 *.log

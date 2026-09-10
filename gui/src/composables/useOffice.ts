@@ -59,7 +59,14 @@ export async function switchTask(name: string): Promise<void> {
 
 /** 用系统默认程序打开产物(白名单+路径约束在 Rust 侧)。 */
 export async function openArtifact(card: ArtifactCard): Promise<void> {
-  await invoke("office_open", { path: card.path });
+  // office_open 按 (task, name) 服务端重读 manifest 校验(k3 P1a 审计 P1),
+  // 不接受裸路径——传 card.path 会被拒绝。
+  await invoke("office_open", { task: currentTask.value, name: card.name });
+}
+
+/** 预览降级路径:直接按 task+name 唤起系统程序。 */
+export async function openPreviewArtifact(task: string, name: string): Promise<void> {
+  await invoke("office_open", { task, name });
 }
 
 export function useOfficeState() {

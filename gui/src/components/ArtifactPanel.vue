@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // 右区:产物面板。数据来自 office-artifact 技能登记的 manifest
 // (~/.qidi/office-workspaces/<task>/manifest.json),office-event 实时刷新。
-// 「打开」= 系统默认程序(WPS 等);「预览」Tab 在 P1b 接入。
+// 「打开」= 系统默认程序(WPS 等);「预览」= 中区 docx 预览 Tab
+// (DocxPreview.vue,矢量图形文档自动降级为系统打开)。
 import { initOffice, openArtifact, useOfficeState, type ArtifactCard } from "../composables/useOffice";
+import { openPreview, previewKey } from "../composables/usePreview";
 import { pushSystem } from "../composables/useAgent";
 
 async function open(card: ArtifactCard): Promise<void> {
@@ -11,6 +13,15 @@ async function open(card: ArtifactCard): Promise<void> {
   } catch (e) {
     pushSystem(`打开失败:${String(e)}`);
   }
+}
+
+/** 产物卡片 → 中区预览 Tab(重复点同一产物=激活已有 Tab) */
+function preview(card: ArtifactCard): void {
+  openPreview({
+    key: previewKey(currentTask.value, card.name),
+    task: currentTask.value,
+    name: card.name,
+  });
 }
 
 const { currentTask, artifacts } = useOfficeState();
@@ -62,7 +73,7 @@ function iconFor(name: string): string {
               <span v-if="card.skill" class="skill-tag">{{ card.skill }}</span>
             </div>
             <div class="card-actions">
-              <button class="act" disabled title="预览在 P1b 接入">预览</button>
+              <button class="act" @click="preview(card)">预览</button>
               <button class="act primary" @click="open(card)">打开</button>
             </div>
           </li>

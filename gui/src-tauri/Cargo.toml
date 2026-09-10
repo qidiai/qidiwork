@@ -25,6 +25,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 notify = "7"
 dunce = "1"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 # 特性集对齐主工程 windows 0.62(见 G:\qidiwork\Cargo.toml workspace deps)

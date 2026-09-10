@@ -2805,6 +2805,7 @@ dependencies = [
 name = "qidiwork-gui"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dunce",
  "notify",
  "serde",

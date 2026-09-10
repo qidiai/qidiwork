@@ -441,3 +441,50 @@ pub async fn office_open(app: AppHandle, task: String, name: String) -> Result<(
     office::open_in_system(&canonical);
     Ok(())
 }
+
+/// 预览读取上限:标书正文 1-2MB 级,留足余量;超限引导走系统打开。
+const PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 预览读取产物字节(base64 返回)。与 office_open 同一道校验链:
+/// manifest 已登记 → 扩展名白名单 → canonicalize 根约束,另加大小上限。
+#[tauri::command]
+pub async fn office_read_file(
+    app: AppHandle,
+    task: String,
+    name: String,
+) -> Result<String, String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    let root = office::workspaces_root(&home);
+    let manifest = office::read_manifest(&root, &task)?;
+    let card = manifest
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| format!("产物 {name} 未登记于任务 {task}"))?;
+    let canonical = office::open_allowed(&card.path, &root)?;
+    // 预检给出带实际大小的明确错误;强制上限由下方 take() 保证——
+    // metadata 与读取之间文件可能被替换膨胀,读后再验一次(deepseek 审计 W1)。
+    let size = std::fs::metadata(&canonical)
+        .map_err(|e| format!("读取元数据失败: {e}"))?
+        .len();
+    if size > PREVIEW_MAX_BYTES {
+        return Err(format!(
+            "文件 {}MB 超过预览上限 {}MB",
+            size / (1024 * 1024),
+            PREVIEW_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    use std::io::Read as _;
+    let file = std::fs::File::open(&canonical).map_err(|e| format!("打开文件失败: {e}"))?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(PREVIEW_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取失败: {e}"))?;
+    if bytes.len() as u64 > PREVIEW_MAX_BYTES {
+        return Err(format!(
+            "文件在读取期间增长,超过预览上限 {}MB",
+            PREVIEW_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}

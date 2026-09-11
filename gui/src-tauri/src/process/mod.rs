@@ -43,11 +43,20 @@ impl SpawnConfig {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
                 .unwrap_or_else(|| "qidi".to_string()),
-            // 参数同样可覆盖(联调指向本二进制 --mock-agent 时使用)
+            // 参数同样可覆盖(联调指向本二进制 --mock-agent 时使用)。
+            // 内核新版为子命令式 `agent stdio`(旧 --stdio 旗标已移除)。
+            // --ack-no-sandbox:用户配置 always-approve 即全开 YOLO 时,
+            // Windows 无 OS 沙箱,内核要求显式确认风险(不改变授权策略)
             args: std::env::var("QIDIWORK_AGENT_ARGS")
                 .ok()
                 .map(|a| a.split_whitespace().map(String::from).collect())
-                .unwrap_or_else(|| vec!["agent".into(), "--stdio".into()]),
+                .unwrap_or_else(|| {
+                    vec![
+                        "agent".into(),
+                        "--ack-no-sandbox".into(),
+                        "stdio".into(),
+                    ]
+                }),
             cwd,
         }
     }

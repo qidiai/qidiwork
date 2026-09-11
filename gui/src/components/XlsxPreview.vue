@@ -3,8 +3,9 @@
 // 纯 DOM 建表(安全边界见 services/sheetPreview.ts 头注)。
 import { ref, nextTick, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import type { WorkBook } from "xlsx";
 import { base64ToBytes } from "../services/docxPreview";
-import { parseWorkbook, releaseWorkbook, renderSheet } from "../services/sheetPreview";
+import { parseWorkbook, renderSheet } from "../services/sheetPreview";
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";
 
@@ -20,6 +21,8 @@ const sheetNames = ref<string[]>([]);
 const activeSheet = ref("");
 const truncated = ref(false);
 const containerRef = ref<HTMLElement | null>(null);
+// workbook 由组件实例持有:模块级缓存会在异步加载期间被其他实例串档(k3 补充审计)
+let wb: WorkBook | null = null;
 
 async function load(): Promise<void> {
   phase.value = { kind: "loading" };
@@ -31,7 +34,9 @@ async function load(): Promise<void> {
       name: props.name,
     });
     const bytes = base64ToBytes(b64);
-    sheetNames.value = parseWorkbook(bytes);
+    const parsed = parseWorkbook(bytes);
+    wb = parsed.wb;
+    sheetNames.value = parsed.names;
     if (sheetNames.value.length === 0) {
       phase.value = { kind: "error", message: "工作簿不含任何工作表" };
       return;
@@ -46,9 +51,9 @@ async function load(): Promise<void> {
 }
 
 async function showSheet(name: string): Promise<void> {
-  if (!containerRef.value) return;
+  if (!wb || !containerRef.value) return;
   activeSheet.value = name;
-  const result = renderSheet(name, containerRef.value);
+  const result = renderSheet(wb, name, containerRef.value);
   truncated.value = result.truncated;
 }
 
@@ -61,7 +66,9 @@ async function openInSystem(): Promise<void> {
 }
 
 onMounted(load);
-onUnmounted(releaseWorkbook);
+onUnmounted(() => {
+  wb = null;
+});
 </script>
 
 <template>

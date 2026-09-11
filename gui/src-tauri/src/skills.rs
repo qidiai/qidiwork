@@ -49,10 +49,12 @@ fn parse_frontmatter(raw: &str) -> (Option<String>, Option<String>) {
             continue;
         };
         let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
+        // 对称剥成对双/单引号(k3 补充审计:单引号值原样带引号展示)
+        let value = match (value.strip_prefix('"'), value.strip_prefix('\'')) {
+            (Some(v2), _) => v2.strip_suffix('"').unwrap_or(v2),
+            (None, Some(v2)) => v2.strip_suffix('\'').unwrap_or(v2),
+            (None, None) => value,
+        };
         match key.trim() {
             "name" if name.is_none() => name = Some(value.to_string()),
             "description" if description.is_none() => description = Some(value.to_string()),

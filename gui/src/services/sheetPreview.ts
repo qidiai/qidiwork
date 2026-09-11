@@ -13,19 +13,14 @@ export const MAX_SHEET_COLS = 100;
  * (防御纵深;SheetJS 0.20.2+ 已修解析期原型污染,见官方 advisories)。 */
 const UNSAFE_SHEET_NAME = /^(__proto__|constructor|prototype)$/;
 
-/** 解析一次并缓存:同一文件的 listSheets/renderSheet 共享 workbook,
- * 避免重复解析(大文件内存翻倍)。组件卸载时调用 releaseWorkbook。 */
-let cachedWb: WorkBook | null = null;
-
-export function parseWorkbook(bytes: Uint8Array): string[] {
-  cachedWb = XLSX.read(bytes, { type: "array" });
-  return cachedWb.SheetNames.filter(
-    (name) => !UNSAFE_SHEET_NAME.test(name),
-  );
-}
-
-export function releaseWorkbook(): void {
-  cachedWb = null;
+/** 解析工作簿返回 sheet 名列表。workbook 实例交由调用方组件持有
+ * (模块级缓存会跨组件串档:k3 补充审计),卸载时随组件 GC。 */
+export function parseWorkbook(
+  bytes: Uint8Array,
+): { names: string[]; wb: WorkBook } {
+  const wb = XLSX.read(bytes, { type: "array" });
+  const names = wb.SheetNames.filter((name) => !UNSAFE_SHEET_NAME.test(name));
+  return { names, wb };
 }
 
 export interface SheetRenderResult {
@@ -36,20 +31,21 @@ export interface SheetRenderResult {
 
 /** 把指定 sheet 的前 MAX 行/列渲染为 DOM 表格追加到 container。 */
 export function renderSheet(
+  wb: WorkBook,
   sheetName: string,
   container: HTMLElement,
 ): SheetRenderResult {
   if (UNSAFE_SHEET_NAME.test(sheetName)) {
     throw new Error("非法工作表名");
   }
-  const wb = cachedWb;
-  if (!wb) throw new Error("工作簿未解析");
   const ws = wb.Sheets[sheetName];
   if (!ws) throw new Error(`工作表 ${sheetName} 不存在`);
   const ref = ws["!ref"] ?? "A1";
   const total = XLSX.utils.decode_range(ref);
-  const endRow = Math.min(total.e.r, MAX_SHEET_ROWS - 1);
-  const endCol = Math.min(total.e.c, MAX_SHEET_COLS - 1);
+  // 上限基于数据区起始行偏移:起始行本身就 >MAX 的 sheet 不能算出
+  // e < s 的非法 range(k3 补充审计)
+  const endRow = Math.min(total.e.r, total.s.r + MAX_SHEET_ROWS - 1);
+  const endCol = Math.min(total.e.c, total.s.c + MAX_SHEET_COLS - 1);
   // range 截断在解析侧完成,避免为超大表物化全量数组
   const grid: string[][] = XLSX.utils.sheet_to_json(ws, {
     header: 1,

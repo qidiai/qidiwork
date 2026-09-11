@@ -6,7 +6,7 @@
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { initNotifyPermission, isWindowFocused, notify } from "../services/notify";
+import { initNotifyPermission, isWindowFocused, notify, notifyThrottled } from "../services/notify";
 
 export interface ToolCallItem {
   toolCallId: string;
@@ -102,9 +102,13 @@ async function onAcpEvent(ev: AcpEvent) {
         title: ev.tool_call?.title ?? "agent 请求权限",
         options: ev.options ?? [],
       };
-      // 失焦时系统提醒,办公用户切走窗口也不错过审批(P2)
+      // 失焦时系统提醒,办公用户切走窗口也不错过审批(P2);同 title 节流
       if (!isWindowFocused()) {
-        notify("QIDI 办公工作台", `等待权限审批:${permission.value.title}`);
+        notifyThrottled(
+          permission.value.title,
+          "QIDI 办公工作台",
+          `等待权限审批:${permission.value.title}`,
+        );
       }
       break;
     case "turn_completed":
@@ -112,8 +116,15 @@ async function onAcpEvent(ev: AcpEvent) {
       {
         const last = messages.value[messages.value.length - 1];
         if (last && last.role === "assistant") last.done = true;
-        if ((ev.stop_reason ?? "").startsWith("error:")) {
-          lastError.value = ev.stop_reason ?? "";
+        const reason = ev.stop_reason ?? "";
+        if (reason.startsWith("error:")) {
+          lastError.value = reason;
+          if (!isWindowFocused()) {
+            // 出错恰是最需要召回的场景(k3 审计),失焦必通知
+            notify("QIDI 办公工作台", "任务出错,点击窗口查看详情。");
+          }
+        } else if (reason === "cancelled" || reason === "rejected") {
+          // 用户主动取消/拒绝,无需召回自己
         } else if (!isWindowFocused()) {
           // 失焦时系统提醒任务完成(P2)
           notify("QIDI 办公工作台", "任务已完成,点击窗口查看结果。");

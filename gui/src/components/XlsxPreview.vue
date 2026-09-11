@@ -52,9 +52,14 @@ async function load(): Promise<void> {
 
 async function showSheet(name: string): Promise<void> {
   if (!wb || !containerRef.value) return;
-  activeSheet.value = name;
-  const result = renderSheet(wb, name, containerRef.value);
-  truncated.value = result.truncated;
+  // 渲染异常(如损坏的 !ref)落 error 相位,不静默失败(k3 补充审计)
+  try {
+    activeSheet.value = name;
+    const result = renderSheet(wb, name, containerRef.value);
+    truncated.value = result.truncated;
+  } catch (e) {
+    phase.value = { kind: "error", message: String(e) };
+  }
 }
 
 async function openInSystem(): Promise<void> {

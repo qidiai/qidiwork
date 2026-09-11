@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 pub struct PersistedSession {
     pub session_id: String,
     pub cwd: String,
+    /// 会话标题(首条任务截断,前端在首条 prompt 后回写)。
+    /// 旧版 sessions.json 无此字段,serde default 保持可读。
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// 读全部持久化会话。文件不存在/损坏 → 空列表(损坏文件改名留证)。
@@ -66,6 +70,21 @@ pub fn remove_session(dir: &Path, session_id: &str) -> std::io::Result<()> {
     save_sessions(dir, &list)
 }
 
+/// 设置会话标题(不存在则 NotFound)。
+pub fn set_title(dir: &Path, session_id: &str, title: &str) -> std::io::Result<()> {
+    let mut list = load_sessions(dir);
+    match list.iter_mut().find(|s| s.session_id == session_id) {
+        Some(s) => {
+            s.title = Some(title.to_string());
+            save_sessions(dir, &list)
+        }
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "会话未登记",
+        )),
+    }
+}
+
 /// 便于测试:使用调用方给定的目录。
 pub fn temp_dir_for_test() -> Option<PathBuf> {
     Some(std::env::temp_dir().join(format!("qidiwork-test-{}", std::process::id())))
@@ -97,6 +116,7 @@ mod tests {
             PersistedSession {
                 session_id: "a".into(),
                 cwd: "C:\\ws".into(),
+                title: None,
             },
         )
         .unwrap();
@@ -105,6 +125,7 @@ mod tests {
             PersistedSession {
                 session_id: "a".into(),
                 cwd: "C:\\ws2".into(),
+                title: None,
             },
         )
         .unwrap();
@@ -113,6 +134,7 @@ mod tests {
             PersistedSession {
                 session_id: "b".into(),
                 cwd: "C:\\ws".into(),
+                title: None,
             },
         )
         .unwrap();
@@ -142,4 +164,38 @@ mod tests {
             "损坏文件应改名留证(带时间戳)"
         );
     }
+    #[test]
+    fn set_title_roundtrip() {
+        let dir = fresh_dir("title");
+        upsert_session(
+            &dir,
+            PersistedSession {
+                session_id: "s1".into(),
+                cwd: "C:\\ws".into(),
+                title: None,
+            },
+        )
+        .unwrap();
+        set_title(&dir, "s1", "写标书任务").unwrap();
+        let list = load_sessions(&dir);
+        assert_eq!(list[0].title.as_deref(), Some("写标书任务"));
+        // 未登记会话报错
+        assert!(set_title(&dir, "ghost", "x").is_err());
+    }
+
+    #[test]
+    fn legacy_file_without_title_field_loads() {
+        let dir = fresh_dir("legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧版字段集(无 title):serde default 必须可读
+        std::fs::write(
+            dir.join("sessions.json"),
+            r#"[{"session_id":"old","cwd":"C:\\ws"}]"#,
+        )
+        .unwrap();
+        let list = load_sessions(&dir);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, None);
+    }
+
 }

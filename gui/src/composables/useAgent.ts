@@ -50,6 +50,8 @@ const permission = ref<PermissionState | null>(null);
 const lastError = ref("");
 let messageId = 0;
 let listenersBound = false;
+/** 当前会话是否已记标题(首条 prompt 回写;恢复的会话保持 true 不覆盖) */
+let titleRecorded = false;
 
 function pushAssistantChunk(session: string, text: string) {
   // 只有一个活动会话(M3 单 session_start 契约);sessionId 不匹配时忽略
@@ -143,8 +145,12 @@ async function onAcpEvent(ev: AcpEvent) {
       });
       break;
     case "session_restored":
-      if (ev.session_id) sessionId.value = ev.session_id;
-      connected.value = true;
+      if (ev.session_id) {
+        sessionId.value = ev.session_id;
+        connected.value = true;
+        // 恢复的会话标题已在登记簿里,首条 prompt 不覆盖
+        titleRecorded = true;
+      }
       messages.value.push({
         id: ++messageId,
         role: "system",
@@ -185,6 +191,7 @@ export async function initAgent(): Promise<void> {
 export async function startSession(cwd?: string): Promise<void> {
   sessionId.value = await invoke<string>("session_start", { cwd: cwd ?? null });
   connected.value = true;
+  titleRecorded = false; // 新会话:首条 prompt 记为标题
   messages.value.push({
     id: ++messageId,
     role: "system",
@@ -226,6 +233,14 @@ export async function sendTask(text: string): Promise<void> {
   turnInProgress.value = true;
   try {
     await invoke("session_prompt", { sessionId: sessionId.value, text: trimmed });
+    // 首条 prompt 截断记为会话标题(失败不影响任务下发)
+    if (!titleRecorded) {
+      titleRecorded = true;
+      void invoke("session_set_title", {
+        sessionId: sessionId.value,
+        title: trimmed.slice(0, 40),
+      }).catch(() => {});
+    }
   } catch (e) {
     turnInProgress.value = false;
     pushSystem(`任务下发失败:${String(e)}`);

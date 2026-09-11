@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { pushSystem, sendTask, startSession, useAgentState } from "../composables/useAgent";
 import { initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
@@ -13,7 +14,7 @@ async function newSession() {
   }
 }
 
-const { connected, turnInProgress } = useAgentState();
+const { connected, turnInProgress, sessionId } = useAgentState();
 
 const { workspaces, currentTask } = useOfficeState();
 const { skills } = useSkills();
@@ -36,6 +37,42 @@ async function runSkill(skill: SkillInfo): Promise<void> {
   }
 }
 
+// 历史会话(登记簿):展示 + 点击续接(agent 侧上下文经 session/load
+// 续上;界面消息不回放,历史内容仍在会话记录里)。
+interface HistoryEntry {
+  session_id: string;
+  cwd: string;
+  title: string | null;
+}
+const history = ref<HistoryEntry[]>([]);
+const resuming = ref(false);
+
+function historyLabel(h: HistoryEntry): string {
+  if (h.title) return h.title;
+  const task = h.cwd.split(/[\\/]/).pop() || h.cwd;
+  return `${task} · ${h.session_id.slice(0, 8)}`;
+}
+
+async function loadHistory(): Promise<void> {
+  try {
+    history.value = await invoke<HistoryEntry[]>("sessions_history");
+  } catch (e) {
+    pushSystem(`历史会话读取失败:${String(e)}`);
+  }
+}
+
+async function resumeSession(h: HistoryEntry): Promise<void> {
+  if (h.session_id === sessionId.value || turnInProgress.value || resuming.value) return;
+  resuming.value = true;
+  try {
+    await invoke("session_resume", { sessionId: h.session_id });
+  } catch (e) {
+    pushSystem(`恢复会话失败:${String(e)}`);
+  } finally {
+    resuming.value = false;
+  }
+}
+
 onMounted(async () => {
   await initOffice();
   try {
@@ -43,6 +80,7 @@ onMounted(async () => {
   } catch (e) {
     pushSystem(`技能列表加载失败:${String(e)}`);
   }
+  await loadHistory();
 });
 
 // 左区:任务工作区列表(真实数据)+ 常用技能入口(真实技能,office-*/bid-*)。
@@ -99,6 +137,23 @@ function pick(name: string): void {
         </button>
       </div>
       <p v-else class="skill-empty">未发现技能(读取 ~/.qidi/skills)</p>
+    </div>
+
+    <div v-if="history.length" class="section">
+      <span class="section-title">历史会话</span>
+      <ul class="ws-list">
+        <li
+          v-for="h in history"
+          :key="h.session_id"
+          class="ws-item"
+          :class="{ active: h.session_id === sessionId }"
+          :title="h.session_id === sessionId ? '当前会话' : '点击续接(agent 上下文恢复)'"
+          @click="resumeSession(h)"
+        >
+          <span class="ws-dot" :class="{ on: h.session_id === sessionId }"></span>
+          <span class="ws-name">{{ historyLabel(h) }}</span>
+        </li>
+      </ul>
     </div>
   </aside>
 </template>

@@ -476,6 +476,12 @@ impl AcpBridge {
         Ok(())
     }
 
+    /// 单会话恢复完成通知(session_resume 用):事件经 ensure_bridge 的
+    /// 转发链到前端,前端切 active sessionId。
+    pub fn notify_session_restored(&self, session_id: String) {
+        let _ = self.event_tx.send(BridgeEvent::SessionRestored { session_id });
+    }
+
     /// 发起回合:立即返回,回合完成经 [`BridgeEvent::TurnCompleted`] 通知
     /// (GUI 调用不应阻塞数分钟)。`self: &Arc<Self>` 以便等待任务克隆桥。
     /// 注意:30 分钟超时 ≠ 取消——超时只发错误事件,agent 仍在跑,

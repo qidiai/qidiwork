@@ -236,6 +236,7 @@ pub async fn session_start(
             PersistedSession {
                 session_id: session_id.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
+                title: None,
             },
         ) {
             tracing::warn!(%session_id, error = %e, "会话登记落盘失败");
@@ -446,6 +447,66 @@ pub async fn settings_save(
 ) -> Result<(), String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     settings::save_settings(&settings::config_path(&home), &model_id, api_key.as_deref())
+}
+
+/// 历史会话清单(侧栏「历史会话」)。
+#[tauri::command]
+pub async fn sessions_history(app: AppHandle) -> Result<Vec<PersistedSession>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .ok_or("无法解析数据目录")?;
+    Ok(persist::load_sessions(&dir))
+}
+
+/// 记录会话标题(前端在会话首条 prompt 后调用;截断在前端做)。
+#[tauri::command]
+pub async fn session_set_title(
+    app: AppHandle,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .ok_or("无法解析数据目录")?;
+    persist::set_title(&dir, &session_id, &title).map_err(|e| format!("标题记录失败: {e}"))
+}
+
+/// 恢复单个历史会话:ensure agent/桥 → session/load;SessionRestored
+/// 事件经既有转发到前端切换 active sessionId(界面消息不回放,历史
+/// 上下文在 agent 侧续接)。
+#[tauri::command]
+pub async fn session_resume(
+    app: AppHandle,
+    agent: State<'_, AgentState>,
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+) -> Result<(), String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .ok_or("无法解析数据目录")?;
+    let s = persist::load_sessions(&dir)
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .ok_or("会话未登记")?;
+    let cwd = PathBuf::from(&s.cwd);
+    if !cwd.is_dir() {
+        return Err(format!("会话工作目录已失效: {}", s.cwd));
+    }
+    let process = ensure_agent(&app, &agent).await?;
+    let b = ensure_bridge(&app, &process, &bridge).await?;
+    b.ensure_initialized().await?;
+    if b.sessions().iter().any(|(id, _)| id == &session_id) {
+        return Ok(()); // 已在本桥:前端切 active 即可
+    }
+    b.load_session(&session_id, cwd).await?;
+    b.notify_session_restored(session_id);
+    Ok(())
 }
 
 /// 指定任务的产物卡片(右区;切换工作区/初始拉取)。

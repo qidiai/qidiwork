@@ -49,7 +49,10 @@ pub fn run() -> i32 {
             commands::office_watch_start,
             commands::skills_list,
             commands::settings_read,
-            commands::settings_save
+            commands::settings_save,
+            commands::sessions_history,
+            commands::session_set_title,
+            commands::session_resume
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

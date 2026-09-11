@@ -2,7 +2,7 @@
 // 中区 docx 预览 Tab:加载产物字节 → 矢量图形探测 → 渲染或降级提示。
 // 降级判定依据 gui/spike-docx spike(2026-09-09):含 DrawingML 矢量
 // 图形(总平面图类)docx-preview 渲染为空白,必须引导"系统打开"。
-import { ref, watch, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { probeDocx, renderDocx, base64ToBytes } from "../services/docxPreview";
 import { openPreviewArtifact } from "../composables/useOffice";
@@ -52,8 +52,8 @@ async function openInSystem(): Promise<void> {
   }
 }
 
+// 组件随 MainTabs 的 :key 销毁重建,props 生命周期内不变,无 watch 必要
 onMounted(load);
-watch(() => [props.task, props.name], load);
 </script>
 
 <template>

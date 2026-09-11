@@ -35,6 +35,12 @@ export function closePreview(key: string): void {
   if (activePreview.value === key) activePreview.value = "";
 }
 
+/** 任务切换时清理全部预览:旧任务的产物 Tab 不跨工作区残留(N6)。 */
+export function closeAllPreviews(): void {
+  openPreviews.value.splice(0);
+  activePreview.value = "";
+}
+
 export function usePreviewTabs() {
   return { openPreviews, activePreview, activationSeq };
 }

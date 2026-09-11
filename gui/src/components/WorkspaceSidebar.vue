@@ -3,6 +3,7 @@ import { computed, onMounted } from "vue";
 import { pushSystem, sendTask, startSession, useAgentState } from "../composables/useAgent";
 import { initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
+import { closeAllPreviews } from "../composables/usePreview";
 
 async function newSession() {
   try {
@@ -46,7 +47,11 @@ onMounted(async () => {
 
 // 左区:任务工作区列表(真实数据)+ 常用技能入口(真实技能,office-*/bid-*)。
 function pick(name: string): void {
-  if (name !== currentTask.value) void switchTask(name);
+  if (name !== currentTask.value) {
+    // 旧任务的产物预览 Tab 不随任务切换残留(step 审计 N6)
+    closeAllPreviews();
+    void switchTask(name);
+  }
 }
 </script>
 

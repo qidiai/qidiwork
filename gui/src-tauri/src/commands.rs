@@ -470,30 +470,45 @@ pub async fn office_read_file(
         .find(|c| c.name == name)
         .ok_or_else(|| format!("产物 {name} 未登记于任务 {task}"))?;
     let canonical = office::open_allowed(&card.path, &root)?;
-    // 预检给出带实际大小的明确错误;强制上限由下方 take() 保证——
-    // metadata 与读取之间文件可能被替换膨胀,读后再验一次(deepseek 审计 W1)。
-    let size = std::fs::metadata(&canonical)
-        .map_err(|e| format!("读取元数据失败: {e}"))?
-        .len();
-    if size > PREVIEW_MAX_BYTES {
-        return Err(format!(
-            "文件 {}MB 超过预览上限 {}MB",
-            size / (1024 * 1024),
-            PREVIEW_MAX_BYTES / (1024 * 1024)
-        ));
-    }
-    use std::io::Read as _;
-    let file = std::fs::File::open(&canonical).map_err(|e| format!("打开文件失败: {e}"))?;
-    let mut bytes = Vec::with_capacity(size as usize);
-    file.take(PREVIEW_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("读取失败: {e}"))?;
-    if bytes.len() as u64 > PREVIEW_MAX_BYTES {
-        return Err(format!(
-            "文件在读取期间增长,超过预览上限 {}MB",
-            PREVIEW_MAX_BYTES / (1024 * 1024)
-        ));
-    }
-    use base64::Engine as _;
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    // 32MB 级读入 + base64 编码是重阻塞活,移到阻塞线程池执行,
+    // 避免拖慢同进程的其他 IPC 命令(W6,step 交叉审计遗留项)。
+    tauri::async_runtime::spawn_blocking(move || {
+        // 预检给出带实际大小的明确错误;强制上限由下方 take() 保证——
+        // metadata 与读取之间文件可能被替换膨胀,读后再验一次(deepseek 审计 W1)。
+        let size = std::fs::metadata(&canonical)
+            .map_err(|e| format!("读取元数据失败: {e}"))?
+            .len();
+        if size > PREVIEW_MAX_BYTES {
+            return Err(format!(
+                "文件 {}MB 超过预览上限 {}MB",
+                size / (1024 * 1024),
+                PREVIEW_MAX_BYTES / (1024 * 1024)
+            ));
+        }
+        use std::io::Read as _;
+        let file = std::fs::File::open(&canonical).map_err(|e| format!("打开文件失败: {e}"))?;
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.take(PREVIEW_MAX_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读取失败: {e}"))?;
+        if bytes.len() as u64 > PREVIEW_MAX_BYTES {
+            return Err(format!(
+                "文件在读取期间增长,超过预览上限 {}MB",
+                PREVIEW_MAX_BYTES / (1024 * 1024)
+            ));
+        }
+        use base64::Engine as _;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    })
+    .await
+    .map_err(|e| {
+        // panic 与普通 join 失败分开记录,便于定位(step 审计 W1)
+        match &e {
+            tauri::Error::JoinError(je) if je.is_panic() => {
+                tracing::error!("office_read_file 阻塞任务 panic");
+                "预览读取内部错误".to_string()
+            }
+            _ => format!("预览读取任务失败: {e}"),
+        }
+    })?
 }

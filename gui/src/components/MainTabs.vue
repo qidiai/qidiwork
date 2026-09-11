@@ -26,6 +26,12 @@ watch(
         tabs.value.push({ key: p.key, label: p.name, closable: true });
       }
     }
+    // 批量清理(任务切换 closeAllPreviews)可能移除正激活的 Tab,
+    // activeTab 残留会指向不存在的 key,回落到对话
+    if (activeTab.value.startsWith("preview:") && !keys.has(activeTab.value)) {
+      activeTab.value = "chat";
+      activePreview.value = "";
+    }
   },
   { deep: true },
 );

@@ -24,6 +24,7 @@ use crate::acp::{AcpBridge, reconnect};
 use crate::office::{self, ArtifactCard, WorkspaceInfo, watch::ManifestWatch};
 use crate::persist::{self, PersistedSession};
 use crate::process::{AgentProcess, SpawnConfig};
+use crate::skills;
 use crate::transport::AgentTransport;
 
 /// 全局 agent 句柄。None = 未启动/已退出。
@@ -416,6 +417,14 @@ pub async fn office_watch_start(
 pub async fn office_scan(app: AppHandle) -> Result<Vec<WorkspaceInfo>, String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     Ok(office::list_workspaces(&office::workspaces_root(&home)))
+}
+
+/// 技能列表(左区「常用技能」)。只读扫描 ~/.qidi/skills/*/SKILL.md
+/// frontmatter;真正的技能执行与权限审批都在 agent 内核侧。
+#[tauri::command]
+pub async fn skills_list(app: AppHandle) -> Result<Vec<skills::SkillInfo>, String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    Ok(skills::list_skills(&skills::skills_root(&home)))
 }
 
 /// 指定任务的产物卡片(右区;切换工作区/初始拉取)。

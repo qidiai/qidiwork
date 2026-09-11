@@ -12,6 +12,7 @@ pub mod mock_agent; // 生产 release 不暴露 --mock-agent 分支(缩小暴露
 pub mod office;
 pub mod persist;
 pub mod process;
+pub mod skills;
 pub mod transport;
 
 use tauri::{Manager, RunEvent};
@@ -42,7 +43,8 @@ pub fn run() -> i32 {
             commands::office_artifacts,
             commands::office_open,
             commands::office_read_file,
-            commands::office_watch_start
+            commands::office_watch_start,
+            commands::skills_list
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

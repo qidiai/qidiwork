@@ -31,6 +31,8 @@ tracing-appender = "0.2"
 notify = "7"
 dunce = "1"
 base64 = "0.22"
+# 设置面保格式编辑 config.toml(与主工程 cf-pager 同一 0.22 系)
+toml_edit = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 # 特性集对齐主工程 windows 0.62(见 G:\qidiwork\Cargo.toml workspace deps)

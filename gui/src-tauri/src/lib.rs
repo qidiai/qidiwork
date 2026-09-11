@@ -12,6 +12,7 @@ pub mod mock_agent; // 生产 release 不暴露 --mock-agent 分支(缩小暴露
 pub mod office;
 pub mod persist;
 pub mod process;
+pub mod settings;
 pub mod skills;
 pub mod transport;
 
@@ -44,7 +45,9 @@ pub fn run() -> i32 {
             commands::office_open,
             commands::office_read_file,
             commands::office_watch_start,
-            commands::skills_list
+            commands::skills_list,
+            commands::settings_read,
+            commands::settings_save
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

@@ -2,12 +2,14 @@
 import { onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
+import SettingsModal from "./SettingsModal.vue";
 
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
 const { connected, sessionId } = useAgentState();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
 const recovering = ref(false);
+const showSettings = ref(false);
 
 const kernelLabel = computed(() =>
   connected.value ? `已连接 · ${sessionId.value || "会话就绪"}` : "未连接",
@@ -51,7 +53,9 @@ onMounted(async () => {
       GUI v{{ guiVersion }}
       <template v-if="ipcOk"> · IPC 正常</template>
     </span>
+    <button class="link-btn" @click="showSettings = true">设置</button>
   </footer>
+  <SettingsModal v-if="showSettings" @close="showSettings = false" />
 </template>
 
 <style scoped>

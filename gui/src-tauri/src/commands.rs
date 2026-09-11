@@ -25,6 +25,7 @@ use crate::office::{self, ArtifactCard, WorkspaceInfo, watch::ManifestWatch};
 use crate::persist::{self, PersistedSession};
 use crate::process::{AgentProcess, SpawnConfig};
 use crate::skills;
+use crate::settings;
 use crate::transport::AgentTransport;
 
 /// 全局 agent 句柄。None = 未启动/已退出。
@@ -425,6 +426,26 @@ pub async fn office_scan(app: AppHandle) -> Result<Vec<WorkspaceInfo>, String> {
 pub async fn skills_list(app: AppHandle) -> Result<Vec<skills::SkillInfo>, String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     Ok(skills::list_skills(&skills::skills_root(&home)))
+}
+
+/// 设置读取(设置面):当前默认模型 + [model.*] 可选项。
+/// 永不回传 api_key 明文,只回传 has_api_key。
+#[tauri::command]
+pub async fn settings_read(app: AppHandle) -> Result<settings::SettingsInfo, String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    settings::read_settings(&settings::config_path(&home))
+}
+
+/// 设置保存(设置面):设 [models].default = model_id;api_key 非空时
+/// 一并写入该模型的 [model.<id>].api_key。内核在下次启动时生效。
+#[tauri::command]
+pub async fn settings_save(
+    app: AppHandle,
+    model_id: String,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    settings::save_settings(&settings::config_path(&home), &model_id, api_key.as_deref())
 }
 
 /// 指定任务的产物卡片(右区;切换工作区/初始拉取)。

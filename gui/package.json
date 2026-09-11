@@ -16,7 +16,8 @@
     "dompurify": "^3.4.15",
     "jszip": "^3.10.2",
     "marked": "^18.0.12",
-    "vue": "^3.5.0"
+    "vue": "^3.5.0",
+    "xlsx": "file:vendor/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.0",

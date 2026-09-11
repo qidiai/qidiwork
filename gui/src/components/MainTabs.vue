@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import ChatView from "./ChatView.vue";
-import DocxPreview from "./DocxPreview.vue";
+import PreviewPane from "./PreviewPane.vue";
 import { usePreviewTabs, closePreview } from "../composables/usePreview";
 
 // 中区多 Tab:对话为常驻 Tab;产物预览 Tab 由点击产物卡片时打开。
@@ -82,7 +82,7 @@ function previewOf(key: TabKey) {
     </div>
     <div class="tab-body">
       <ChatView v-if="activeTab === 'chat'" />
-      <DocxPreview
+      <PreviewPane
         v-else-if="activeTab.startsWith('preview:')"
         :key="activeTab"
         v-bind="previewOf(activeTab)"

@@ -39,8 +39,9 @@ export async function renderDocx(bytes: Uint8Array, container: HTMLElement): Pro
   });
 }
 
-/** base64 → 字节(IPC 传 String,前端解码) */
-export function base64ToBytes(b64: string): Uint8Array {
+/** base64 → 字节(IPC 传 String,前端解码)。返回类型钉住 ArrayBuffer
+ * 背衬:new Blob()/XLSX.read 等 API 在 TS 5.7+ 拒绝 ArrayBufferLike。 */
+export function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);

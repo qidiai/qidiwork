@@ -6,6 +6,7 @@
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { initNotifyPermission, isWindowFocused, notify } from "../services/notify";
 
 export interface ToolCallItem {
   toolCallId: string;
@@ -101,6 +102,10 @@ async function onAcpEvent(ev: AcpEvent) {
         title: ev.tool_call?.title ?? "agent 请求权限",
         options: ev.options ?? [],
       };
+      // 失焦时系统提醒,办公用户切走窗口也不错过审批(P2)
+      if (!isWindowFocused()) {
+        notify("QIDI 办公工作台", `等待权限审批:${permission.value.title}`);
+      }
       break;
     case "turn_completed":
       turnInProgress.value = false;
@@ -109,6 +114,9 @@ async function onAcpEvent(ev: AcpEvent) {
         if (last && last.role === "assistant") last.done = true;
         if ((ev.stop_reason ?? "").startsWith("error:")) {
           lastError.value = ev.stop_reason ?? "";
+        } else if (!isWindowFocused()) {
+          // 失焦时系统提醒任务完成(P2)
+          notify("QIDI 办公工作台", "任务已完成,点击窗口查看结果。");
         }
       }
       break;
@@ -159,6 +167,7 @@ export async function initAgent(): Promise<void> {
     }),
   );
   void unlisteners; // 监听与应用同生命周期,无需解绑
+  void initNotifyPermission(); // 失焦系统提醒的权限,启动时请求一次
 }
 
 /** 新建任务会话(用户点「+ 新建任务」或首次发送)。 */

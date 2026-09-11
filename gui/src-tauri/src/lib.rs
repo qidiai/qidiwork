@@ -24,6 +24,8 @@ pub fn run() -> i32 {
         // single-instance 必须第一个注册(审计决策:办公场景禁止多开,
         // 多开 = 多 agent 进程 + office-workspaces 重复 fsnotify)。
         .plugin(tauri_plugin_opener::init())
+        // 系统通知(P2):任务完成/需审批时窗口失焦则提醒
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();

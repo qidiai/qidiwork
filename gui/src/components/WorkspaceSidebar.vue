@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { pushSystem, sendTask, startSession, useAgentState } from "../composables/useAgent";
 import { initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
@@ -81,6 +82,12 @@ onMounted(async () => {
     pushSystem(`技能列表加载失败:${String(e)}`);
   }
   await loadHistory();
+});
+
+// 回合结束/会话恢复后刷新历史(新标题、新条目可见;k3 审计)
+void listen("acp-event", (e) => {
+  const t = (e.payload as { type?: string }).type;
+  if (t === "turn_completed" || t === "session_restored") void loadHistory();
 });
 
 // 左区:任务工作区列表(真实数据)+ 常用技能入口(真实技能,office-*/bid-*)。

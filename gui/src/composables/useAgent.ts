@@ -150,11 +150,13 @@ async function onAcpEvent(ev: AcpEvent) {
         connected.value = true;
         // 恢复的会话标题已在登记簿里,首条 prompt 不覆盖
         titleRecorded = true;
+        // 消息不回放:清掉上一个会话的残留,避免混排误读(k3 审计)
+        messages.value = [];
       }
       messages.value.push({
         id: ++messageId,
         role: "system",
-        content: `会话 ${ev.session_id} 已恢复。`,
+        content: `会话 ${ev.session_id} 已恢复(历史上下文已在内核侧续接;本次界面从新消息开始)。`,
         toolCalls: [],
         done: true,
       });
@@ -236,9 +238,10 @@ export async function sendTask(text: string): Promise<void> {
     // 首条 prompt 截断记为会话标题(失败不影响任务下发)
     if (!titleRecorded) {
       titleRecorded = true;
+      // 标题按字符截断,避免 emoji 代理对被切半(k3 审计次要项)
       void invoke("session_set_title", {
         sessionId: sessionId.value,
-        title: trimmed.slice(0, 40),
+        title: Array.from(trimmed).slice(0, 40).join(""),
       }).catch(() => {});
     }
   } catch (e) {

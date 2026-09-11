@@ -502,7 +502,10 @@ pub async fn session_resume(
     let b = ensure_bridge(&app, &process, &bridge).await?;
     b.ensure_initialized().await?;
     if b.sessions().iter().any(|(id, _)| id == &session_id) {
-        return Ok(()); // 已在本桥:前端切 active 即可
+        // 已在本桥也要发事件:前端只在收到 SessionRestored 时切 active
+        // sessionId,早退不发会让点击静默无效(k3 审计)
+        b.notify_session_restored(session_id);
+        return Ok(());
     }
     b.load_session(&session_id, cwd).await?;
     b.notify_session_restored(session_id);

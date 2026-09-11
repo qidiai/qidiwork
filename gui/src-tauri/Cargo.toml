@@ -10,6 +10,11 @@ rust-version = "1.85"
 # cf-acp-lib 等主工程 crate 通过 path 依赖引入(M2 起),跨 workspace 解析不受影响。
 [workspace]
 
+[features]
+# 生产构建开关:tauri build CLI 自动启用;直接 cargo build --release 需手动加
+# --features custom-protocol,否则运行时仍加载 devUrl(localhost:5173)
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

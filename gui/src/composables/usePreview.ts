@@ -2,7 +2,7 @@
 import { ref } from "vue";
 
 export interface PreviewTab {
-  /** 稳定键(以产物绝对路径派生) */
+  /** 稳定键 = MainTabs 的 Tab key(preview:<task>/<name>),两端共用 previewKey 派生 */
   key: string;
   task: string;
   name: string;
@@ -11,10 +11,12 @@ export interface PreviewTab {
 const openPreviews = ref<PreviewTab[]>([]);
 /** 最近一次请求激活的预览 Tab key;MainTabs watch 它切换激活页 */
 const activePreview = ref("");
+/** 激活请求序号:Vue ref 同值赋值不通知,同 key 重开需靠序号强制触发激活 watch */
+const activationSeq = ref(0);
 
-/** 注册表 key 派生规则(MainTabs 关 Tab 时按同一规则反查) */
+/** 注册表 key 派生规则(ArtifactPanel 开 Tab 与 MainTabs 关 Tab 共用,保证同链同格式) */
 export function previewKey(task: string, name: string): string {
-  return `${task}/${name}`;
+  return `preview:${task}/${name}`;
 }
 
 export function openPreview(tab: PreviewTab): void {
@@ -22,6 +24,7 @@ export function openPreview(tab: PreviewTab): void {
     openPreviews.value.push(tab);
   }
   activePreview.value = tab.key;
+  activationSeq.value++;
 }
 
 export function closePreview(key: string): void {
@@ -33,5 +36,5 @@ export function closePreview(key: string): void {
 }
 
 export function usePreviewTabs() {
-  return { openPreviews, activePreview };
+  return { openPreviews, activePreview, activationSeq };
 }

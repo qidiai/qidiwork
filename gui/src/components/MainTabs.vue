@@ -11,52 +11,52 @@ const tabs = ref<{ key: TabKey; label: string; closable: boolean }[]>([
 ]);
 const activeTab = ref<TabKey>("chat");
 
-const { openPreviews, activePreview } = usePreviewTabs();
+const { openPreviews, activePreview, activationSeq } = usePreviewTabs();
 
-// 预览注册表 → Tab 列表(key = preview:<task>/<name>)
+// 预览注册表 → Tab 列表(注册表 key 即 Tab key,由 previewKey 统一派生)
 watch(
   openPreviews,
   (list) => {
-    const keys = new Set(list.map((t) => `preview:${t.task}/${t.name}`));
+    const keys = new Set(list.map((t) => t.key));
     // 移除已关闭的预览 Tab
     tabs.value = tabs.value.filter((t) => t.closable === false || keys.has(t.key));
     // 追加新预览 Tab
     for (const p of list) {
-      const key = `preview:${p.task}/${p.name}`;
-      if (!tabs.value.some((t) => t.key === key)) {
-        tabs.value.push({ key, label: p.name, closable: true });
+      if (!tabs.value.some((t) => t.key === p.key)) {
+        tabs.value.push({ key: p.key, label: p.name, closable: true });
       }
     }
   },
   { deep: true },
 );
 
-// 重复打开同一产物 → 激活已有 Tab
-watch(activePreview, (key) => {
-  if (key) activeTab.value = key;
+// 重复打开同一产物 → 激活已有 Tab。watch 序号而非 key:同 key 重开时
+// activePreview 同值赋值不触发 Vue watch,激活会脱节(step 审计 W2)
+watch(activationSeq, () => {
+  if (activePreview.value) activeTab.value = activePreview.value;
 });
 
 // 手动点 Tab 时同步 activePreview:否则注册表激活状态与实际激活页
 // 脱节,之后重开同一产物会因 ref 同值不触发激活 watch(deepseek 审计 B1/C3)。
 function selectTab(key: TabKey) {
   activeTab.value = key;
-  activePreview.value = key.startsWith("preview:") ? key.slice("preview:".length) : "";
+  activePreview.value = key.startsWith("preview:") ? key : "";
 }
 
 function closeTab(key: TabKey) {
   const idx = tabs.value.findIndex((t) => t.key === key);
   if (idx < 0 || !tabs.value[idx].closable) return;
   tabs.value.splice(idx, 1);
-  // 同步清理预览注册表,否则下次打开同一产物会被 openPreview 去重跳过
-  if (key.startsWith("preview:")) closePreview(key.slice("preview:".length));
+  // Tab key 即注册表 key,直接同步清理,否则下次打开同一产物被去重跳过
+  if (key.startsWith("preview:")) closePreview(key);
   if (activeTab.value === key) {
     activeTab.value = tabs.value[Math.max(0, idx - 1)]!.key;
   }
 }
 
 function previewOf(key: TabKey) {
-  const p = openPreviews.value.find((t) => `preview:${t.task}/${t.name}` === key);
-  return p ?? { task: "", name: "" };
+  const p = openPreviews.value.find((t) => t.key === key);
+  return { task: p?.task ?? "", name: p?.name ?? "" };
 }
 </script>
 

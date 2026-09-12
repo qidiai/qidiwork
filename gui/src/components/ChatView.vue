@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from "vue";
-import { useAgentState, sendTask, cancelTurn, initAgent } from "../composables/useAgent";
+import { useAgentState, sendTask, cancelTurn, initAgent, type ToolCallItem } from "../composables/useAgent";
 import { renderMarkdown, handleLinkClick } from "../services/render";
 
 const { messages, connected, turnInProgress, permission } = useAgentState();
@@ -15,6 +15,41 @@ function onMsgClick(e: MouseEvent): void {
 // 每条消息的工具调用分组折叠(默认收起,只留一行摘要);
 // 消息 id → 展开。工具执行期间自动展开,完成后收起。
 const expandedTools = ref<Record<number, boolean>>({});
+
+// 自动化流程清单:agent 用 todowrite 工具维护分步流程(与编码助手同源)。
+// 从工具调用原始数据提取 todos;全量替换语义 → 最新一份即当前流程状态。
+interface TodoItem {
+  content: string;
+  status: string;
+}
+
+function todoListOf(tool: ToolCallItem): TodoItem[] | null {
+  const find = (o: unknown): TodoItem[] | null => {
+    if (!o || typeof o !== "object") return null;
+    const obj = o as Record<string, unknown>;
+    if (Array.isArray(obj.todos)) {
+      const list = obj.todos.filter(
+        (x): x is TodoItem =>
+          !!x && typeof x === "object" && typeof (x as TodoItem).content === "string",
+      );
+      if (list.length) return list;
+    }
+    for (const v of Object.values(obj)) {
+      const found = find(v);
+      if (found) return found;
+    }
+    return null;
+  };
+  return find(tool.raw);
+}
+
+function lastTodoIndex(msg: (typeof messages)["value"][number]): number {
+  let last = -1;
+  msg.toolCalls.forEach((t, i) => {
+    if (todoListOf(t)) last = i;
+  });
+  return last;
+}
 
 function toolSummary(msg: (typeof messages)["value"][number]): string {
   const done = msg.toolCalls.filter((t) => t.status === "completed").length;
@@ -90,6 +125,38 @@ void initAgent();
           msg.role === "user" ? "我" : msg.role === "assistant" ? "QIDI" : "系统"
         }}</span>
         <div class="msg-body">
+          <!-- 自动化流程清单:最新一份 todowrite 渲染为分步卡片(与编码助手
+               的任务清单同源)。全量替换语义,只展示最后一份。 -->
+          <div
+            v-if="msg.role === 'assistant' && lastTodoIndex(msg) >= 0"
+            class="flow-card"
+          >
+            <div class="flow-head">📋 自动化流程</div>
+            <ol class="flow-steps">
+              <li
+                v-for="(todo, i) in todoListOf(
+                  msg.toolCalls[lastTodoIndex(msg)]!,
+                )!"
+                :key="i"
+                class="flow-step"
+                :data-status="todo.status"
+              >
+                <span class="flow-icon">{{
+                  todo.status === "completed"
+                    ? "✓"
+                    : todo.status === "in_progress"
+                      ? "▶"
+                      : todo.status === "cancelled"
+                        ? "⊘"
+                        : "○"
+                }}</span>
+                <span class="flow-text" :class="{ done: todo.status === 'completed' }">{{
+                  todo.content
+                }}</span>
+              </li>
+            </ol>
+          </div>
+
           <!-- 思考过程:流式可见,完成后自动收起(方向不对可随时中止) -->
           <details
             v-if="msg.thought"
@@ -284,6 +351,61 @@ void initAgent();
 
 .user-text {
   white-space: pre-wrap;
+}
+
+/* 自动化流程清单卡片(todowrite 可视化) */
+.flow-card {
+  margin-bottom: 8px;
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+}
+
+.flow-head {
+  padding: 6px 12px;
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.flow-steps {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.flow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.flow-icon {
+  flex: none;
+  color: var(--text-disabled);
+}
+
+.flow-step[data-status="completed"] .flow-icon {
+  color: var(--success);
+}
+
+.flow-step[data-status="in_progress"] .flow-icon {
+  color: var(--accent);
+}
+
+.flow-text {
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.flow-text.done {
+  color: var(--text-secondary);
+  text-decoration: line-through;
 }
 
 /* 思考过程块:与正文区分,弱化显示 */

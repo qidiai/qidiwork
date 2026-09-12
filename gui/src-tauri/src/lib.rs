@@ -52,7 +52,10 @@ pub fn run() -> i32 {
             commands::settings_save,
             commands::sessions_history,
             commands::session_set_title,
-            commands::session_resume
+            commands::session_resume,
+            commands::sessions_count,
+            commands::sessions_clear,
+            commands::office_delete_workspace
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

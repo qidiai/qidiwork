@@ -19,6 +19,8 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant" | "system";
   content: string;
+  /** 模型思考过程(agent_thought_chunk 流式累积;渲染为可折叠块) */
+  thought?: string;
   toolCalls: ToolCallItem[];
   done: boolean;
 }
@@ -64,6 +66,25 @@ function pushAssistantChunk(session: string, text: string) {
       id: ++messageId,
       role: "assistant",
       content: text,
+      thought: "",
+      toolCalls: [],
+      done: false,
+    });
+  }
+}
+
+/** 思考过程流式累积(agent_thought_chunk)。 */
+function pushThoughtChunk(session: string, text: string): void {
+  if (session !== sessionId.value) return;
+  const last = messages.value[messages.value.length - 1];
+  if (last && last.role === "assistant" && !last.done) {
+    last.thought += text;
+  } else {
+    messages.value.push({
+      id: ++messageId,
+      role: "assistant",
+      content: "",
+      thought: text,
       toolCalls: [],
       done: false,
     });
@@ -92,6 +113,9 @@ async function onAcpEvent(ev: AcpEvent) {
     case "session_update":
       if (ev.update?.sessionUpdate === "agent_message_chunk") {
         pushAssistantChunk(ev.session_id ?? "", ev.update.content?.text ?? "");
+      } else if (ev.update?.sessionUpdate === "agent_thought_chunk") {
+        // 思考过程可见(P2 反馈):用户能看到推理与数据来源,方向不对可及时中止
+        pushThoughtChunk(ev.session_id ?? "", ev.update.content?.text ?? "");
       } else if (ev.update?.sessionUpdate === "tool_call" || ev.update?.sessionUpdate === "tool_call_update") {
         upsertToolCall(ev.session_id ?? "", ev.update);
       }

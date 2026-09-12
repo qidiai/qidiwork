@@ -12,6 +12,22 @@ function onMsgClick(e: MouseEvent): void {
   handleLinkClick(e);
 }
 
+// 每条消息的工具调用分组折叠(默认收起,只留一行摘要);
+// 消息 id → 展开。工具执行期间自动展开,完成后收起。
+const expandedTools = ref<Record<number, boolean>>({});
+
+function toolSummary(msg: (typeof messages)["value"][number]): string {
+  const n = msg.toolCalls.length;
+  const done = msg.toolCalls.filter((t) => t.status === "completed").length;
+  const failed = msg.toolCalls.filter((t) => t.status === "failed").length;
+  const running = n - done - failed;
+  const parts: string[] = [];
+  if (done) parts.push(`✓${done}`);
+  if (running) parts.push(`运行中 ${running}`);
+  if (failed) parts.push(`✗${failed}`);
+  return parts.length ? parts.join(" ") : "等待中…";
+}
+
 function statusLabel(status: string): string {
   switch (status) {
     case "completed":
@@ -73,6 +89,16 @@ void initAgent();
           msg.role === "user" ? "我" : msg.role === "assistant" ? "QIDI" : "系统"
         }}</span>
         <div class="msg-body">
+          <!-- 思考过程:流式可见,完成后自动收起(方向不对可随时中止) -->
+          <details
+            v-if="msg.thought"
+            class="thought-block"
+            :open="msg.role === 'assistant' && !msg.done"
+          >
+            <summary>💭 思考过程</summary>
+            <div class="thought-text">{{ msg.thought }}</div>
+          </details>
+
           <!-- eslint-disable-next-line vue/no-v-html: 内容已经 DOMPurify 消毒 -->
           <div
             v-if="msg.role !== 'user'"
@@ -81,18 +107,32 @@ void initAgent();
           ></div>
           <div v-else class="msg-content user-text">{{ msg.content }}</div>
 
+          <!-- 工具调用分组:一条摘要代替 N 行,展开看逐条与原始数据 -->
           <details
-            v-for="tool in msg.toolCalls"
-            :key="tool.toolCallId"
-            class="tool-call"
+            v-if="msg.toolCalls.length"
+            class="tool-group"
+            :open="expandedTools[msg.id] ?? msg.toolCalls.some((t) => t.status === 'in_progress')"
+            @toggle="
+              expandedTools[msg.id] = ($event.target as HTMLDetailsElement).open
+            "
           >
-            <summary>
-              <span class="tool-status" :data-status="tool.status">{{
-                statusLabel(tool.status)
-              }}</span>
-              {{ tool.title }}
+            <summary class="tool-group-head">
+              🔧 工具调用 × {{ msg.toolCalls.length }} ·
+              {{ toolSummary(msg) }}(点击{{ expandedTools[msg.id] ? "收起" : "展开" }})
             </summary>
-            <pre class="tool-raw">{{ JSON.stringify(tool.raw, null, 2) }}</pre>
+            <details
+              v-for="tool in msg.toolCalls"
+              :key="tool.toolCallId"
+              class="tool-call"
+            >
+              <summary>
+                <span class="tool-status" :data-status="tool.status">{{
+                  statusLabel(tool.status)
+                }}</span>
+                {{ tool.title }}
+              </summary>
+              <pre class="tool-raw">{{ JSON.stringify(tool.raw, null, 2) }}</pre>
+            </details>
           </details>
 
           <span
@@ -238,6 +278,50 @@ void initAgent();
 
 .user-text {
   white-space: pre-wrap;
+}
+
+/* 思考过程块:与正文区分,弱化显示 */
+.thought-block {
+  margin-bottom: 8px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: var(--font-size-sm);
+}
+
+.thought-block summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+}
+
+.thought-text {
+  padding: 4px 12px 10px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* 工具调用分组:默认只占一行 */
+.tool-group {
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  font-size: var(--font-size-sm);
+}
+
+.tool-group-head {
+  cursor: pointer;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.tool-group > .tool-call {
+  margin: 0 8px 8px;
 }
 
 .tool-call {

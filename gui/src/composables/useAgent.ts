@@ -269,11 +269,29 @@ export function cancelPermission(): void {
   void invoke("permission_cancel", { requestId: p.requestId });
 }
 
-/** 崩溃恢复(状态栏按钮)。返回恢复的会话数。 */
+/** 崩溃恢复(状态栏按钮)。返回恢复的会话数;-1 表示已在恢复中
+ * (防重入:状态栏连点或自动连接与手动恢复并发会连环换桥丢会话,k3 审计)。 */
+let recoverInFlight = false;
 export async function recoverAgent(): Promise<number> {
-  const n = await invoke<number>("agent_recover");
-  if (n > 0) connected.value = true;
-  return n;
+  if (recoverInFlight) return -1;
+  recoverInFlight = true;
+  try {
+    const n = await invoke<number>("agent_recover");
+    if (n > 0) connected.value = true;
+    return n;
+  } finally {
+    recoverInFlight = false;
+  }
+}
+
+/** 启动自动连接(P2:免手动激活内核):登记簿里有会话才拉起内核并续接。 */
+export async function autoConnect(): Promise<void> {
+  try {
+    const n = await invoke<number>("sessions_count");
+    if (n > 0) await recoverAgent();
+  } catch (e) {
+    pushSystem(`自动连接内核失败:${String(e)}`);
+  }
 }
 
 export function useAgentState() {

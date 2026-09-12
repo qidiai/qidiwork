@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { pushSystem, sendTask, startSession, useAgentState } from "../composables/useAgent";
-import { initOffice, switchTask, useOfficeState } from "../composables/useOffice";
+import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
 
@@ -47,6 +47,8 @@ interface HistoryEntry {
 }
 const history = ref<HistoryEntry[]>([]);
 const resuming = ref(false);
+const confirmingClear = ref(false);
+let clearTimer = 0;
 
 function historyLabel(h: HistoryEntry): string {
   if (h.title) return h.title;
@@ -62,6 +64,24 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+/** 清空历史会话(两步确认;登记簿自动归档备份,agent 侧内容不动)。 */
+async function clearHistory(): Promise<void> {
+  if (!confirmingClear.value) {
+    confirmingClear.value = true;
+    window.clearTimeout(clearTimer);
+    clearTimer = window.setTimeout(() => (confirmingClear.value = false), 3000);
+    return;
+  }
+  confirmingClear.value = false;
+  window.clearTimeout(clearTimer);
+  try {
+    pushSystem(await invoke<string>("sessions_clear", { archive: true }));
+    await loadHistory();
+  } catch (e) {
+    pushSystem(`清空失败:${String(e)}`);
+  }
+}
+
 async function resumeSession(h: HistoryEntry): Promise<void> {
   if (h.session_id === sessionId.value || turnInProgress.value || resuming.value) return;
   resuming.value = true;
@@ -71,6 +91,34 @@ async function resumeSession(h: HistoryEntry): Promise<void> {
     pushSystem(`恢复会话失败:${String(e)}`);
   } finally {
     resuming.value = false;
+  }
+}
+
+// 工作区删除(两步确认;二次点击才执行,3 秒不点自动复位)。
+const deletingName = ref("");
+let deleteTimer = 0;
+
+function askDelete(name: string): void {
+  if (deletingName.value === name) {
+    deletingName.value = "";
+    void doDelete(name);
+    return;
+  }
+  deletingName.value = name;
+  window.clearTimeout(deleteTimer);
+  deleteTimer = window.setTimeout(() => (deletingName.value = ""), 3000);
+}
+
+async function doDelete(name: string): Promise<void> {
+  if (name === currentTask.value) {
+    pushSystem("请先切换到其他工作区,再删除当前工作区");
+    return;
+  }
+  try {
+    await deleteWorkspace(name);
+    pushSystem(`已删除工作区「${name}」及其目录内全部产物`);
+  } catch (e) {
+    pushSystem(`删除失败:${String(e)}`);
   }
 }
 
@@ -120,11 +168,22 @@ function pick(name: string): void {
           :key="ws.name"
           class="ws-item"
           :class="{ active: ws.name === currentTask }"
+          :title="ws.name === currentTask ? '当前工作区(先切换再删除)' : ws.name"
           @click="pick(ws.name)"
         >
           <span class="ws-dot" :class="{ on: ws.name === currentTask }"></span>
           <span class="ws-name">{{ ws.name }}</span>
-          <span class="ws-count">{{ ws.artifact_count }}</span>
+          <span
+            v-if="deletingName === ws.name"
+            class="ws-del confirm"
+            @click.stop="askDelete(ws.name)"
+          >确认删除?</span>
+          <span v-else class="ws-count">{{ ws.artifact_count }}</span>
+          <button
+            class="ws-del"
+            title="删除工作区及目录内全部产物"
+            @click.stop="askDelete(ws.name)"
+          >✕</button>
         </li>
       </ul>
     </div>
@@ -146,8 +205,18 @@ function pick(name: string): void {
       <p v-else class="skill-empty">未发现技能(读取 ~/.qidi/skills)</p>
     </div>
 
-    <div v-if="history.length" class="section">
-      <span class="section-title">历史会话</span>
+    <div v-if="history.length || confirmingClear" class="section">
+      <div class="section-row">
+        <span class="section-title">历史会话</span>
+        <button
+          class="history-clear"
+          :class="{ confirm: confirmingClear }"
+          :title="confirmingClear ? '再次点击执行(登记簿先归档备份)' : '清空历史会话列表(自动归档备份)'"
+          @click="clearHistory"
+        >
+          {{ confirmingClear ? "确认清空?" : "清空" }}
+        </button>
+      </div>
       <ul class="ws-list">
         <li
           v-for="h in history"
@@ -186,6 +255,26 @@ function pick(name: string): void {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.history-clear {
+  background: none;
+  border: none;
+  color: var(--text-disabled);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  padding: 0;
+}
+
+.history-clear:hover {
+  color: var(--text-primary);
+}
+
+.history-clear.confirm {
+  color: #fff;
+  background: var(--danger, #c0392b);
+  border-radius: var(--radius);
+  padding: 2px 8px;
 }
 
 .section-title {
@@ -228,6 +317,34 @@ function pick(name: string): void {
 
 .ws-item.active {
   background: var(--bg-active);
+}
+
+.ws-del {
+  margin-left: auto;
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--text-disabled);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  opacity: 0;
+}
+
+.ws-item:hover .ws-del {
+  opacity: 1;
+}
+
+.ws-del:hover {
+  color: var(--danger, #c0392b);
+}
+
+.ws-del.confirm {
+  color: #fff;
+  background: var(--danger, #c0392b);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  white-space: nowrap;
 }
 
 .ws-dot {

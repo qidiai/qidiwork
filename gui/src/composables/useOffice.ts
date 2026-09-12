@@ -57,6 +57,20 @@ export async function switchTask(name: string): Promise<void> {
   artifacts.value = await invoke<ArtifactCard[]>("office_artifacts", { task: name });
 }
 
+/** 删除任务工作区(含目录内全部产物,后端有根约束;不可恢复)。
+ * 删除的是当前工作区时,自动切到剩余的第一个。 */
+export async function deleteWorkspace(name: string): Promise<void> {
+  await invoke("office_delete_workspace", { task: name });
+  await refreshWorkspaces();
+  if (currentTask.value === name) {
+    currentTask.value = "";
+    artifacts.value = [];
+    if (workspaces.value.length > 0) {
+      await switchTask(workspaces.value[0].name);
+    }
+  }
+}
+
 /** 用系统默认程序打开产物(白名单+路径约束在 Rust 侧)。 */
 export async function openArtifact(card: ArtifactCard): Promise<void> {
   // office_open 按 (task, name) 服务端重读 manifest 校验(k3 P1a 审计 P1),

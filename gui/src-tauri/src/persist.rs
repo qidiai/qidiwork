@@ -70,6 +70,31 @@ pub fn remove_session(dir: &Path, session_id: &str) -> std::io::Result<()> {
     save_sessions(dir, &list)
 }
 
+/// 清空登记簿。archive=true 时先改名留档(sessions-archive-<时间戳>.json)
+/// 再清空,误删可找回。仅清 GUI 登记簿;agent 侧 ~/.qidi/sessions 的
+/// 对话内容不受影响。返回给用户的提示信息。
+pub fn clear_sessions(dir: &Path, archive: bool) -> Result<String, std::io::Error> {
+    let path = dir.join("sessions.json");
+    if !path.exists() {
+        return Ok("没有历史会话".to_string());
+    }
+    if archive {
+        // 毫秒级:同一秒内"存新会话→清空"会在 Windows rename 上撞名(k3 审计)
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let archived = dir.join(format!("sessions-archive-{stamp}.json"));
+        std::fs::rename(&path, &archived)?;
+        return Ok(format!(
+            "已清空历史会话,原登记簿归档为 {}",
+            archived.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+    std::fs::remove_file(&path)?;
+    Ok("已清空历史会话".to_string())
+}
+
 /// 设置会话标题(不存在则 NotFound)。
 pub fn set_title(dir: &Path, session_id: &str, title: &str) -> std::io::Result<()> {
     let mut list = load_sessions(dir);
@@ -181,6 +206,33 @@ mod tests {
         assert_eq!(list[0].title.as_deref(), Some("写标书任务"));
         // 未登记会话报错
         assert!(set_title(&dir, "ghost", "x").is_err());
+    }
+
+    #[test]
+    fn clear_sessions_archives_then_empties() {
+        let dir = fresh_dir("clear");
+        upsert_session(
+            &dir,
+            PersistedSession {
+                session_id: "s1".into(),
+                cwd: "C:\\ws".into(),
+                title: None,
+            },
+        )
+        .unwrap();
+        let msg = clear_sessions(&dir, true).unwrap();
+        assert!(msg.contains("归档"));
+        assert!(!dir.join("sessions.json").exists(), "登记簿已清空");
+        let archived: Vec<_> = dir
+            .read_dir()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("sessions-archive-"))
+            .collect();
+        assert_eq!(archived.len(), 1, "归档文件存在");
+        // 再清一次:没有可清的,提示但不报错
+        let msg2 = clear_sessions(&dir, false).unwrap();
+        assert!(msg2.contains("没有历史会话"));
     }
 
     #[test]

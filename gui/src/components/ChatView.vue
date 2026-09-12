@@ -33,6 +33,13 @@ async function send() {
   await scrollToBottom();
 }
 
+// Enter 发送;中文输入法组词中的回车放行给 IME(确认选字),不触发发送
+function onEnterKey(e: KeyboardEvent): void {
+  if (e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  void send();
+}
+
 async function scrollToBottom() {
   await nextTick();
   msgBox.value?.scrollTo({ top: msgBox.value.scrollHeight });
@@ -40,8 +47,8 @@ async function scrollToBottom() {
 
 const placeholder = computed(() =>
   connected.value
-    ? "输入任务…(Ctrl+Enter 发送)"
-    : "发送任务将自动连接内核并开启会话",
+    ? "输入任务…(Enter 发送,Shift+Enter 换行)"
+    : "发送任务将自动连接内核并开启会话(Enter 发送)",
 );
 
 // 首次进入即初始化事件监听(幂等)
@@ -104,6 +111,7 @@ void initAgent();
         rows="2"
         :placeholder="placeholder"
         :disabled="turnInProgress || !!permission"
+        @keydown.enter.exact="onEnterKey"
         @keydown.ctrl.enter.prevent="send"
         @keydown.meta.enter.prevent="send"
       ></textarea>

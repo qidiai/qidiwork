@@ -4,6 +4,17 @@ import MainTabs from "./components/MainTabs.vue";
 import ArtifactPanel from "./components/ArtifactPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
+import { onMounted } from "vue";
+import { autoConnect, initAgent } from "./composables/useAgent";
+
+// 启动即自动连接内核(登记簿有会话时):免去每次手动「恢复会话」。
+// ChatView 的 onMounted 先于父组件执行,事件监听此时已绑定。
+onMounted(() => {
+  void (async () => {
+    await initAgent();
+    await autoConnect();
+  })();
+});
 </script>
 
 <template>

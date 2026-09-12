@@ -512,6 +512,55 @@ pub async fn session_resume(
     Ok(())
 }
 
+/// 历史会话数量(启动自动连接的判断依据)。
+#[tauri::command]
+pub async fn sessions_count(app: AppHandle) -> Result<usize, String> {
+    let dir = app.path().app_data_dir().ok().ok_or("无法解析数据目录")?;
+    Ok(persist::load_sessions(&dir).len())
+}
+
+/// 清空历史会话登记;archive=true 时先改名留档。仅清 GUI 登记簿,
+/// agent 侧对话内容不动。
+#[tauri::command]
+pub async fn sessions_clear(app: AppHandle, archive: bool) -> Result<String, String> {
+    let dir = app.path().app_data_dir().ok().ok_or("无法解析数据目录")?;
+    persist::clear_sessions(&dir, archive).map_err(|e| format!("清空失败: {e}"))
+}
+
+/// 删除任务工作区(含目录内全部产物文件,不可恢复)。校验链:
+/// task 名合法(拒绝分隔符/点路径/盘符)→ canonicalize 后必须严格落在
+/// workspaces 根内(含拒绝根本身,防 task="." 删光整个根,k3 审计 P1)。
+#[tauri::command]
+pub async fn office_delete_workspace(app: AppHandle, task: String) -> Result<(), String> {
+    if task.contains(['/', '\\', ':'])
+        || task == ".."
+        || task == "."
+        || task.trim().is_empty()
+    {
+        return Err(format!("非法 task 名: {task}"));
+    }
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    let root = office::workspaces_root(&home);
+    let dir = root.join(&task);
+    if !dir.is_dir() {
+        return Err(format!("工作区不存在: {task}"));
+    }
+    let canonical = dunce::canonicalize(&dir).map_err(|e| format!("路径解析失败: {e}"))?;
+    let canonical_root = dunce::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    // 等值排除:canonical == 根本身时 starts_with 也为 true,必须单独拒绝
+    if canonical == canonical_root {
+        return Err("非法:目标就是工作区根目录本身".to_string());
+    }
+    if !canonical.starts_with(&canonical_root) {
+        return Err(format!(
+            "路径越界:{} 不在 {} 内",
+            canonical.display(),
+            canonical_root.display()
+        ));
+    }
+    std::fs::remove_dir_all(&canonical).map_err(|e| format!("删除失败: {e}"))
+}
+
 /// 指定任务的产物卡片(右区;切换工作区/初始拉取)。
 #[tauri::command]
 pub async fn office_artifacts(app: AppHandle, task: String) -> Result<Vec<ArtifactCard>, String> {

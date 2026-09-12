@@ -17,10 +17,11 @@ function onMsgClick(e: MouseEvent): void {
 const expandedTools = ref<Record<number, boolean>>({});
 
 function toolSummary(msg: (typeof messages)["value"][number]): string {
-  const n = msg.toolCalls.length;
   const done = msg.toolCalls.filter((t) => t.status === "completed").length;
   const failed = msg.toolCalls.filter((t) => t.status === "failed").length;
-  const running = n - done - failed;
+  const running = msg.toolCalls.filter(
+    (t) => t.status === "in_progress" || t.status === "pending",
+  ).length;
   const parts: string[] = [];
   if (done) parts.push(`✓${done}`);
   if (running) parts.push(`运行中 ${running}`);
@@ -111,7 +112,12 @@ void initAgent();
           <details
             v-if="msg.toolCalls.length"
             class="tool-group"
-            :open="expandedTools[msg.id] ?? msg.toolCalls.some((t) => t.status === 'in_progress')"
+            :open="
+              expandedTools[msg.id] ??
+              msg.toolCalls.some(
+                (t) => t.status === 'in_progress' || t.status === 'pending',
+              )
+            "
             @toggle="
               expandedTools[msg.id] = ($event.target as HTMLDetailsElement).open
             "

@@ -78,7 +78,7 @@ function pushThoughtChunk(session: string, text: string): void {
   if (session !== sessionId.value) return;
   const last = messages.value[messages.value.length - 1];
   if (last && last.role === "assistant" && !last.done) {
-    last.thought += text;
+    last.thought = (last.thought ?? "") + text;
   } else {
     messages.value.push({
       id: ++messageId,

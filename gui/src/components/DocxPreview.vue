@@ -136,6 +136,14 @@ onMounted(load);
   gap: 12px;
 }
 
+/* 三线表等无边框单元格补浅灰网格线(对齐 WPS/Word 的表格线辅助显示):
+   有 tcBorders 的单元格由 docx-preview 输出的内联样式优先,不受影响;
+   无边框单元格原本完全不画线,审阅时无法辨认表格结构 */
+.docx-container :deep(.docx-wrapper table td),
+.docx-container :deep(.docx-wrapper table th) {
+  border: 1px solid #c9c9c9;
+}
+
 .docx-container :deep(.docx-wrapper > section.docx) {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   margin: 0;

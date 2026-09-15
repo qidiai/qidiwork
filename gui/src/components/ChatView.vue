@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from "vue";
-import { useAgentState, sendTask, cancelTurn, initAgent, type ToolCallItem } from "../composables/useAgent";
+import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, type ToolCallItem } from "../composables/useAgent";
 import { renderMarkdown, handleLinkClick } from "../services/render";
+import { fmtTokens, fmtCost } from "../services/usage";
 
-const { messages, connected, turnInProgress, permission } = useAgentState();
+const { messages, connected, turnInProgress, permission, queued } = useAgentState();
 const draft = ref("");
 const msgBox = ref<HTMLElement | null>(null);
 
@@ -23,7 +24,14 @@ interface TodoItem {
   status: string;
 }
 
+const todoCache = new WeakMap<object, TodoItem[] | null>();
+
 function todoListOf(tool: ToolCallItem): TodoItem[] | null {
+  // 工具名门槛:只认 todowrite 家族,其他工具 raw 里恰好嵌套 todos 数组
+  // (如读到的 todo JSON 文件)不误判为流程卡片(k3 补审计)
+  if (!/todo/i.test(tool.title)) return null;
+  if (!tool.raw || typeof tool.raw !== "object") return null;
+  if (todoCache.has(tool.raw)) return todoCache.get(tool.raw) ?? null;
   const find = (o: unknown): TodoItem[] | null => {
     if (!o || typeof o !== "object") return null;
     const obj = o as Record<string, unknown>;
@@ -40,7 +48,9 @@ function todoListOf(tool: ToolCallItem): TodoItem[] | null {
     }
     return null;
   };
-  return find(tool.raw);
+  const list = find(tool.raw);
+  todoCache.set(tool.raw, list);
+  return list;
 }
 
 function lastTodoIndex(msg: (typeof messages)["value"][number]): number {
@@ -79,8 +89,14 @@ function statusLabel(status: string): string {
 
 async function send() {
   const text = draft.value.trim();
-  if (!text || turnInProgress.value) return;
+  if (!text) {
+    // 两次 Enter 语义(qidicode):运行中空输入按 Enter = 取消当前回合,
+    // 排队消息立即续跑
+    if (queued.value.length) flushQueueNow();
+    return;
+  }
   draft.value = "";
+  // 回合进行中 sendTask 自动排队(回合结束 FIFO 续跑),不再禁止输入
   await sendTask(text);
   await scrollToBottom();
 }
@@ -97,11 +113,12 @@ async function scrollToBottom() {
   msgBox.value?.scrollTo({ top: msgBox.value.scrollHeight });
 }
 
-const placeholder = computed(() =>
-  connected.value
-    ? "输入任务…(Enter 发送,Shift+Enter 换行)"
-    : "发送任务将自动连接内核并开启会话(Enter 发送)",
-);
+const placeholder = computed(() => {
+  if (!connected.value) return "发送任务将自动连接内核并开启会话(Enter 发送)";
+  if (turnInProgress.value)
+    return "任务运行中:输入后 Enter 排队,回合结束自动发送;再按 Enter(空输入)= 立即插入";
+  return "输入任务…(Enter 发送,Shift+Enter 换行)";
+});
 
 // 首次进入即初始化事件监听(幂等)
 void initAgent();
@@ -191,7 +208,7 @@ void initAgent();
           >
             <summary class="tool-group-head">
               🔧 工具调用 × {{ msg.toolCalls.length }} ·
-              {{ toolSummary(msg) }}(点击{{ expandedTools[msg.id] ? "收起" : "展开" }})
+              {{ toolSummary(msg) }} · 明细
             </summary>
             <details
               v-for="tool in msg.toolCalls"
@@ -208,11 +225,36 @@ void initAgent();
             </details>
           </details>
 
+          <!-- 回合用量:token/成本/模型(内核 _meta.usage;mock 或未上报
+               时 usage 为空,不占位)。≈ = 内核标记账单可能不完整 -->
+          <div
+            v-if="msg.role === 'assistant' && msg.usage"
+            class="usage-chip"
+          >
+            Tokens ↑{{ fmtTokens(msg.usage.inputTokens) }} ↓{{ fmtTokens(msg.usage.outputTokens) }}<template v-if="msg.usage.costUsdTicks != null"> · {{ msg.usage.costPartial || msg.usage.incomplete ? "≈" : "" }}{{ fmtCost(msg.usage.costUsdTicks) }}</template><template v-if="msg.usage.models.length"> · {{ msg.usage.models.join("、") }}</template><template v-if="msg.usage.turns"> · {{ msg.usage.turns }} 轮</template>
+          </div>
+
           <span
             v-if="msg.role === 'assistant' && !msg.done"
             class="typing"
             aria-label="生成中"
           ></span>
+        </div>
+      </div>
+
+      <!-- 排队中的消息:运行中提交,回合结束自动续跑;可撤回或立即插入 -->
+      <div v-for="q in queued" :key="q.id" class="msg-row user">
+        <span class="msg-badge queued-badge">排队</span>
+        <div class="msg-body">
+          <div class="msg-content user-text">{{ q.text }}</div>
+          <div class="queued-actions">
+            <button
+              class="queued-btn"
+              title="取消当前回合并立即发送这条排队消息"
+              @click="flushQueueNow()"
+            >▶ 立即插入</button>
+            <button class="queued-btn" title="撤回这条排队消息" @click="removeQueued(q.id)">✕ 撤回</button>
+          </div>
         </div>
       </div>
     </div>
@@ -223,21 +265,25 @@ void initAgent();
         class="composer-input"
         rows="2"
         :placeholder="placeholder"
-        :disabled="turnInProgress || !!permission"
+        :disabled="!!permission"
         @keydown.enter.exact="onEnterKey"
         @keydown.ctrl.enter.prevent="send"
         @keydown.meta.enter.prevent="send"
       ></textarea>
       <button
-        v-if="!turnInProgress"
+        v-if="turnInProgress"
+        class="composer-send cancel"
+        title="中止当前回合(排队消息一并清空)"
+        @click="cancelTurn()"
+      >
+        中止
+      </button>
+      <button
         class="composer-send"
         :disabled="!draft.trim() || !!permission"
         @click="send"
       >
-        发送
-      </button>
-      <button v-else class="composer-send cancel" @click="cancelTurn()">
-        中止
+        {{ turnInProgress ? "排队" : "发送" }}
       </button>
     </div>
   </div>
@@ -351,6 +397,34 @@ void initAgent();
 
 .user-text {
   white-space: pre-wrap;
+}
+
+/* 排队消息(运行中提交):徽标区分 + 行内操作 */
+.queued-badge {
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-soft);
+}
+
+.queued-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.queued-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.queued-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 /* 自动化流程清单卡片(todowrite 可视化) */
@@ -486,6 +560,14 @@ void initAgent();
   max-height: 220px;
   overflow: auto;
   font-size: var(--font-size-sm);
+}
+
+/* 回合用量 chip:弱化展示,不与正文抢注意力 */
+.usage-chip {
+  margin-top: 4px;
+  font-size: var(--font-size-sm);
+  color: var(--text-disabled);
+  user-select: none;
 }
 
 /* 极简打点动画 */

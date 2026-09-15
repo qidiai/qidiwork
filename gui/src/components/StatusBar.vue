@@ -2,10 +2,11 @@
 import { onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
+import { fmtTokens, fmtCost } from "../services/usage";
 import SettingsModal from "./SettingsModal.vue";
 
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
-const { connected, sessionId } = useAgentState();
+const { connected, sessionId, sessionUsage } = useAgentState();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
 const recovering = ref(false);
@@ -14,6 +15,16 @@ const showSettings = ref(false);
 const kernelLabel = computed(() =>
   connected.value ? `已连接 · ${sessionId.value || "会话就绪"}` : "未连接",
 );
+
+// 活动会话累计用量:有 token 数据才显示;≈ = 账单可能不完整(内核标记)
+const usageLabel = computed(() => {
+  const u = sessionUsage.value;
+  if (!u || (!u.inputTokens && !u.outputTokens)) return "";
+  const cost = u.costSeen ? fmtCost(u.costUsdTicks) : null;
+  return `本会话 ↑${fmtTokens(u.inputTokens)} ↓${fmtTokens(u.outputTokens)}${
+    cost ? ` · ${u.costPartial ? "≈" : ""}${cost}` : ""
+  }`;
+});
 
 async function recover() {
   recovering.value = true;
@@ -48,6 +59,11 @@ onMounted(async () => {
       {{ recovering ? "恢复中…" : "恢复会话" }}
     </button>
     <button v-else class="link-btn" @click="newSession">新会话</button>
+    <span
+      v-if="usageLabel"
+      class="status-item muted"
+      title="当前会话累计 token 用量与成本(≈ 为内核标记的不完整账单)"
+    >{{ usageLabel }}</span>
     <span class="spacer"></span>
     <span class="status-item muted">
       GUI v{{ guiVersion }}

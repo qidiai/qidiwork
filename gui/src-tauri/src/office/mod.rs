@@ -20,6 +20,13 @@ pub const OPEN_ALLOWED_EXTENSIONS: &[&str] = &[
     "docx", "doc", "xlsx", "xls", "pptx", "ppt", "pdf", "png", "jpg", "jpeg", "html", "md", "txt",
 ];
 
+/// 预览读取(office_read_file)专用白名单:在系统打开白名单上剔除 html。
+/// html 字节进入 webview 即潜在 XSS(k3 放宽审计 W3):html 交给
+/// 系统浏览器在 file:// 域打开(office_open),不进 webview。
+pub const PREVIEW_READ_EXTENSIONS: &[&str] = &[
+    "docx", "doc", "xlsx", "xls", "pptx", "ppt", "pdf", "png", "jpg", "jpeg", "md", "txt",
+];
+
 /// 产物卡片(与 card.py / TUI ArtifactBlock 的 manifest schema 对齐)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArtifactCard {
@@ -96,14 +103,48 @@ pub fn read_manifest(root: &Path, task: &str) -> Result<Vec<ArtifactCard>, Strin
     Ok(manifest.artifacts)
 }
 
-/// 系统打开的两道约束(k3 M1 审计 §IPC):扩展名白名单 + canonicalize
-/// 后必须落在 workspaces 根内。通过返回规范化路径。
-pub fn open_allowed(path: &str, root: &Path) -> Result<PathBuf, String> {
+/// Windows:仅本地盘符绝对路径(Disk/VerbatimDisk 前缀)。
+/// UNC(\\host\share)会经 ShellExecute/SMB 触发 NTLM 认证造成哈希外泄,
+/// 设备路径(\\.\)不可预测(k3 放宽审计 W2)。
+#[cfg(windows)]
+fn is_local_absolute(p: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(
+        p.components().next(),
+        Some(Component::Prefix(pre))
+            if matches!(pre.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    )
+}
+
+/// 非 Windows:常规绝对路径。
+#[cfg(not(windows))]
+fn is_local_absolute(p: &Path) -> bool {
+    matches!(p.components().next(), Some(std::path::Component::RootDir))
+}
+
+/// 预览读取/系统打开的放行门(k3 M1 审计 §IPC 定稿 + 2026-09-12 放宽):
+/// ① **manifest 调解**——调用方只传 (task, name),服务端重读根内的
+/// manifest.json 解析出路径,webview 永远不能传裸路径;② 扩展名白名单,
+/// **以 canonicalize 之后的扩展名为准**(k3 放宽审计 W1:先查扩展名可被
+/// 符号链接绕过——`x.docx` → 指向 `payload.exe`,系统打开即执行);
+/// ③ canonicalize 后必须解析为本地盘符绝对路径(拒 UNC/设备/相对路径,W2)。
+/// 原"落在 workspaces 根内"约束对读取/打开**已移除**:真实技能把交付物
+/// 写在用户项目目录(如 E:\合肥方案\…)并登记原路径,根约束会拒绝全部
+/// 真实产物(冒烟实测)。**删除**(office_delete_workspace)仍保留根约束。
+pub fn open_allowed(path: &str) -> Result<PathBuf, String> {
     let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return Err(format!("manifest 登记了相对路径,拒绝: {path}"));
+    }
     if !candidate.exists() {
         return Err(format!("文件不存在: {path}"));
     }
-    let ext = candidate
+    // 先解析符号链接/规范化,再对**最终路径**做白名单与盘符校验
+    let canonical = dunce::canonicalize(candidate).map_err(|e| format!("路径解析失败: {e}"))?;
+    if !is_local_absolute(&canonical) {
+        return Err(format!("仅允许本地盘符路径,拒绝: {}", canonical.display()));
+    }
+    let ext = canonical
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
@@ -111,14 +152,19 @@ pub fn open_allowed(path: &str, root: &Path) -> Result<PathBuf, String> {
     if !OPEN_ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
         return Err(format!("扩展名 .{ext} 不在白名单内,拒绝打开"));
     }
-    let canonical = dunce::canonicalize(candidate).map_err(|e| format!("路径解析失败: {e}"))?;
-    let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    if !canonical.starts_with(&canonical_root) {
-        return Err(format!(
-            "路径越界:{} 不在 {} 内",
-            canonical.display(),
-            canonical_root.display()
-        ));
+    Ok(canonical)
+}
+
+/// 预览读取(office_read_file)专用:在系统打开门之上剔除 html。
+pub fn open_allowed_for_read(path: &str) -> Result<PathBuf, String> {
+    let canonical = open_allowed(path)?;
+    let ext = canonical
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !PREVIEW_READ_EXTENSIONS.contains(&ext.as_str()) {
+        return Err(format!("扩展名 .{ext} 不支持网页预览,请用系统程序打开"));
     }
     Ok(canonical)
 }
@@ -246,29 +292,49 @@ mod tests {
     }
 
     #[test]
-    fn open_allowed_enforces_extension_and_root() {
+    fn open_allowed_enforces_extension_and_allows_registered_out_of_root() {
         let root = fresh_root("open");
         let inside = root.join("report.docx");
         fs::write(&inside, "x").unwrap();
         let inside_txt = root.join("notes.txt");
         fs::write(&inside_txt, "x").unwrap();
+        // 真实技能把交付物写在项目目录并登记原路径(2026-09-12 放宽):
+        // 根外的白名单格式文件必须放行(manifest 调解是信任边界)
         let outside_dir = std::env::temp_dir().join(format!("qidi-outside-{}", std::process::id()));
         fs::create_dir_all(&outside_dir).unwrap();
-        let outside = outside_dir.join("evil.docx");
+        let outside = outside_dir.join("deliverable.docx");
         fs::write(&outside, "x").unwrap();
         let wrong_ext = root.join("archive.zip");
         fs::write(&wrong_ext, "x").unwrap();
 
-        assert!(open_allowed(inside.to_str().unwrap(), &root).is_ok());
-        assert!(open_allowed(inside_txt.to_str().unwrap(), &root).is_ok());
+        assert!(open_allowed(inside.to_str().unwrap()).is_ok());
+        assert!(open_allowed(inside_txt.to_str().unwrap()).is_ok());
         assert!(
-            open_allowed(wrong_ext.to_str().unwrap(), &root).is_err(),
+            open_allowed(wrong_ext.to_str().unwrap()).is_err(),
             "zip 不在白名单"
         );
         assert!(
-            open_allowed(outside.to_str().unwrap(), &root).is_err(),
-            "根外路径拒绝"
+            open_allowed(outside.to_str().unwrap()).is_ok(),
+            "根外白名单格式放行(真实交付物路径)"
         );
-        assert!(open_allowed(root.join("nope.docx").to_str().unwrap(), &root).is_err());
+        assert!(open_allowed(root.join("nope.docx").to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn open_allowed_rejects_relative_and_read_rejects_html() {
+        let root = fresh_root("open2");
+        // 相对路径拒绝(k3 放宽审计 W2:按 GUI 进程 CWD 解析不可预测)
+        assert!(open_allowed("some/relative/report.md").is_err());
+
+        // html:系统打开放行,预览读取拒绝(W3:html 字节进 webview=潜在 XSS)
+        let page = root.join("page.html");
+        fs::write(&page, "<p>x</p>").unwrap();
+        assert!(open_allowed(page.to_str().unwrap()).is_ok());
+        assert!(open_allowed_for_read(page.to_str().unwrap()).is_err());
+
+        // md:两条链都放行
+        let notes = root.join("notes.md");
+        fs::write(&notes, "# t").unwrap();
+        assert!(open_allowed_for_read(notes.to_str().unwrap()).is_ok());
     }
 }

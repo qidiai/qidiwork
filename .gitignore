@@ -52,3 +52,6 @@ _copy_target.log
 
 # 运行时本地配置（可能含 API key），不入库
 .qidi/
+
+# k3 审计临时派发脚本(本机一次性工具,不入库)
+tools/_k3_audit_dispatch*.py

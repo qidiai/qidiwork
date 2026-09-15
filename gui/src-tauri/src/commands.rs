@@ -356,7 +356,12 @@ pub async fn agent_recover(
                         let _ = event_app.emit("acp-event", payload);
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // 展示流有损(k3 审计 W3):丢帧最坏导致前端少一条
+                    // TurnUsage/TurnCompleted,后者会让 busy 卡住——记日志
+                    // 便于与"任务卡住"类用户报告对账
+                    tracing::warn!(dropped = n, "recover 桥 acp-event 订阅滞后");
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -570,7 +575,7 @@ pub async fn office_artifacts(app: AppHandle, task: String) -> Result<Vec<Artifa
 
 /// 用系统默认程序打开产物。签名是 (task, name) 而非裸路径(k3 P1a
 /// 审计 P1):服务端重读 manifest,仅放行**已登记**的产物路径,
-/// 再过扩展名白名单 + 根约束。
+/// 再过扩展名白名单 + 本地盘符约束(根约束已放宽,见 open_allowed)。
 #[tauri::command]
 pub async fn office_open(app: AppHandle, task: String, name: String) -> Result<(), String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
@@ -580,7 +585,7 @@ pub async fn office_open(app: AppHandle, task: String, name: String) -> Result<(
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("产物 {name} 未登记于任务 {task}"))?;
-    let canonical = office::open_allowed(&card.path, &root)?;
+    let canonical = office::open_allowed(&card.path)?;
     office::open_in_system(&canonical);
     Ok(())
 }
@@ -589,12 +594,17 @@ pub async fn office_open(app: AppHandle, task: String, name: String) -> Result<(
 const PREVIEW_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// 预览读取产物字节(base64 返回)。与 office_open 同一道校验链:
-/// manifest 已登记 → 扩展名白名单 → canonicalize 根约束,另加大小上限。
+/// manifest 已登记 → 扩展名白名单 → 本地盘符约束(read 链另剔除 html,
+/// 见 open_allowed_for_read),另加大小上限。
+/// `max_bytes` 允许调用方收紧上限(如 md 预览 2MB),在后端读文件前
+/// 短路(k3 审计 Note5:避免超大文件白走 base64 IPC 传输+解码);
+/// 上限恒被钳制在 PREVIEW_MAX_BYTES 内,不会放大。
 #[tauri::command]
 pub async fn office_read_file(
     app: AppHandle,
     task: String,
     name: String,
+    max_bytes: Option<u64>,
 ) -> Result<String, String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     let root = office::workspaces_root(&home);
@@ -603,7 +613,8 @@ pub async fn office_read_file(
         .iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("产物 {name} 未登记于任务 {task}"))?;
-    let canonical = office::open_allowed(&card.path, &root)?;
+    let canonical = office::open_allowed_for_read(&card.path)?;
+    let limit = max_bytes.unwrap_or(PREVIEW_MAX_BYTES).min(PREVIEW_MAX_BYTES);
     // 32MB 级读入 + base64 编码是重阻塞活,移到阻塞线程池执行,
     // 避免拖慢同进程的其他 IPC 命令(W6,step 交叉审计遗留项)。
     tauri::async_runtime::spawn_blocking(move || {
@@ -612,23 +623,23 @@ pub async fn office_read_file(
         let size = std::fs::metadata(&canonical)
             .map_err(|e| format!("读取元数据失败: {e}"))?
             .len();
-        if size > PREVIEW_MAX_BYTES {
+        if size > limit {
             return Err(format!(
                 "文件 {}MB 超过预览上限 {}MB",
                 size / (1024 * 1024),
-                PREVIEW_MAX_BYTES / (1024 * 1024)
+                limit / (1024 * 1024)
             ));
         }
         use std::io::Read as _;
         let file = std::fs::File::open(&canonical).map_err(|e| format!("打开文件失败: {e}"))?;
         let mut bytes = Vec::with_capacity(size as usize);
-        file.take(PREVIEW_MAX_BYTES + 1)
+        file.take(limit + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| format!("读取失败: {e}"))?;
-        if bytes.len() as u64 > PREVIEW_MAX_BYTES {
+        if bytes.len() as u64 > limit {
             return Err(format!(
                 "文件在读取期间增长,超过预览上限 {}MB",
-                PREVIEW_MAX_BYTES / (1024 * 1024)
+                limit / (1024 * 1024)
             ));
         }
         use base64::Engine as _;

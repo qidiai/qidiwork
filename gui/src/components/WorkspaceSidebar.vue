@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { pushSystem, sendTask, startSession, useAgentState } from "../composables/useAgent";
+import { pushSystem, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
@@ -10,12 +10,19 @@ import { closeAllPreviews } from "../composables/usePreview";
 async function newSession() {
   try {
     await startSession();
+    // 新会话落盘后立即可见(运行中开第二个会话不彼此阻塞)
+    await loadHistory();
   } catch (e) {
     pushSystem(`开启会话失败:${String(e)}`);
   }
 }
 
-const { connected, turnInProgress, sessionId } = useAgentState();
+const { connected, sessionId, sessionList } = useAgentState();
+
+/** 本进程已建有桶的会话(实时流在手):点击直接切换,不走重恢复。 */
+function liveOf(id: string): SessionListItem | undefined {
+  return sessionList.value.find((s) => s.id === id);
+}
 
 const { workspaces, currentTask } = useOfficeState();
 const { skills } = useSkills();
@@ -83,7 +90,13 @@ async function clearHistory(): Promise<void> {
 }
 
 async function resumeSession(h: HistoryEntry): Promise<void> {
-  if (h.session_id === sessionId.value || turnInProgress.value || resuming.value) return;
+  if (h.session_id === sessionId.value || resuming.value) return;
+  // 活动会话(已有实时转录):直接切换视图,不重恢复、不丢流
+  const live = liveOf(h.session_id);
+  if (live) {
+    switchSession(h.session_id);
+    return;
+  }
   resuming.value = true;
   try {
     await invoke("session_resume", { sessionId: h.session_id });
@@ -195,7 +208,6 @@ function pick(name: string): void {
           v-for="skill in officeSkills"
           :key="skill.name"
           class="skill-chip"
-          :disabled="turnInProgress"
           :title="skill.description || skill.name"
           @click="runSkill(skill)"
         >
@@ -223,11 +235,24 @@ function pick(name: string): void {
           :key="h.session_id"
           class="ws-item"
           :class="{ active: h.session_id === sessionId }"
-          :title="h.session_id === sessionId ? '当前会话' : '点击续接(agent 上下文恢复)'"
+          :title="
+            h.session_id === sessionId
+              ? '当前会话'
+              : liveOf(h.session_id)
+                ? '点击切换(会话进行中,实时转录已保留)'
+                : '点击续接(agent 上下文恢复)'
+          "
           @click="resumeSession(h)"
         >
-          <span class="ws-dot" :class="{ on: h.session_id === sessionId }"></span>
+          <span
+            class="ws-dot"
+            :class="{ on: h.session_id === sessionId, run: liveOf(h.session_id)?.busy }"
+          ></span>
           <span class="ws-name">{{ historyLabel(h) }}</span>
+          <span v-if="liveOf(h.session_id)?.busy" class="ws-run">运行中</span>
+          <span v-else-if="liveOf(h.session_id)?.queued" class="ws-count">{{
+            liveOf(h.session_id)!.queued
+          }}</span>
         </li>
       </ul>
     </div>
@@ -357,6 +382,25 @@ function pick(name: string): void {
 
 .ws-dot.on {
   background: var(--success);
+}
+
+/* 会话运行中:呼吸点 + 右侧标签(多会话并跑时的后台活动可见) */
+.ws-dot.run {
+  background: var(--accent);
+  animation: run-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes run-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ws-run {
+  margin-left: auto;
+  flex: none;
+  font-size: var(--font-size-sm);
+  color: var(--accent);
 }
 
 .ws-name {

@@ -39,7 +39,9 @@ export function renderMarkdown(src: string): string {
   return DOMPurify.sanitize(html, PURIFY_CONFIG) as unknown as string;
 }
 
-/** 消息区点击拦截:外链一律交系统浏览器,阻止 webview 导航。 */
+/** 消息区点击拦截:外链交系统处理(https→浏览器,mailto→邮件客户端),
+ * 其余协议不动作;一律阻止 webview 导航。与 ALLOWED_URI_REGEXP 白名单
+ * 保持同集(k3 审计 W4:mailto 此前被放行渲染却被点击处理吞掉)。 */
 export function handleLinkClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null;
   const anchor = target?.closest?.("a");
@@ -47,7 +49,7 @@ export function handleLinkClick(e: MouseEvent): void {
   e.preventDefault();
   e.stopPropagation();
   const href = anchor.getAttribute("href") ?? "";
-  if (/^https?:/i.test(href)) {
+  if (/^(?:https?|mailto):/i.test(href)) {
     void openUrl(href);
   }
 }

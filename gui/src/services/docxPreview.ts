@@ -37,6 +37,26 @@ export async function renderDocx(bytes: Uint8Array, container: HTMLElement): Pro
     experimental: true,
     useBase64URL: true,
   });
+  markThreeLineTables(container);
+}
+
+/** 三线表标记(k3 补审计):仅当表内存在内联边框单元格(docx-preview 输出
+ * 为 td 的内联 style)时加 has-cell-borders 类,样式表再为无内联边框的
+ * 单元格补浅灰网格线。布局用/设计无边框的表格不加线。 */
+function markThreeLineTables(container: HTMLElement): void {
+  container.querySelectorAll("table").forEach((tbl) => {
+    const cells = tbl.querySelectorAll("td, th");
+    for (const cell of cells) {
+      const style = (cell as HTMLElement).style;
+      for (const side of ["top", "right", "bottom", "left"]) {
+        const v = style.getPropertyValue(`border-${side}-style`);
+        if (v && v !== "none" && v !== "hidden") {
+          tbl.classList.add("has-cell-borders");
+          return;
+        }
+      }
+    }
+  });
 }
 
 /** base64 → 字节(IPC 传 String,前端解码)。返回类型钉住 ArrayBuffer

@@ -60,6 +60,14 @@ pub enum BridgeEvent {
         session_id: String,
         stop_reason: String,
     },
+    /// 回合用量(session/prompt 应答的 `_meta` 原样透传:usage 为全回合
+    /// token/成本汇总,modelUsage 键为实际使用的模型 id)。仅成功应答
+    /// 携带。原样透传而非镜像成强类型:内核字段演进不破坏 GUI,前端
+    /// 按 feature-detect 宽松解析(双 casing 兼容)。
+    TurnUsage {
+        session_id: String,
+        meta: serde_json::Value,
+    },
     /// 会话恢复结果(重 spawn 后)。
     SessionRestored {
         session_id: String,
@@ -517,6 +525,24 @@ impl AcpBridge {
                         .and_then(|s| s.as_str())
                         .unwrap_or("unknown")
                         .to_string();
+                    // 先 usage 后 completed:前端在 completed 时把用量挂到
+                    // 刚完成的 assistant 消息并累计(见 useAgent.ts)。
+                    // _meta 无 schema 上限,畸形内核可塞出巨帧:超限丢弃
+                    // (防御纵深,k3 审计 W2,GUI 用量显示降级为缺失)
+                    let meta = result
+                        .get("_meta")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    if !meta.is_null() {
+                        if serde_json::to_string(&meta).map_or(false, |s| s.len() <= 64 * 1024) {
+                            let _ = this.event_tx.send(BridgeEvent::TurnUsage {
+                                session_id: session.clone(),
+                                meta,
+                            });
+                        } else {
+                            tracing::warn!(%session, "session/prompt _meta 超过 64KB,丢弃用量透传");
+                        }
+                    }
                     let _ = this.event_tx.send(BridgeEvent::TurnCompleted {
                         session_id: session,
                         stop_reason: stop,

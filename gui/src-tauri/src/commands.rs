@@ -344,8 +344,22 @@ pub async fn agent_recover(
     let generation = bridge.next_generation();
     let event_bridge = Arc::clone(&new_bridge);
     let event_app = app.clone();
+
+    // W3 补发用克隆:转发任务在 subscribe 之后重发恢复结果——reconnect 内的
+    // 原发射早于订阅建立,被 broadcast 丢弃。此处用克隆而非 move:restored 与
+    // failed 仍要供返回值 restored.len() 与上面的磁盘移除循环使用。
+    let restored_ids = restored.clone();
+    let failed_ids = failed.clone();
+
     tauri::async_runtime::spawn(async move {
         let mut rx = event_bridge.subscribe();
+        // 订阅已建立,补发恢复结果(reconnect 期间无订阅者,原发已丢;双发对前端幂等)
+        for id in &restored_ids {
+            event_bridge.notify_session_restored(id);
+        }
+        for (id, err) in &failed_ids {
+            event_bridge.notify_session_restore_failed(id, err);
+        }
         loop {
             if event_app.state::<BridgeState>().generation() != generation {
                 break; // 桥已被替换:本转发任务退役
@@ -509,11 +523,11 @@ pub async fn session_resume(
     if b.sessions().iter().any(|(id, _)| id == &session_id) {
         // 已在本桥也要发事件:前端只在收到 SessionRestored 时切 active
         // sessionId,早退不发会让点击静默无效(k3 审计)
-        b.notify_session_restored(session_id);
+        b.notify_session_restored(&session_id);
         return Ok(());
     }
     b.load_session(&session_id, cwd).await?;
-    b.notify_session_restored(session_id);
+    b.notify_session_restored(&session_id);
     Ok(())
 }
 

@@ -251,3 +251,29 @@ async fn cancel_permission_completes_roundtrip_once() {
     assert!(!events.is_empty());
     transport.shutdown().await;
 }
+
+#[tokio::test]
+async fn notify_methods_emit_after_subscribe() {
+    let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
+    let bridge = AcpBridge::attach(transport.clone()).unwrap();
+    let mut rx = bridge.subscribe();
+
+    bridge.notify_session_restored("s1");
+    bridge.notify_session_restore_failed("s2", "e");
+
+    let first = next_event(&mut rx).await;
+    assert!(
+        matches!(&first, BridgeEvent::SessionRestored { session_id } if session_id == "s1"),
+        "first={first:?}"
+    );
+    let second = next_event(&mut rx).await;
+    assert!(
+        matches!(
+            &second,
+            BridgeEvent::SessionRestoreFailed { session_id, error }
+                if session_id == "s2" && error == "e"
+        ),
+        "second={second:?}"
+    );
+    transport.shutdown().await;
+}

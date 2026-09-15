@@ -486,8 +486,19 @@ impl AcpBridge {
 
     /// 单会话恢复完成通知(session_resume 用):事件经 ensure_bridge 的
     /// 转发链到前端,前端切 active sessionId。
-    pub fn notify_session_restored(&self, session_id: String) {
-        let _ = self.event_tx.send(BridgeEvent::SessionRestored { session_id });
+    pub fn notify_session_restored(&self, session_id: &str) {
+        let _ = self.event_tx.send(BridgeEvent::SessionRestored {
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// 补发会话恢复失败事件(恢复链订阅建立后使用,见 commands.rs agent_recover;
+    /// k3 交叉审计 W3:reconnect 内的原发射发生在订阅前,会被 broadcast 丢弃)。
+    pub fn notify_session_restore_failed(&self, session_id: &str, error: &str) {
+        let _ = self.event_tx.send(BridgeEvent::SessionRestoreFailed {
+            session_id: session_id.to_string(),
+            error: error.to_string(),
+        });
     }
 
     /// 发起回合:立即返回,回合完成经 [`BridgeEvent::TurnCompleted`] 通知

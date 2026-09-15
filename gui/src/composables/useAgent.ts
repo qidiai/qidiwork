@@ -293,6 +293,7 @@ async function onAcpEvent(ev: AcpEvent) {
         b.queue = [];
         b.pendingUsage = null;
       }
+      permissionQueue.value = [];
       {
         const bucket = activeBucket();
         pushBucketSystem(
@@ -424,6 +425,7 @@ export async function cancelTurn(): Promise<void> {
   const bucket = activeBucket();
   if (!bucket) return;
   await invoke("session_cancel", { sessionId: bucket.id });
+  permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== bucket.id);
 }
 
 /** 「立即插入」(两次 Enter 的第二次):取消当前回合,队列立即续跑。

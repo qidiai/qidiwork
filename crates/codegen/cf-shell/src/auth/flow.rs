@@ -215,9 +215,6 @@ async fn run_external_auth_provider(
         "auth: running external auth provider"
     );
 
-    // TODO(security): scrub QIDI_AUTH from this child's env
-    // (`.env_remove("QIDI_AUTH")`) like the hook runner and MCP stdio spawn do;
-    // the external auth script is user-configured arbitrary code.
     let mut cmd = tokio::process::Command::new("sh");
     cmd.args(["-c", command])
         .stdin(std::process::Stdio::null())
@@ -239,6 +236,9 @@ async fn run_external_auth_provider(
 
     cf_tools::util::detach_command(&mut cmd);
     cmd.envs(cf_tools::util::pager_env());
+    // The external auth script is user-configured arbitrary code; don't let it
+    // inherit inline credentials. Placed last so removal wins over pager_env().
+    cmd.env_remove("QIDI_AUTH");
 
     let mut child = cmd
         .spawn()

@@ -19,6 +19,15 @@ QIDI Code 是一个基于 Rust 构建的终端 AI 编码工具，支持多模型
 
 ## 📦 安装
 
+### Windows 用户：直接下载安装（推荐）
+
+1. 打开下载中心：<https://qidiwork.qidiai.ltd/>
+2. 下载 `qidiwork-setup-0.1.0.exe`（约 34 MB，AI 内核已随包内置，安装即用）
+3. 安装时如遇 Windows SmartScreen 蓝色提示：点「更多信息」→「仍要运行」（未购买代码签名证书的正常现象，详见 [安装指引](docs/安装指引-SmartScreen.md)）
+4. 安装完成后程序自动启动，在设置面板填入模型 API Key 即可开始对话
+
+版本清单（含 SHA-256 校验值）：<https://qidiwork.qidiai.ltd/releases/latest.json>
+
 ### 从源码构建
 
 ```bash
@@ -29,7 +38,8 @@ cd qidicode
 set PROTOC=<path-to-protoc.exe>
 
 cargo build --release
-# 二进制位于 target/release/qidi.exe (Windows) 或 target/release/qidi (Unix)
+# 内核二进制位于 target/release/qidiwork.exe (Windows) 或 target/release/qidiwork (Unix)
+# 桌面工作台：gui/ 目录下 npm install && npx tauri build
 ```
 
 ### 环境要求

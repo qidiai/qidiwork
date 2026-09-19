@@ -10,7 +10,7 @@ rem 前提 2:生产版 GUI 构建时必须带 custom-protocol,否则运行时仍找 devUrl。
 rem   cd /d G:\qidiwork\gui && npm run build
 rem   cd src-tauri && cargo build --release --features custom-protocol
 
-set KERNEL=G:\qidiwork\target\debug\qidiwork.exe
+set KERNEL=G:\qidiwork\target\release\qidiwork.exe
 
 if not exist "%KERNEL%" (
     echo [错误] 未找到内核,请先构建主工程内核,见文件头注释。

@@ -7,7 +7,7 @@
 // 扩展源执行,进不了本页源;若未来需更强隔离,换 pdf.js worker 方案。
 import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { base64ToBytes } from "../services/docxPreview";
+import { base64ToBytes } from "../services/bytes";
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";
 

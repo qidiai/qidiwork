@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from "vue";
 import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, type ToolCallItem } from "../composables/useAgent";
-import { renderMarkdown, handleLinkClick } from "../services/render";
+import { handleLinkClick } from "../services/render";
 import { fmtTokens, fmtCost } from "../services/usage";
+import MarkdownBlock from "./MarkdownBlock.vue";
+import ToolRaw from "./ToolRaw.vue";
 
 const { messages, connected, turnInProgress, permission, queued } = useAgentState();
 const draft = ref("");
@@ -16,6 +18,9 @@ function onMsgClick(e: MouseEvent): void {
 // 每条消息的工具调用分组折叠(默认收起,只留一行摘要);
 // 消息 id → 展开。工具执行期间自动展开,完成后收起。
 const expandedTools = ref<Record<number, boolean>>({});
+// 单条工具明细展开态(key=消息id:工具id):未展开不挂载 ToolRaw,
+// 避免折叠时也对 raw 做 JSON.stringify(性能审计)
+const expandedRaw = ref<Record<string, boolean>>({});
 
 // 自动化流程清单:agent 用 todowrite 工具维护分步流程(与编码助手同源)。
 // 从工具调用原始数据提取 todos;全量替换语义 → 最新一份即当前流程状态。
@@ -184,12 +189,12 @@ void initAgent();
             <div class="thought-text">{{ msg.thought }}</div>
           </details>
 
-          <!-- eslint-disable-next-line vue/no-v-html: 内容已经 DOMPurify 消毒 -->
-          <div
+          <!-- 流式 markdown:节流渲染 + 结果缓存(MarkdownBlock) -->
+          <MarkdownBlock
             v-if="msg.role !== 'user'"
             class="msg-content md"
-            v-html="renderMarkdown(msg.content)"
-          ></div>
+            :src="msg.content"
+          />
           <div v-else class="msg-content user-text">{{ msg.content }}</div>
 
           <!-- 工具调用分组:一条摘要代替 N 行,展开看逐条与原始数据 -->
@@ -214,6 +219,11 @@ void initAgent();
               v-for="tool in msg.toolCalls"
               :key="tool.toolCallId"
               class="tool-call"
+              @toggle="
+                expandedRaw[`${msg.id}:${tool.toolCallId}`] = (
+                  $event.target as HTMLDetailsElement
+                ).open
+              "
             >
               <summary>
                 <span class="tool-status" :data-status="tool.status">{{
@@ -221,7 +231,10 @@ void initAgent();
                 }}</span>
                 {{ tool.title }}
               </summary>
-              <pre class="tool-raw">{{ JSON.stringify(tool.raw, null, 2) }}</pre>
+              <ToolRaw
+                v-if="expandedRaw[`${msg.id}:${tool.toolCallId}`]"
+                :raw="tool.raw"
+              />
             </details>
           </details>
 
@@ -551,15 +564,6 @@ void initAgent();
 
 .tool-status[data-status="completed"] {
   color: var(--success);
-}
-
-.tool-raw {
-  margin: 0;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  max-height: 220px;
-  overflow: auto;
-  font-size: var(--font-size-sm);
 }
 
 /* 回合用量 chip:弱化展示,不与正文抢注意力 */

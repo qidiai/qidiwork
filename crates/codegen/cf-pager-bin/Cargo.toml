@@ -98,3 +98,6 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc
 # Forward the sandbox-enforcement feature to the library.
 sandbox-enforce = ["cf-pager/sandbox-enforce"]
 release-dist = ["cf-pager/release-dist"]
+
+[lints]
+workspace = true

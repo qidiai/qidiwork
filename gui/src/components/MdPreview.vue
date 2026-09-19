@@ -7,7 +7,7 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { renderMarkdown, handleLinkClick } from "../services/render";
-import { base64ToBytes } from "../services/docxPreview";
+import { base64ToBytes } from "../services/bytes";
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";
 

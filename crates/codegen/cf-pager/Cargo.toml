@@ -275,3 +275,6 @@ path = "src/bin/mermaid_playground.rs"
 test = false
 name = "scrollback_search_playground"
 path = "src/bin/scrollback_search_playground.rs"
+
+[lints]
+workspace = true

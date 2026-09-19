@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from "vue";
+import { onMounted, ref, computed, defineAsyncComponent } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
 import { fmtTokens, fmtCost } from "../services/usage";
-import SettingsModal from "./SettingsModal.vue";
+// 设置弹窗按需加载,不进首屏 chunk
+const SettingsModal = defineAsyncComponent(() => import("./SettingsModal.vue"));
 
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
 const { connected, sessionId, sessionUsage } = useAgentState();

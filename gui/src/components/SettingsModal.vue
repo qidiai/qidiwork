@@ -7,6 +7,7 @@ import { computed, onMounted, ref } from "vue";
 import {
   readSettings,
   saveSettings,
+  createModel,
   stopKernel,
   type ModelOption,
   type SettingsInfo,
@@ -23,6 +24,62 @@ const selectedId = ref("");
 const apiKey = ref("");
 const saving = ref(false);
 const showKey = ref(false);
+
+// 新建模型(首次运行引导):无任何 [model.*] 时自动展开表单,
+// 让用户能在 GUI 里从零配出第一个模型(发布链审计:此前必报错)
+const creating = ref(false);
+const commonPresets = [
+  { key: "", label: "自定义(OpenAI 兼容)", model: "", baseUrl: "" },
+  { key: "deepseek", label: "DeepSeek", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" },
+  { key: "openai", label: "OpenAI", model: "gpt-4o", baseUrl: "https://api.openai.com/v1" },
+  { key: "moonshot", label: "Moonshot Kimi", model: "moonshot-v1-8k", baseUrl: "https://api.moonshot.cn/v1" },
+  { key: "bigmodel", label: "智谱 GLM", model: "glm-4-plus", baseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+  { key: "siliconflow", label: "硅基流动", model: "deepseek-ai/DeepSeek-V3", baseUrl: "https://api.siliconflow.cn/v1" },
+];
+const cPreset = ref(commonPresets[0]!);
+const cId = ref("");
+const cModel = ref("");
+const cBaseUrl = ref("");
+const cName = ref("");
+const cApiKey = ref("");
+const cError = ref("");
+
+function pickPreset(key: string): void {
+  cPreset.value = commonPresets.find((p) => p.key === key) ?? commonPresets[0]!;
+  if (cPreset.value.model) cModel.value = cPreset.value.model;
+  if (cPreset.value.baseUrl) cBaseUrl.value = cPreset.value.baseUrl;
+}
+
+async function submitCreate(): Promise<void> {
+  cError.value = "";
+  if (!/^[A-Za-z0-9_-]+$/.test(cId.value.trim())) {
+    cError.value = "id 只允许字母、数字、- 和 _(如 deepseek)";
+    return;
+  }
+  if (!cModel.value.trim() || !cBaseUrl.value.trim()) {
+    cError.value = "模型名与 base_url 不能为空";
+    return;
+  }
+  saving.value = true;
+  try {
+    await createModel({
+      id: cId.value.trim(),
+      model: cModel.value.trim(),
+      baseUrl: cBaseUrl.value.trim(),
+      name: cName.value.trim() || null,
+      apiKey: cApiKey.value.trim() || null,
+    });
+    cApiKey.value = "";
+    creating.value = false;
+    await load();
+    selectedId.value = cId.value.trim();
+    pushSystem(`模型 ${cId.value.trim()} 已创建;重启内核后生效,可点「保存并重启内核」。`);
+  } catch (e) {
+    cError.value = String(e);
+  } finally {
+    saving.value = false;
+  }
+}
 
 const selected = computed<ModelOption | null>(
   () => info.value?.models.find((m) => m.id === selectedId.value) ?? null,
@@ -45,6 +102,10 @@ async function load(): Promise<void> {
   try {
     info.value = await readSettings();
     selectedId.value = info.value.default_model ?? info.value.models[0]?.id ?? "";
+    // 无任何模型定义:自动展开新建表单(首次运行引导)
+    if (!info.value.models.length && !info.value.default_model) {
+      creating.value = true;
+    }
   } catch (e) {
     loadError.value = String(e);
   } finally {
@@ -93,34 +154,77 @@ onMounted(load);
       </div>
 
       <div v-else class="modal-body">
-        <label class="field">
-          <span class="field-label">默认模型</span>
-          <select v-model="selectedId" class="input">
-            <option v-for="m in options" :key="m.id" :value="m.id">
-              {{ m.id === info?.default_model ? "● " : "" }}{{ m.name }}
-            </option>
-          </select>
-          <span v-if="selected?.base_url" class="field-hint">{{ selected.base_url }}</span>
-        </label>
+        <!-- 新建模型表单(首次运行引导) -->
+        <template v-if="creating">
+          <div class="create-box">
+            <div class="create-title">新建模型</div>
+            <label class="field">
+              <span class="field-label">服务商模板</span>
+              <select class="input" :value="cPreset.key" @change="pickPreset(($event.target as HTMLSelectElement).value)">
+                <option v-for="p in commonPresets" :key="p.key" :value="p.key">{{ p.label }}</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">id(配置内唯一,如 deepseek)</span>
+              <input v-model="cId" class="input" placeholder="deepseek" />
+            </label>
+            <label class="field">
+              <span class="field-label">模型名(上游 model)</span>
+              <input v-model="cModel" class="input" placeholder="deepseek-chat" />
+            </label>
+            <label class="field">
+              <span class="field-label">base_url(OpenAI 兼容端点)</span>
+              <input v-model="cBaseUrl" class="input" placeholder="https://api.deepseek.com/v1" />
+            </label>
+            <label class="field">
+              <span class="field-label">显示名(可选)</span>
+              <input v-model="cName" class="input" placeholder="留空回落 id" />
+            </label>
+            <label class="field">
+              <span class="field-label">API Key</span>
+              <input v-model="cApiKey" class="input" type="password" autocomplete="off" placeholder="sk-…" />
+            </label>
+            <p v-if="cError" class="err">{{ cError }}</p>
+            <div class="create-actions">
+              <button class="btn ghost" @click="creating = false">收起</button>
+              <button class="btn primary" :disabled="saving" @click="submitCreate">
+                {{ saving ? "创建中…" : "创建模型" }}
+              </button>
+            </div>
+          </div>
+        </template>
 
-        <label class="field">
-          <span class="field-label">API Key({{ selected?.id ?? "—" }})</span>
-          <input
-            v-model="apiKey"
-            class="input"
-            :type="showKey ? 'text' : 'password'"
-            autocomplete="off"
-            :placeholder="
-              selected?.has_api_key ? '已设置,留空保持不变' : '未设置,留空跳过'
-            "
-          />
-          <span class="field-hint">
-            留空不修改。保存后明文写入 config.toml(与 TUI 同一配置)。
-            <button class="link-btn" @click.prevent="showKey = !showKey">
-              {{ showKey ? "隐藏" : "显示" }}
-            </button>
-          </span>
-        </label>
+        <template v-else>
+          <label class="field">
+            <span class="field-label">默认模型</span>
+            <select v-model="selectedId" class="input">
+              <option v-for="m in options" :key="m.id" :value="m.id">
+                {{ m.id === info?.default_model ? "● " : "" }}{{ m.name }}
+              </option>
+            </select>
+            <span v-if="selected?.base_url" class="field-hint">{{ selected.base_url }}</span>
+            <button class="link-btn self-start" @click.prevent="creating = true">+ 新建模型</button>
+          </label>
+
+          <label class="field">
+            <span class="field-label">API Key({{ selected?.id ?? "—" }})</span>
+            <input
+              v-model="apiKey"
+              class="input"
+              :type="showKey ? 'text' : 'password'"
+              autocomplete="off"
+              :placeholder="
+                selected?.has_api_key ? '已设置,留空保持不变' : '未设置,留空跳过'
+              "
+            />
+            <span class="field-hint">
+              留空不修改。保存后明文写入 config.toml(与 TUI 同一配置)。
+              <button class="link-btn" @click.prevent="showKey = !showKey">
+                {{ showKey ? "隐藏" : "显示" }}
+              </button>
+            </span>
+          </label>
+        </template>
 
         <p class="field-hint">
           内核在启动时读取配置:「保存并重启内核」立即生效;仅保存则下一条任务发送时自动重启生效。
@@ -280,5 +384,30 @@ onMounted(load);
 
 .btn.ghost {
   background: transparent;
+}
+
+/* 新建模型表单(首次运行引导) */
+.create-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--accent-soft, var(--border));
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.create-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.self-start {
+  align-self: flex-start;
 }
 </style>

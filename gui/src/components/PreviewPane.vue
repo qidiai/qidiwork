@@ -3,11 +3,13 @@
 // docx → DocxPreview(含矢量降级);xlsx/xls → XlsxPreview;pdf → PdfPreview;
 // md/markdown → MdPreview(marked+DOMPurify 安全渲染链);
 // 其余格式(含 txt/html/png 等白名单格式)暂不支持网页预览,引导系统打开。
-import { computed, ref } from "vue";
-import DocxPreview from "./DocxPreview.vue";
-import XlsxPreview from "./XlsxPreview.vue";
-import PdfPreview from "./PdfPreview.vue";
-import MdPreview from "./MdPreview.vue";
+import { computed, ref, defineAsyncComponent } from "vue";
+// 预览器全部异步分包:jszip/docx-preview/SheetJS/marked 等重依赖不进
+// 首屏 chunk,首次打开对应格式的预览 Tab 时才加载(启动性能审计)
+const DocxPreview = defineAsyncComponent(() => import("./DocxPreview.vue"));
+const XlsxPreview = defineAsyncComponent(() => import("./XlsxPreview.vue"));
+const PdfPreview = defineAsyncComponent(() => import("./PdfPreview.vue"));
+const MdPreview = defineAsyncComponent(() => import("./MdPreview.vue"));
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";
 

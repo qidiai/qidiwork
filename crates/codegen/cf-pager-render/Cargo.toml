@@ -112,3 +112,6 @@ default-bazel = []
 # test builds under cargo, where a dependency is never compiled with
 # `cfg(test)`. Never enabled by production builds.
 test-helpers = []
+
+[lints]
+workspace = true

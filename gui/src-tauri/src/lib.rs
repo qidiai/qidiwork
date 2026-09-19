@@ -50,6 +50,7 @@ pub fn run() -> i32 {
             commands::skills_list,
             commands::settings_read,
             commands::settings_save,
+            commands::settings_create_model,
             commands::sessions_history,
             commands::session_set_title,
             commands::session_resume,

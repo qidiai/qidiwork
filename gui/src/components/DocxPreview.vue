@@ -4,7 +4,8 @@
 // 图形(总平面图类)docx-preview 渲染为空白,必须引导"系统打开"。
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { probeDocx, renderDocx, base64ToBytes } from "../services/docxPreview";
+import { probeDocx, renderDocx } from "../services/docxPreview";
+import { base64ToBytes } from "../services/bytes";
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";
 

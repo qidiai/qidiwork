@@ -352,8 +352,13 @@ async fn run_browser_auth_flow(
     tracing::info!(server = server_name, "Opening browser for OAuth consent");
     if let Err(e) = webbrowser::open(&auth_url) {
         // eprintln! corrupts the TUI alternate screen (in-process, fd 2).
-        // TODO: surface auth URL via ACP notification instead.
-        tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth; user must visit URL manually");
+        // Fail fast with the URL instead of hanging on a callback nobody can
+        // trigger: the error propagates through the dedup broadcast and the
+        // caller's reporting path, so the user sees where to authorize.
+        tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth");
+        return Err(format!(
+            "无法打开浏览器完成 {server_name} 的 MCP 授权({e});请在系统设置确认可启动浏览器后重试,或手动访问授权链接:\n{auth_url}"
+        ));
     }
 
     // 5. Wait for the OAuth callback OR for tokens to appear on disk.

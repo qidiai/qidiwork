@@ -73,3 +73,6 @@ regex = { workspace = true }
 [[example]]
 name = "sandbox_smoke_test"
 required-features = ["enforce"]
+
+[lints]
+workspace = true

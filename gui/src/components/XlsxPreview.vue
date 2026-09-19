@@ -4,7 +4,7 @@
 import { ref, nextTick, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { WorkBook } from "xlsx";
-import { base64ToBytes } from "../services/docxPreview";
+import { base64ToBytes } from "../services/bytes";
 import { parseWorkbook, renderSheet } from "../services/sheetPreview";
 import { openPreviewArtifact } from "../composables/useOffice";
 import { pushSystem } from "../composables/useAgent";

@@ -31,12 +31,23 @@ function ensureHook(): void {
   });
 }
 
+// 渲染结果记忆化(性能审计 2026-09-19):模板内联调用在任意流式
+// chunk 到达时会对全部历史消息重算,已完成消息内容不变 → 命中缓存。
+// 上限防止长会话内存膨胀,满则整体清空(简单可靠,重算成本低)。
+const MD_CACHE_MAX = 300;
+const mdCache = new Map<string, string>();
+
 export function renderMarkdown(src: string): string {
+  const hit = mdCache.get(src);
+  if (hit !== undefined) return hit;
   ensureHook();
   const html = marked.parse(src, { async: false }) as string;
   // dompurify 3.x 类型声明 TrustedHTML;未启用 requireTrustedTypesPolicy
   // 时运行时返回普通 string。
-  return DOMPurify.sanitize(html, PURIFY_CONFIG) as unknown as string;
+  const out = DOMPurify.sanitize(html, PURIFY_CONFIG) as unknown as string;
+  if (mdCache.size >= MD_CACHE_MAX) mdCache.clear();
+  mdCache.set(src, out);
+  return out;
 }
 
 /** 消息区点击拦截:外链交系统处理(https→浏览器,mailto→邮件客户端),

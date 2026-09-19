@@ -23,6 +23,23 @@ export function saveSettings(modelId: string, apiKey: string | null): Promise<vo
   return invoke("settings_save", { modelId, apiKey });
 }
 
+/** 新建模型定义(首次运行引导):写入 [model.<id>] 并在无默认时指向它。 */
+export function createModel(input: {
+  id: string;
+  model: string;
+  baseUrl: string;
+  name: string | null;
+  apiKey: string | null;
+}): Promise<void> {
+  return invoke("settings_create_model", {
+    id: input.id,
+    model: input.model,
+    baseUrl: input.baseUrl,
+    name: input.name,
+    apiKey: input.apiKey,
+  });
+}
+
 /** 停止内核:下一条任务发送时自动以新配置重启(session_start 兜底)。 */
 export function stopKernel(): Promise<void> {
   return invoke("agent_stop");

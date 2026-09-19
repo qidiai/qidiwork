@@ -98,9 +98,13 @@ async fn ensure_agent(app: &AppHandle, state: &AgentState) -> Result<Arc<AgentPr
     }
 
     let home = app.path().home_dir().ok();
-    let process = AgentProcess::spawn(SpawnConfig::default_agent(home))
-        .await
-        .map_err(String::from)?;
+    let resource_dir = app.path().resource_dir().ok();
+    let process = AgentProcess::spawn(SpawnConfig::default_agent(
+        home,
+        resource_dir.as_deref(),
+    ))
+    .await
+    .map_err(String::from)?;
 
     // 退出转发 + 状态清理:agent 崩溃后 GUI 可感知(bridge 侧另发
     // Disconnected 事件;恢复编排见 agent_recover)。
@@ -466,6 +470,28 @@ pub async fn settings_save(
 ) -> Result<(), String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     settings::save_settings(&settings::config_path(&home), &model_id, api_key.as_deref())
+}
+
+/// 新建模型定义(首次运行引导):写入 [model.<id>](model/base_url/name
+/// +可选 api_key);无默认模型时自动指向它。内核下次启动生效。
+#[tauri::command]
+pub async fn settings_create_model(
+    app: AppHandle,
+    id: String,
+    model: String,
+    base_url: String,
+    name: Option<String>,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    settings::create_model(
+        &settings::config_path(&home),
+        &id,
+        &model,
+        &base_url,
+        name.as_deref(),
+        api_key.as_deref(),
+    )
 }
 
 /// 历史会话清单(侧栏「历史会话」)。

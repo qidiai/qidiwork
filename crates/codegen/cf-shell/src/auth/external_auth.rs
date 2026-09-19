@@ -89,10 +89,6 @@ pub(crate) fn run_external_auth_sync(command: &str, is_refresh: bool) -> Option<
 
     tracing::info!(cmd = %command, is_refresh, timeout_secs, "auth: running external auth provider (sync)");
 
-    // TODO(security): scrub QIDI_AUTH from this child's env
-    // (`.env_remove("QIDI_AUTH")`) like the hook runner and MCP stdio spawn do:
-    // an external auth provider is user-configured arbitrary code and should
-    // not inherit the parent's inline credentials.
     let mut cmd = Command::new("sh");
     cmd.args(["-c", command])
         .stdin(Stdio::null())
@@ -104,6 +100,9 @@ pub(crate) fn run_external_auth_sync(command: &str, is_refresh: bool) -> Option<
     }
     cf_tools::util::detach_std_command(&mut cmd);
     cmd.envs(cf_tools::util::pager_env());
+    // An external auth provider is user-configured arbitrary code; don't let it
+    // inherit inline credentials. Placed last so removal wins over pager_env().
+    cmd.env_remove("QIDI_AUTH");
     let mut child = cmd.spawn()
         .map_err(|e| {
             tracing::warn!(error = %e, cmd = %command, "auth: failed to start external auth provider");

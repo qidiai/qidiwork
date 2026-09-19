@@ -1,6 +1,7 @@
 // docx 预览服务:docx-preview.js 渲染 + 矢量图形检测(spike 结论:
 // gui/spike-docx,2026-09-09)。文字/表格类标书可渲染;含 DrawingML
 // 矢量图形(如施工总平面图)的文档渲染为空白,必须降级"系统打开"。
+// base64ToBytes 已移至 services/bytes.ts(避免重依赖被顺带引入)。
 import JSZip from "jszip";
 import { renderAsync } from "docx-preview";
 
@@ -57,13 +58,4 @@ function markThreeLineTables(container: HTMLElement): void {
       }
     }
   });
-}
-
-/** base64 → 字节(IPC 传 String,前端解码)。返回类型钉住 ArrayBuffer
- * 背衬:new Blob()/XLSX.read 等 API 在 TS 5.7+ 拒绝 ArrayBufferLike。 */
-export function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
 }

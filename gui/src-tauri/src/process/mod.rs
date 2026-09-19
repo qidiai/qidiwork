@@ -34,15 +34,28 @@ pub struct SpawnConfig {
 }
 
 impl SpawnConfig {
-    /// 默认:PATH 上 `qidi agent --stdio`,cwd = 用户主目录。
-    /// 环境变量 `QIDIWORK_AGENT_PATH` 覆盖程序路径(测试/灰度用;
-    /// 信任边界与本机权限等价,不应暴露给前端)。
-    pub fn default_agent(cwd: Option<PathBuf>) -> Self {
+    /// 内核程序解析优先级(生产安装包免配置可跑,发布链审计):
+    /// 1. 环境变量 `QIDIWORK_AGENT_PATH` 覆盖(测试/灰度用;信任边界与本机
+    ///    权限等价,不应暴露给前端);
+    /// 2. Tauri 随包资源 `<resource_dir>/qidiwork.exe`(NSIS 安装后内核与
+    ///    GUI 同目录);
+    /// 3. PATH 上的 `qidiwork`(开发机手工运行兜底;旧名 `qidi` 已随二进制
+    ///    改名废弃,指错会静默起错程序)。
+    /// cwd 默认用户主目录。
+    pub fn default_agent(cwd: Option<PathBuf>, resource_dir: Option<&Path>) -> Self {
+        let program = std::env::var("QIDIWORK_AGENT_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                let name = format!("qidiwork{}", std::env::consts::EXE_SUFFIX);
+                resource_dir
+                    .map(|d| d.join(&name))
+                    .filter(|p| p.exists())
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "qidiwork".to_string());
         Self {
-            program: std::env::var("QIDIWORK_AGENT_PATH")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| "qidi".to_string()),
+            program,
             // 参数同样可覆盖(联调指向本二进制 --mock-agent 时使用)。
             // 内核新版为子命令式 `agent stdio`(旧 --stdio 旗标已移除)。
             // --ack-no-sandbox:用户配置 always-approve 即全开 YOLO 时,

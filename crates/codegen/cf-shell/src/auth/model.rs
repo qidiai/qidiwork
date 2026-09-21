@@ -124,7 +124,7 @@ impl GrokAuth {
     }
 
     /// `true` when the token comes from a first-party xAI account —
-    /// either an OIDC login against https://auth.x.ai (or the local-dev
+    /// either an OIDC login against https://api.qidiai.ltd (or the local-dev
     /// equivalent), or an external auth provider that declared an xAI
     /// issuer for its token.
     ///

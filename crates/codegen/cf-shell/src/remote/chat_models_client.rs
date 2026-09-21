@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::auth::AuthManager;
 
-const QIDI_WEB_URL: &str = "https://grok.com";
+const QIDI_WEB_URL: &str = "https://qidiwork.qidiai.ltd";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]

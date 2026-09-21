@@ -394,19 +394,19 @@ async fn legacy_auth_hint_on_404_model_not_found() {
             let data = err.data.unwrap();
             let msg = data.as_str().unwrap();
             assert!(
-                msg.contains("deprecated authentication method"),
+                msg.contains("已弃用的登录方式"),
                 "404 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
-                msg.contains("grok logout"),
-                "hint must mention `grok logout`, got: {msg}"
+                msg.contains("qidiwork logout"),
+                "hint must mention `qidiwork logout`, got: {msg}"
             );
             assert!(
-                msg.contains("grok login"),
-                "hint must mention `grok login`, got: {msg}"
+                msg.contains("qidiwork login"),
+                "hint must mention `qidiwork login`, got: {msg}"
             );
             assert!(
-                msg.contains("Version:"),
+                msg.contains("版本："),
                 "must show client version, got: {msg}"
             );
         })
@@ -463,16 +463,16 @@ async fn legacy_auth_hint_on_401_unauthorized() {
             let data = err.data.unwrap();
             let msg = data.as_str().unwrap();
             assert!(
-                msg.contains("deprecated authentication method"),
+                msg.contains("已弃用的登录方式"),
                 "401 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
-                msg.contains("grok logout"),
-                "hint must mention `grok logout`, got: {msg}"
+                msg.contains("qidiwork logout"),
+                "hint must mention `qidiwork logout`, got: {msg}"
             );
             assert!(
-                msg.contains("grok login"),
-                "hint must mention `grok login`, got: {msg}"
+                msg.contains("qidiwork login"),
+                "hint must mention `qidiwork login`, got: {msg}"
             );
         })
         .await;
@@ -509,7 +509,7 @@ async fn no_legacy_hint_on_401_for_oidc_auth() {
                 .or_else(|| data.as_str())
                 .unwrap();
             assert!(
-                !msg.contains("deprecated authentication method"),
+                !msg.contains("已弃用的登录方式"),
                 "OIDC auth must NOT trigger WebLogin deprecation on 401, got: {msg}"
             );
             assert!(
@@ -549,7 +549,7 @@ async fn no_legacy_hint_for_oidc_auth() {
                 .or_else(|| data.as_str())
                 .unwrap();
             assert!(
-                !msg.contains("deprecated authentication method"),
+                !msg.contains("已弃用的登录方式"),
                 "OIDC auth must NOT trigger WebLogin deprecation, got: {msg}"
             );
             assert!(

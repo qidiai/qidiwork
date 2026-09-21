@@ -24,8 +24,7 @@ const MIN_DEVICE_CODE_EXPIRY_FALLBACK_SECS: i64 = 10 * 60;
 #[derive(Debug, Error)]
 pub enum DeviceCodeError {
     #[error(
-        "Device-code login is not available for this deployment. \
-         Try `grok login` or set XAI_API_KEY instead."
+        "此部署不支持设备码登录。\n         请改用 `qidiwork login`，或设置 XAI_API_KEY。"
     )]
     NotEnabled,
     #[error(transparent)]
@@ -153,7 +152,7 @@ pub async fn request_device_code(
             .form(&[
                 ("client_id", client_id),
                 ("scope", scope_str.as_str()),
-                ("referrer", "cf-tools"),
+                ("referrer", "qidi-code"),
             ]),
         &url,
     )
@@ -232,7 +231,7 @@ pub async fn complete_device_code_login(
         tokio::time::sleep(poll_interval).await;
 
         if tokio::time::Instant::now() > deadline {
-            anyhow::bail!("Device code expired. Run `grok login --device-auth` again.");
+            anyhow::bail!("设备码已过期，请重新运行 `qidiwork login --device-auth`。");
         }
 
         let resp = with_alpha_test_key(
@@ -273,7 +272,7 @@ pub async fn complete_device_code_login(
             }
             "expired_token" => {
                 tracing::warn!(description = detail, "device auth token expired");
-                anyhow::bail!("Device code expired. Run `grok login --device-auth` again.");
+                anyhow::bail!("设备码已过期，请重新运行 `qidiwork login --device-auth`。");
             }
             other => {
                 tracing::warn!(
@@ -610,7 +609,7 @@ pub(crate) mod tests {
         let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
         let claims = serde_json::json!({
             "sub": "user-42",
-            "iss": "https://auth.x.ai",
+            "iss": "https://api.qidiai.ltd",
             "aud": "client-id",
             "exp": 9999999999u64,
             "iat": 1000000000u64,
@@ -885,6 +884,6 @@ pub(crate) mod tests {
         let err = run_poll(vec![(400, serde_json::json!({ "error": "expired_token" }))])
             .await
             .expect_err("expired_token must be an error");
-        assert!(err.to_string().contains("expired"), "got: {err}");
+        assert!(err.to_string().contains("过期"), "got: {err}");
     }
 }

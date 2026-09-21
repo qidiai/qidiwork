@@ -175,8 +175,8 @@ fn require_xai_auth_for_share(
 ) -> Result<crate::auth::GrokAuth, acp::Error> {
     super::auth_gate::require_xai_auth(
         auth_manager,
-        "Authentication required to share session",
-        "Share session is disabled. Run `grok login` to authenticate.",
+        "分享会话需要先登录",
+        "分享会话功能已禁用。请运行 `qidiwork login` 登录。",
     )
 }
 
@@ -200,13 +200,13 @@ mod tests {
 
         let expires_at = Utc::now() + ttl;
 
-        // We must explicitly set oidc_issuer to a first-party xAI issuer.
-        // Only OIDC tokens against https://auth.x.ai (or the local-dev equivalent)
+        // We must explicitly set oidc_issuer to a first-party Qidi issuer.
+        // Only OIDC tokens against https://api.qidiai.ltd (or the local-dev equivalent)
         // return true from is_xai_auth(). This is required for the share tests to
         // exercise the happy path through require_xai_auth_for_share.
         let auth = GrokAuth {
             auth_mode: AuthMode::Oidc,
-            oidc_issuer: Some("https://auth.x.ai".to_string()),
+            oidc_issuer: Some("https://api.qidiai.ltd".to_string()),
             key: "test-key".into(),
             expires_at: Some(expires_at),
             create_time: Utc::now() - Duration::hours(1),
@@ -284,7 +284,7 @@ mod tests {
 
         assert_eq!(
             data,
-            "Share session is disabled. Run `grok login` to authenticate."
+            "分享会话功能已禁用。请运行 `qidiwork login` 登录。"
         );
     }
 }

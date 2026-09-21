@@ -93,7 +93,7 @@ fn auth_scope_uses_oauth2_when_present() {
         format!(
             "{}::{}",
             crate::auth::config::XAI_OAUTH2_ISSUER,
-            obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828"),
+            obfstr::obfstr!("qidi-code"),
         )
     );
 }

@@ -19,12 +19,11 @@ pub const RATE_LIMITED_ERROR_CODE: i32 = -32003;
 
 /// OAuth / session rate-limit copy (personal plan upgrade path).
 pub const RATE_LIMITED_USER_MESSAGE_OAUTH: &str =
-    "You\u{2019}ve hit the rate limit for your plan. Upgrade your account or try again later.";
+    "你已超出当前套餐的速率限制，请升级账户或稍后再试。";
 
-/// API key / team rate-limit copy. Personal grok.com upgrades do not raise API
-/// team limits; admins purchase credits or a higher spend-based tier.
-/// See https://docs.x.ai/developers/rate-limits#rate-limit-tiers
-pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str = "You\u{2019}ve hit your team\u{2019}s API rate limit. Ask a team admin to purchase more credits for higher limits, or try again later. See https://docs.x.ai/developers/rate-limits#rate-limit-tiers";
+/// API key / team rate-limit copy.
+pub const RATE_LIMITED_USER_MESSAGE_API_KEY: &str =
+    "你已达到团队的 API 速率限制。请联系团队管理员购买更多额度以提升上限，或稍后再试。";
 
 /// Pick rate-limit copy from the *active* auth method.
 ///
@@ -66,9 +65,9 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
                     && crate::agent::auth_method::has_xai_api_key_env()
                 {
                     format!(
-                        "{message}\n\nYou have an API key set (XAI_API_KEY). \
-                         Your cached OAuth session is being used instead. \
-                         To use your API key, run `grok logout` or type /logout in the TUI."
+                        "{message}\n\n你已设置了 API Key（XAI_API_KEY），\
+                         但系统正在改用你缓存的 OAuth 会话。\
+                         若要使用 API Key，请运行 `qidiwork logout`，或在 TUI 中输入 /logout。"
                     )
                 } else {
                     message
@@ -324,14 +323,13 @@ mod tests {
             rate_limited_user_message(true),
             RATE_LIMITED_USER_MESSAGE_API_KEY
         );
-        assert!(RATE_LIMITED_USER_MESSAGE_OAUTH.contains("Upgrade your account"));
-        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("team"));
-        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("credits"));
+        assert!(RATE_LIMITED_USER_MESSAGE_OAUTH.contains("升级账户"));
+        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("团队"));
+        assert!(RATE_LIMITED_USER_MESSAGE_API_KEY.contains("额度"));
         assert!(
-            RATE_LIMITED_USER_MESSAGE_API_KEY
-                .contains("https://docs.x.ai/developers/rate-limits#rate-limit-tiers")
+            !RATE_LIMITED_USER_MESSAGE_API_KEY.contains("升级账户"),
+            "API-key copy must not steer to personal-plan upgrade",
         );
-        assert!(!RATE_LIMITED_USER_MESSAGE_API_KEY.contains("Upgrade your account"));
     }
 
     #[test]
@@ -482,8 +480,8 @@ mod tests {
             let data = acp_err.data.unwrap();
             let msg = data.as_str().unwrap();
             assert!(
-                msg.contains("grok logout"),
-                "should suggest grok logout when API key is available: {msg}"
+                msg.contains("qidiwork logout"),
+                "should suggest qidiwork logout when API key is available: {msg}"
             );
             assert!(
                 msg.contains("/logout"),

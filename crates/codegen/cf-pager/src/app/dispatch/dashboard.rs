@@ -1281,7 +1281,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
                 d.set_error_toast(&format!(
-                    "/{token} requires SuperGrok — upgrade at {}",
+                    "/{token} 需要更高权限的套餐，了解详情见 {}",
                     super::billing::UPSELL_URL_UPGRADE
                 ));
             }

@@ -7,7 +7,7 @@
 //!       --trace /path/to/trace-<id>-all-turns.json \
 //!       [--output out.jsonl] \
 //!       [--model grok-4.5] \
-//!       [--api-base-url https://api.x.ai/v1] \
+//!       [--api-base-url https://api.qidiai.ltd/v1] \
 //!       [--api-key <key> | $XAI_API_KEY | <grok-home>/auth.json] \
 //!       [--min-confidence 0.7] \
 //!       [--include-reasoning true] \
@@ -48,7 +48,7 @@ struct Cli {
     model: String,
 
     /// Sampler base URL.
-    #[arg(long, default_value = "https://api.x.ai/v1")]
+    #[arg(long, default_value = "https://api.qidiai.ltd/v1")]
     api_base_url: String,
 
     /// API key. Overrides `$XAI_API_KEY` when set; falls back to
@@ -115,7 +115,7 @@ mod tests {
             .expect("parse");
         assert_eq!(cli.trace, PathBuf::from("foo.json"));
         assert_eq!(cli.model, "bar");
-        assert_eq!(cli.api_base_url, "https://api.x.ai/v1");
+        assert_eq!(cli.api_base_url, "https://api.qidiai.ltd/v1");
         assert!(cli.output.is_none());
         assert!(cli.api_key.is_none());
         assert!(cli.min_confidence.is_none());
@@ -187,7 +187,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(by_id("model"), vec!["grok-4.5"]);
-        assert_eq!(by_id("api_base_url"), vec!["https://api.x.ai/v1"]);
+        assert_eq!(by_id("api_base_url"), vec!["https://api.qidiai.ltd/v1"]);
         assert!(by_id("min_confidence").is_empty(), "no default");
         assert!(by_id("include_reasoning").is_empty(), "no default");
     }

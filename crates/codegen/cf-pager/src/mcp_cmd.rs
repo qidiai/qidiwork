@@ -10,21 +10,21 @@ use cf_shell::util::config::{McpServerConfig, McpServerTransportConfig};
 use crate::util::display_user_grok_path;
 
 const ADD_AFTER_HELP: &str = "\
-Examples:
-  # Add a stdio server (everything after -- is the server command)
-  grok mcp add xcode -- xcrun mcpbridge
+示例：
+  # 添加 stdio 服务器（-- 之后为服务器命令）
+  qidiwork mcp add xcode -- xcrun mcpbridge
 
-  # Add a stdio server with environment variables
-  grok mcp add postgres -e DATABASE_URL=postgres://localhost/mydb -- npx -y @modelcontextprotocol/server-postgres
+  # 添加带环境变量的 stdio 服务器
+  qidiwork mcp add postgres -e DATABASE_URL=postgres://localhost/mydb -- npx -y @modelcontextprotocol/server-postgres
 
-  # Add a remote HTTP server
-  grok mcp add --transport http sentry https://mcp.sentry.dev/mcp
+  # 添加远程 HTTP 服务器
+  qidiwork mcp add --transport http sentry https://mcp.sentry.dev/mcp
 
-  # Add a remote server with an authentication header
-  grok mcp add --transport http api https://mcp.example.com/mcp --header \"Authorization: Bearer YOUR_TOKEN\"
+  # 添加带鉴权 header 的远程服务器
+  qidiwork mcp add --transport http api https://mcp.example.com/mcp --header \"Authorization: Bearer YOUR_TOKEN\"
 
-  # Add to the project config (./.qidi/config.toml) instead of ~/.qidi/config.toml
-  grok mcp add --scope project github -- npx -y @modelcontextprotocol/server-github";
+  # 加入项目配置（./.qidi/config.toml）而非 ~/.qidi/config.toml
+  qidiwork mcp add --scope project github -- npx -y @modelcontextprotocol/server-github";
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct McpArgs {
@@ -166,7 +166,7 @@ fn run_list(json: bool) -> Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if servers.is_empty() {
-        println!("No MCP servers configured. Run `grok mcp add --help` to get started.");
+        println!("尚未配置任何 MCP 服务器。运行 `qidiwork mcp add --help` 开始使用。");
     } else {
         for (name, (config, scope)) in &servers {
             let transport = match &config.transport {
@@ -291,7 +291,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
         McpTransport::Stdio => {
             let Some(command) = source else {
                 bail!(
-                    "A command is required for stdio servers. Usage: grok mcp add <name> -- <command> [args...]"
+                    "stdio 服务器需要命令。用法：qidiwork mcp add <name> -- <command> [args...]"
                 );
             };
             if !args.header.is_empty() {
@@ -325,7 +325,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
                         format!("http://{command}")
                     };
                 warnings.push(format!(
-                    "Warning: '{command}' looks like a URL, but it is being added as a stdio command because --transport was not specified.\nFor a remote server, use: grok mcp add --transport http {} {suggested_url}",
+                    "警告：'{command}' 看起来像一个 URL，但由于未指定 --transport，将作为 stdio 命令添加。\n如需远程服务器，请使用：qidiwork mcp add --transport http {} {suggested_url}",
                     args.name
                 ));
             }
@@ -349,7 +349,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
             };
             let Some(url) = source else {
                 bail!(
-                    "A URL is required for {label} servers. Usage: grok mcp add --transport {label} <name> <url>"
+                    "{label} 服务器需要 URL。用法：qidiwork mcp add --transport {label} <name> <url>"
                 );
             };
             if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -551,7 +551,7 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
             eprintln!("MCP server '{name}' exists in multiple scopes:");
             eprintln!("  user: {}", display_user_grok_path("config.toml"));
             eprintln!("  project: {}", project_path.display());
-            eprintln!("Specify which one to remove, e.g.: grok mcp remove {name} --scope project");
+            eprintln!("请指明要移除的作用域，例如：qidiwork mcp remove {name} --scope project");
             std::process::exit(1);
         }
     };

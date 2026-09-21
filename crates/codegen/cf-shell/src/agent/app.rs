@@ -439,8 +439,8 @@ async fn run_headless_inner(
     use tokio_util::sync::CancellationToken;
 
     // Headless's only transport is the relay (no IPC fallback), so a session is required.
-    const HEADLESS_NO_SESSION: &str = "Headless mode requires a grok.com session. \
-        Run `grok login` to sign in, or use `grok agent stdio` for API-key access.";
+    const HEADLESS_NO_SESSION: &str = "Headless 模式需要登录 QIDI 账户。 \
+        请运行 `qidiwork login` 登录，或使用 `qidiwork agent stdio` 以 API Key 方式访问。";
 
     // Clean up orphaned upload queue temp files from previous sessions (best-effort).
     // Uses DEFAULT_MAX_AGE to stay in sync with the upload queue's retry policy.
@@ -459,9 +459,9 @@ async fn run_headless_inner(
         match auth_manager.current() {
             Some(auth) => (auth, false),
             None if auth_manager.is_expired() => {
-                anyhow::bail!("Session expired. Please run 'grok login' to re-authenticate.")
+                anyhow::bail!("会话已过期，请运行 `qidiwork login` 重新认证。")
             }
-            None => anyhow::bail!("No cached credentials found. Run `grok login`."),
+            None => anyhow::bail!("未找到缓存凭证。请运行 `qidiwork login`。"),
         }
     } else if reauthenticate {
         let auth_manager = Arc::new(AuthManager::new(&grok_home::grok_home(), ctx.clone()));

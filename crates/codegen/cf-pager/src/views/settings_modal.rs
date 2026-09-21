@@ -1251,8 +1251,8 @@ fn render_row_list_with_search_bar(
 
 fn render_docs_footer(buf: &mut Buffer, area: Rect, theme: &Theme) {
     const LONG: &str =
-        "Tip · Ask Grok: \"change theme to grokday\" or \"what does compact mode do?\"";
-    const SHORT: &str = "Tip · Ask Grok to change a setting";
+        "提示 · 可向 QIDI 询问如何设置，例如改成 qidi-light";
+    const SHORT: &str = "提示 · 可让 QIDI 帮你改设置";
     let text = modal_window::fit_tip_line(&[LONG, SHORT], area.width as usize);
     modal_window::render_centered_tip_footer(buf, area, theme, text.as_ref());
 }
@@ -7270,9 +7270,9 @@ mod tests {
     #[test]
     fn picking_enum_esc_dispatches_preview_revert_for_each_key() {
         let cases: &[(&str, &str)] = &[
-            ("theme", "groknight"),
-            ("auto_dark_theme", "groknight"),
-            ("auto_light_theme", "grokday"),
+            ("theme", "qidi-dark"),
+            ("auto_dark_theme", "qidi-dark"),
+            ("auto_light_theme", "qidi-light"),
         ];
         for &(key, original) in cases {
             let mut s = make_state();
@@ -7321,14 +7321,14 @@ mod tests {
         s.mode = SettingsModalMode::PickingEnum {
             key: "theme",
             choices_idx: 0,
-            original_value: SettingValue::Enum("groknight"),
+            original_value: SettingValue::Enum("qidi-dark"),
             supports_preview: true,
         };
         let outcome = handle_settings_key(&mut s, &KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         match outcome {
             SettingsKeyOutcome::Action(Action::PreviewTheme(name)) => {
                 assert_eq!(
-                    name, "groknight",
+                    name, "qidi-dark",
                     "Esc revert must dispatch the original canonical"
                 );
             }
@@ -9890,9 +9890,13 @@ mod tests {
     /// Find the y of the buffer row containing `needle` (first match,
     /// scanning top to bottom). Returns `None` if no row matches.
     fn find_row_y(buf: &Buffer, area: Rect, needle: &str) -> Option<u16> {
+        // ratatui pads a double-width grapheme's continuation cell with a
+        // space, so a buffer dump renders `提示` as `提 示`. Strip spaces on
+        // both sides so CJK needles still match (ASCII needles unaffected).
+        let needle = needle.replace(' ', "");
         for y in area.y..area.y.saturating_add(area.height) {
-            let row = buf_row_text(buf, y, area.x, area.width);
-            if row.contains(needle) {
+            let row = buf_row_text(buf, y, area.x, area.width).replace(' ', "");
+            if row.contains(needle.as_str()) {
                 return Some(y);
             }
         }
@@ -9941,7 +9945,7 @@ mod tests {
         render_settings_modal(&mut buf, area, &mut s, false, None);
         let popup_area = s.window.popup_area.expect("modal must have rendered");
 
-        let tip_y = find_row_y(&buf, area, "Tip").expect("tip row must render");
+        let tip_y = find_row_y(&buf, area, "提示").expect("tip row must render");
         // Sanity-check that the hints actually wrap — if a future PR
         // trims the hint string enough that they fit on one row at
         // this width the test passes for the wrong reason. Look for
@@ -9997,7 +10001,7 @@ mod tests {
         render_settings_modal(&mut buf, area, &mut s, false, None);
         let popup_area = s.window.popup_area.expect("modal must have rendered");
 
-        let tip_y = find_row_y(&buf, area, "Tip").expect("tip row must render");
+        let tip_y = find_row_y(&buf, area, "提示").expect("tip row must render");
         // FilterFocused-mode hints: `type to filter | ↑/↓ nav |
         // Backspace edit | Enter commit | Esc clear`. Verify both
         // ends land on the SAME row (proves no wrap).
@@ -10658,8 +10662,31 @@ mod tests {
             let row: String = (area.x..area.x + area.width)
                 .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
                 .collect();
-            let tip_start = row.find("Tip").expect("docs footer must contain `Tip`");
-            let trailing_ws = row.chars().rev().take_while(|c| *c == ' ').count();
+            // Measure leading/trailing padding in CELL (column) coordinates so a
+            // wide glyph's continuation space (buffer renders `提`→`提 `) never
+            // masquerades as padding. Leading pad = first non-space column.
+            // Trailing pad = columns after the tip's ink right edge, where the
+            // ink of a wide final glyph spans one extra continuation column.
+            let cells: Vec<String> = (area.x..area.x + area.width)
+                .map(|x| {
+                    buf.cell((x, 0))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
+                .collect();
+            let tip_start = cells
+                .iter()
+                .position(|s| s != " " && !s.is_empty())
+                .expect("docs footer must contain the tip");
+            let last_ink = cells
+                .iter()
+                .rposition(|s| s != " " && !s.is_empty())
+                .expect("docs footer must contain the tip");
+            let last_char = cells[last_ink].chars().next().unwrap_or(' ');
+            let last_glyph_cols =
+                unicode_width::UnicodeWidthChar::width(last_char).unwrap_or(1).max(1);
+            let ink_right = last_ink + last_glyph_cols - 1;
+            let trailing_ws = (area.width as usize).saturating_sub(ink_right + 1);
             (row, tip_start, trailing_ws)
         };
 
@@ -10675,16 +10702,16 @@ mod tests {
         );
 
         // SHORT path: width that fits SHORT but not LONG.
-        // SHORT = "Tip · Ask Grok to change a setting" (34 cells);
-        // LONG ≈ 73 cells. width=40 lands in the SHORT band.
+        // SHORT = "提示 · 可让 QIDI 帮你改设置";
+        // LONG 更宽。width=40 lands in the SHORT band.
         let (row_short, tip_start_short, trailing_short) = render(40);
         assert!(
-            row_short.contains("change a setting"),
-            "width=40 must render SHORT path (contains `change a setting`): {row_short:?}",
+            row_short.replace(' ', "").contains("改设置"),
+            "width=40 must render SHORT path (contains `改设置`): {row_short:?}",
         );
         assert!(
-            !row_short.contains("grokday"),
-            "width=40 must NOT render LONG path (no `grokday`): {row_short:?}",
+            !row_short.contains("qidi-light"),
+            "width=40 must NOT render LONG path (no `qidi-light`): {row_short:?}",
         );
         assert!(
             tip_start_short.abs_diff(trailing_short) <= 1,
@@ -10693,12 +10720,12 @@ mod tests {
         );
 
         // Truncated path: width too narrow even for SHORT. The
-        // truncation prefix `Tip · …` should still render; the
+        // truncation prefix `提示 · …` should still render; the
         // centering math operates on the truncated SHORT.
         let (row_tiny, tip_start_tiny, _trailing_tiny) = render(15);
         assert!(
-            row_tiny.contains("Tip"),
-            "even at width=15 the `Tip` prefix must render: {row_tiny:?}",
+            row_tiny.replace(' ', "").contains("提示"),
+            "even at width=15 the `提示` prefix must render: {row_tiny:?}",
         );
         // At width=15, the truncated SHORT fills most/all of the
         // row; leading_ws could be 0 if the truncation is exactly
@@ -10728,7 +10755,7 @@ mod tests {
         let mut tip_y: Option<u16> = None;
         for y in 0..area.height {
             let txt = buf_row_text(&buf, y, area.x, area.width);
-            if txt.contains("Tip") && txt.contains("Ask Grok") {
+            if txt.replace(' ', "").contains("提示") && txt.contains("QIDI") {
                 tip_y = Some(y);
                 break;
             }
@@ -11036,12 +11063,12 @@ mod tests {
         // For preview-supporting enums (theme), the breadcrumb-
         // click revert dispatches `Action::PreviewTheme(original)`.
         // The original canonical for the default theme is
-        // `"groknight"`. Tightened from the previous `Action(_) |
+        // `"qidi-dark"`. Tightened from the previous `Action(_) |
         // Changed` to lock in the revert contract.
         match outcome {
             SettingsKeyOutcome::Action(Action::PreviewTheme(orig)) => {
                 assert_eq!(
-                    orig, "groknight",
+                    orig, "qidi-dark",
                     "breadcrumb-click revert must carry the original canonical",
                 );
             }
@@ -11154,7 +11181,7 @@ mod tests {
                 // captures `original_value = current value = groknight`,
                 // so the revert dispatches with that canonical.
                 assert_eq!(
-                    orig, "groknight",
+                    orig, "qidi-dark",
                     "PreviewTheme revert must carry the original canonical",
                 );
             }

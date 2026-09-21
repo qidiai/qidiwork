@@ -49,7 +49,7 @@ impl SessionTokenAuthGate {
             is_session_based: auth_method_id
                 .is_some_and(crate::agent::auth_method::is_session_based_method),
             model_byok,
-            endpoint_is_first_party: crate::util::is_first_party_xai_url(base_url),
+            endpoint_is_first_party: crate::util::is_first_party_qidi_url(base_url),
         }
     }
     fn active(self) -> bool {
@@ -790,10 +790,10 @@ impl SessionActor {
         if auth_mode == crate::auth::AuthMode::WebLogin {
             let msg = format!(
                 "{detailed_message}\n\n\
-                 You are using a deprecated authentication method (WebLogin).\n\
-                 This auth method is no longer supported and will cause errors.\n\n\
-                 To fix: run `grok logout` then `grok login` to re-authenticate with OAuth2.\n\n\
-                 Version: {client_version}"
+                 你正在使用已弃用的登录方式（WebLogin）。\n\
+                 该方式已不再受支持，会导致错误。\n\n\
+                 解决方法：运行 `qidiwork logout` 后再运行 `qidiwork login`，以通过 OAuth2 重新登录。\n\n\
+                 版本：{client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);
             self.send_xai_notification(XaiSessionUpdate::RetryState(

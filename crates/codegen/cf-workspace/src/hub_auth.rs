@@ -83,7 +83,7 @@ fn default_auth_path() -> anyhow::Result<PathBuf> {
 fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
     if !path.exists() {
         anyhow::bail!(
-            "No auth credentials found at {}. Run `grok login` first.",
+            "未在 {} 找到认证凭据。请先运行 `qidiwork login`。",
             path.display()
         );
     }
@@ -98,7 +98,7 @@ fn read_auth_entry(path: &Path) -> anyhow::Result<(String, AuthEntry)> {
         .find(|(_, e)| e.refresh_token.is_some() && e.oidc_issuer.is_some())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no OIDC auth entry found in {}. Run `grok login` first.",
+                "{} 中未找到 OIDC 认证条目。请先运行 `qidiwork login`。",
                 path.display()
             )
         })
@@ -281,14 +281,14 @@ mod tests {
         );
 
         let err = read_auth_entry(&path).unwrap_err();
-        assert!(err.to_string().contains("no OIDC auth entry"));
+        assert!(err.to_string().contains("未找到 OIDC 认证条目"));
     }
 
     #[test]
     fn read_auth_entry_missing_file() {
         let path = PathBuf::from("/nonexistent/auth.json");
         let err = read_auth_entry(&path).unwrap_err();
-        assert!(err.to_string().contains("No auth credentials"));
+        assert!(err.to_string().contains("未在"));
     }
 
     #[test]

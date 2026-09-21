@@ -42,11 +42,10 @@ pub use crate::types::slash_commands::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, imagine_instruction, imagine_usage_message,
 };
 
-/// Prose returned to the model (as a normal, successful tool result) when a
-/// free / X Basic user calls `image_gen` or `image_edit`. The model relays it
-/// to the user. The deliberate `/imagine` slash command shows the richer
-/// SuperGrok upsell modal instead; this covers the natural-language path.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is a SuperGrok feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperGrok: https://grok.com/supergrok?referrer=cf-tools. Do not retry this tool.";
+/// Prose returned to the model (as a normal, successful tool result) when the
+/// current account tier has no image-generation entitlement. The model relays
+/// it to the user. This covers the natural-language path.
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "当前套餐不包含图像生成功能。请告知用户：升级到更高套餐即可解锁图像与视频生成，详情见 https://www.qidiai.ltd。请勿重试该工具。";
 
 /// HTTP client for xAI Imagine API. Cloned per-request; shares `Arc` state.
 #[derive(Clone)]
@@ -576,8 +575,8 @@ mod tests {
 
         match result {
             ToolOutput::Text(t) => {
-                assert!(t.text.contains("SuperGrok"), "got: {}", t.text);
-                assert!(t.text.contains("supergrok?referrer=cf-tools"));
+                assert!(t.text.contains("图像生成"), "got: {}", t.text);
+                assert!(t.text.contains("https://www.qidiai.ltd"), "got: {}", t.text);
             }
             other => panic!("expected Text upsell, got {other:?}"),
         }

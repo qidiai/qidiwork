@@ -641,7 +641,7 @@ pub fn color_support_warning(
             None,
             None,
         );
-        warning.note = Some("Unset NO_COLOR and restart Grok.".to_string());
+        warning.note = Some("请取消设置 NO_COLOR 环境变量并重启 QIDI。".to_string());
         return Some(warning);
     }
 
@@ -678,7 +678,7 @@ pub fn color_support_warning(
         Some("export COLORTERM=truecolor"),
         None,
     );
-    warning.note = Some("Persist in ~/.zshrc / ~/.bashrc and restart Grok.".to_string());
+    warning.note = Some("请写入 ~/.zshrc / ~/.bashrc 并重启 QIDI。".to_string());
     Some(warning)
 }
 
@@ -2134,7 +2134,7 @@ mod tests {
                 line.starts_with(&format!("  themes       {n}/{total}: ")),
                 "level {level:?}: {line}"
             );
-            assert!(line.contains("groknight") && line.contains("grokday"));
+            assert!(line.contains("qidi-dark") && line.contains("qidi-light"));
             assert!(!line.contains("tokyonight"));
         }
     }

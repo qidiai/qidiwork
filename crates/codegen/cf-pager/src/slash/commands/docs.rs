@@ -1,15 +1,15 @@
 //! `/docs` -- open How-to Guides (in-TUI) or online Build docs.
 //!
 //! Bare `/docs` opens the same DocPicker as command-palette "How-to Guides".
-//! `/docs web` opens https://docs.x.ai/build/overview in the browser.
+//! `/docs web` opens https://www.qidiai.ltd in the browser.
 //! `/docs <title>` opens a single guide by title (case-insensitive).
 
 use crate::app::actions::Action;
 use crate::docs::{all_titles, find_doc};
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
-/// Online Build docs landing page (hardcoded like other TUI deep-links; docs.x.ai can redirect if the path moves).
-pub const BUILD_DOCS_URL: &str = "https://docs.x.ai/build/overview";
+/// Online docs landing page (hardcoded like other TUI deep-links; can redirect if the path moves).
+pub const BUILD_DOCS_URL: &str = "https://www.qidiai.ltd";
 
 /// Open How-to Guides or online Build docs.
 pub struct DocsCommand;

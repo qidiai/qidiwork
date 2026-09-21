@@ -67,7 +67,7 @@ async fn office_artifact_watch_e2e() {
         "expires_at": "2030-01-01T00:00:00Z",
         "refresh_token": "pty-office-e2e-refresh",
         "oidc_issuer": "http://localhost:22255",
-        "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+        "oidc_client_id": "qidi-code"
     })
     .to_string();
     env.push(("QIDI_AUTH".into(), inline_auth));

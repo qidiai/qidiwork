@@ -2,16 +2,24 @@
 import { onMounted, ref, computed, defineAsyncComponent } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
+import { useAuth } from "../composables/useAuth";
 import { fmtTokens, fmtCost } from "../services/usage";
 // 设置弹窗按需加载,不进首屏 chunk
 const SettingsModal = defineAsyncComponent(() => import("./SettingsModal.vue"));
 
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
 const { connected, sessionId, sessionUsage } = useAgentState();
+const { status: auth, refresh: refreshAuth } = useAuth();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
 const recovering = ref(false);
 const showSettings = ref(false);
+
+const accountLabel = computed(() =>
+  auth.value?.logged_in
+    ? `${auth.value.email ?? auth.value.user_id ?? "已登录"}${auth.value.plan ? ` · ${auth.value.plan}` : ""}`
+    : "未登录",
+);
 
 const kernelLabel = computed(() =>
   connected.value ? `已连接 · ${sessionId.value || "会话就绪"}` : "未连接",
@@ -47,6 +55,7 @@ onMounted(async () => {
   } catch {
     guiVersion.value = "IPC 不可用";
   }
+  void refreshAuth();
 });
 </script>
 
@@ -66,6 +75,12 @@ onMounted(async () => {
       title="当前会话累计 token 用量与成本(≈ 为内核标记的不完整账单)"
     >{{ usageLabel }}</span>
     <span class="spacer"></span>
+    <button
+      class="link-btn"
+      :class="{ muted: !auth?.logged_in }"
+      :title="auth?.logged_in ? '账号与配额' : '点击登录 QIDI 账号'"
+      @click="showSettings = true"
+    >{{ accountLabel }}</button>
     <span class="status-item muted">
       GUI v{{ guiVersion }}
       <template v-if="ipcOk"> · IPC 正常</template>

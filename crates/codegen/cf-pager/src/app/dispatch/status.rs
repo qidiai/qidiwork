@@ -93,7 +93,7 @@ pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
     }
 
     lines.push("");
-    lines.push("  Learn more: https://x.ai/legal");
+    lines.push("  Learn more: https://api.qidiai.ltd/legal");
     let text = lines.join("\n");
     push_system_to_any_agent(app, &text);
     vec![]
@@ -358,7 +358,7 @@ pub(super) fn notify_session_ready(
 ) {
     notification_service.notify(NotificationEvent {
         kind: NotificationEventKind::SessionReady,
-        title: "Grok".into(),
+        title: "QIDI Code".into(),
         body: NotificationEventKind::SessionReady.as_str().into(),
         session_id: agent.session.session_id.as_ref().map(|s| s.0.to_string()),
     });

@@ -45,14 +45,14 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Follow system dark/light appearance.",
     },
     EnumChoice {
-        canonical: "groknight",
-        display: "Grok Night",
-        description: "Neutral dark with magenta accent.",
+        canonical: "qidi-dark",
+        display: "QIDI 深色",
+        description: "中性深色，配品红强调色。",
     },
     EnumChoice {
-        canonical: "grokday",
-        display: "Grok Day",
-        description: "Light theme for bright environments.",
+        canonical: "qidi-light",
+        display: "QIDI 浅色",
+        description: "适合明亮环境的浅色主题。",
     },
     EnumChoice {
         canonical: "tokyonight",
@@ -462,14 +462,14 @@ const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
 /// the user can pair any theme with any system-appearance bucket.
 const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
     EnumChoice {
-        canonical: "groknight",
-        display: "Grok Night",
-        description: "Neutral dark with magenta accent.",
+        canonical: "qidi-dark",
+        display: "QIDI 深色",
+        description: "中性深色，配品红强调色。",
     },
     EnumChoice {
-        canonical: "grokday",
-        display: "Grok Day",
-        description: "Light theme for bright environments.",
+        canonical: "qidi-light",
+        display: "QIDI 浅色",
+        description: "适合明亮环境的浅色主题。",
     },
     EnumChoice {
         canonical: "tokyonight",
@@ -610,8 +610,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "light",
             ],
             kind: SettingKind::Enum {
-                // `Option<String>` — `None` resolved to "groknight".
-                default: "groknight",
+                // `Option<String>` — `None` resolved to "qidi-dark".
+                default: "qidi-dark",
                 choices: THEME_CHOICES,
                 supports_preview: true,
             },
@@ -626,8 +626,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Theme to use when the system is in dark mode (only with theme=auto).",
             keywords: &["auto", "dark", "theme", "system", "appearance", "night"],
             kind: SettingKind::Enum {
-                // `Option<String>` — `None` falls back to "groknight".
-                default: "groknight",
+                // `Option<String>` — `None` falls back to "qidi-dark".
+                default: "qidi-dark",
                 choices: CONCRETE_THEME_CHOICES,
                 supports_preview: true,
             },
@@ -642,8 +642,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             description: "Theme to use when the system is in light mode (only with theme=auto).",
             keywords: &["auto", "light", "theme", "system", "appearance", "day"],
             kind: SettingKind::Enum {
-                // `Option<String>` — `None` falls back to "grokday".
-                default: "grokday",
+                // `Option<String>` — `None` falls back to "qidi-light".
+                default: "qidi-light",
                 choices: CONCRETE_THEME_CHOICES,
                 supports_preview: true,
             },

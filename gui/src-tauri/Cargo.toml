@@ -1,6 +1,6 @@
 [package]
 name = "qidiwork-gui"
-version = "0.1.0"
+version = "0.1.1"
 description = "QidiWork 办公工作台 —— QIDI Code 的原生 GUI 办公界面"
 edition = "2024"
 rust-version = "1.85"
@@ -35,6 +35,12 @@ dunce = "1"
 base64 = "0.22"
 # 设置面保格式编辑 config.toml(与主工程 cf-pager 同一 0.22 系)
 toml_edit = "0.22"
+# 账号状态在线拉取 /v1/user(独立 workspace 内直用 reqwest;token 只在 Rust 侧,
+# 经 rustls 走系统信任链,不下发前端、不依赖系统 curl)
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
 
 [target.'cfg(windows)'.dependencies]
 # 特性集对齐主工程 windows 0.62(见 G:\qidiwork\Cargo.toml workspace deps)

@@ -200,8 +200,8 @@ fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value
 async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
-        "Authentication required to fetch billing data",
-        "Billing data requires auth with grok.com. Run `grok login` to authenticate.",
+        "获取账单数据需要先登录",
+        "读取账单数据需要登录 QIDI 账户，请运行 `qidiwork login` 完成登录。",
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();
@@ -291,8 +291,8 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
     let auth = super::auth_gate::require_xai_auth(
         &agent.auth_manager,
-        "Authentication required to fetch auto top-up rule",
-        "Auto top-up data requires auth with grok.com. Run `grok login` to authenticate.",
+        "获取自动充值规则需要先登录",
+        "读取自动充值规则需要登录 QIDI 账户，请运行 `qidiwork login` 完成登录。",
     )?;
 
     let proxy_base = agent.cli_chat_proxy_base_url();

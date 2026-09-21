@@ -412,7 +412,7 @@ impl SessionActor {
     /// and registers its tools.
     pub(super) async fn handle_mcp_auth_trigger(&self, server_name: &str) -> Result<(), String> {
         if server_name.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX) {
-            return Err("To authenticate, visit grok.com".to_string());
+            return Err("如需认证，请在应用内完成 QIDI 账户登录".to_string());
         }
         let client = {
             let state = self.mcp_state.lock().await;

@@ -1683,7 +1683,7 @@ mod tests {
     #[test]
     fn cli_command_name_is_grok() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        assert_eq!(PagerArgs::command().get_name(), "qidiwork");
     }
     #[test]
     fn cli_help_output_header() {
@@ -1695,7 +1695,7 @@ mod tests {
             vec![
                 "QIDI Code TUI",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: qidiwork [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]

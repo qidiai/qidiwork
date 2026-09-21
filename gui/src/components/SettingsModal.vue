@@ -13,10 +13,22 @@ import {
   type SettingsInfo,
 } from "../composables/useSettings";
 import { pushSystem, useAgentState } from "../composables/useAgent";
+import { useAuth } from "../composables/useAuth";
 
 const emit = defineEmits<{ close: [] }>();
 
 const { turnInProgress } = useAgentState();
+const {
+  status: auth,
+  loading: authLoading,
+  loginPending,
+  loginUri,
+  loginCode,
+  loginError,
+  refresh: refreshAuth,
+  startLogin,
+  logout,
+} = useAuth();
 const loading = ref(true);
 const loadError = ref("");
 const info = ref<SettingsInfo | null>(null);
@@ -85,6 +97,20 @@ const selected = computed<ModelOption | null>(
   () => info.value?.models.find((m) => m.id === selectedId.value) ?? null,
 );
 
+function fmt(n: number | null | undefined): string {
+  return n == null ? "—" : n.toLocaleString("zh-CN");
+}
+
+async function openLoginUri(): Promise<void> {
+  if (!loginUri.value) return;
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(loginUri.value);
+  } catch {
+    /* opener 不可用时用户可手动复制 URL */
+  }
+}
+
 // 下拉框选项 = config.toml 里定义的模型;当前默认若是内置模型(不在
 // 本文件定义),也作为一项列出供选回。
 const options = computed(() => {
@@ -136,7 +162,10 @@ async function save(restart: boolean): Promise<void> {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  void load();
+  void refreshAuth();
+});
 </script>
 
 <template>
@@ -154,6 +183,62 @@ onMounted(load);
       </div>
 
       <div v-else class="modal-body">
+        <!-- 账号(方案 P1-3):登录态 / 设备码登录 / 套餐与今日配额 -->
+        <div class="account-box">
+          <div class="account-head">
+            <span class="create-title">账号</span>
+            <button class="link-btn" :disabled="authLoading" @click="refreshAuth">
+              {{ authLoading ? "检测中…" : "刷新" }}
+            </button>
+          </div>
+
+          <template v-if="auth?.logged_in">
+            <div class="account-row">
+              <span class="account-email">{{ auth.email ?? auth.user_id ?? "已登录" }}</span>
+              <span class="plan-badge">{{ auth.plan ?? "—" }}</span>
+            </div>
+            <div v-if="auth.usage_today && auth.quota" class="quota-grid">
+              <div class="quota-cell">
+                <span class="quota-num">
+                  {{ fmt(auth.usage_today.requests) }} /
+                  {{ auth.quota.requests_limit > 0 ? fmt(auth.quota.requests_limit) : "不限" }}
+                </span>
+                <span class="quota-label">今日请求</span>
+              </div>
+              <div class="quota-cell">
+                <span class="quota-num">
+                  {{ fmt(auth.usage_today.tokens) }} /
+                  {{ auth.quota.tokens_limit > 0 ? fmt(auth.quota.tokens_limit) : "不限" }}
+                </span>
+                <span class="quota-label">今日 tokens</span>
+              </div>
+            </div>
+            <p v-if="auth.detail" class="field-hint">{{ auth.detail }}</p>
+            <div class="create-actions">
+              <button class="btn ghost" :disabled="loginPending" @click="logout">退出登录</button>
+            </div>
+          </template>
+
+          <template v-else>
+            <p class="field-hint">登录后可用自动模型路由与云端推理配额。</p>
+            <div v-if="loginPending" class="login-pending">
+              <p v-if="loginCode">
+                请在浏览器打开下方地址并输入验证码
+                <code class="code-chip">{{ loginCode }}</code>
+              </p>
+              <p v-else-if="!loginError">正在等待内核返回登录地址…</p>
+              <p v-if="loginUri">
+                <button class="link-btn" @click.prevent="openLoginUri">{{ loginUri }}</button>
+              </p>
+              <p v-if="loginError" class="err">{{ loginError }}</p>
+              <p class="field-hint">完成浏览器授权后此处会自动更新。</p>
+            </div>
+            <div v-else class="create-actions">
+              <button class="btn primary" @click="startLogin">登录 QIDI 账号</button>
+            </div>
+          </template>
+        </div>
+
         <!-- 新建模型表单(首次运行引导) -->
         <template v-if="creating">
           <div class="create-box">
@@ -409,5 +494,88 @@ onMounted(load);
 
 .self-start {
   align-self: flex-start;
+}
+
+/* 账号区块(方案 P1-3) */
+.account-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.account-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.account-email {
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.plan-badge {
+  font-size: var(--font-size-sm);
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft, var(--bg-panel));
+  color: var(--accent);
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+}
+
+.quota-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.quota-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.quota-num {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.quota-label {
+  font-size: var(--font-size-sm);
+  color: var(--text-disabled);
+}
+
+.login-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-primary);
+}
+
+.code-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  font-family: monospace;
+  font-weight: 700;
+  letter-spacing: 1px;
 }
 </style>

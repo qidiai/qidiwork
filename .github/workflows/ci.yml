@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # cf-proto-build's find_protoc falls back to `protoc` on $PATH;
       # the repo's bin/protoc.exe is gitignored (local dev only, see .gitignore)
@@ -83,7 +83,7 @@ jobs:
     # byte-identical checkout on Linux runners.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Regenerate encrypted prompt artifact
         run: python crates/codegen/cf-agent/scripts/encrypt_templates.py
@@ -94,7 +94,7 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3

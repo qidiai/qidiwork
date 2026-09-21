@@ -104,10 +104,10 @@ mod tests {
     fn sets_environment_variables() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
+        let out_posix = out.display().to_string().replace('\\', "/");
         let command = format!(
             "printf 'QIDI_EVENT=%s\\nQIDI_MESSAGE=%s\\nQIDI_SESSION_ID=%s\\n' \
-             \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > {}",
-            out.display()
+             \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > \"{out_posix}\""
         );
 
         execute_hook(
@@ -137,7 +137,8 @@ mod tests {
     fn omits_session_id_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let command = format!("env > {}", out.display());
+        let out_posix = out.display().to_string().replace('\\', "/");
+        let command = format!("env > \"{out_posix}\"");
 
         execute_hook(
             &command,
@@ -197,7 +198,8 @@ mod tests {
     fn successful_command_completes_without_error() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
-        let command = format!("touch {}", marker.display());
+        let marker_posix = marker.display().to_string().replace('\\', "/");
+        let command = format!("touch \"{marker_posix}\"");
 
         execute_hook(
             &command,
@@ -226,8 +228,9 @@ mod tests {
     fn timeout_clamped_to_minimum_one_second() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
+        let marker_posix = marker.display().to_string().replace('\\', "/");
         let hook = NotificationHook {
-            command: format!("sleep 100; touch {}", marker.display()),
+            command: format!("sleep 100; touch \"{marker_posix}\""),
             events: vec![],
             only_unfocused: false,
             timeout_secs: 0, // exercises the .max(1) clamp inside run_hook
@@ -255,11 +258,11 @@ mod tests {
     fn run_hook_passes_correct_env_via_thread() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
+        let out_posix = out.display().to_string().replace('\\', "/");
         let hook = NotificationHook {
             command: format!(
                 "printf 'QIDI_EVENT=%s\\nQIDI_MESSAGE=%s\\nQIDI_SESSION_ID=%s\\n' \
-                 \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > {}",
-                out.display()
+                 \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > \"{out_posix}\""
             ),
             events: vec![],
             only_unfocused: false,

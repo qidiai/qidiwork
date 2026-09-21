@@ -1975,9 +1975,7 @@ impl MvpAgent {
                     let message = "A subscription is required.".to_string();
                     Some(crate::auth::GateInfo {
                         message,
-                        url: Some(
-                            "https://grok.com/supergrok?referrer=cf-tools".to_string(),
-                        ),
+                        url: Some("https://www.qidiai.ltd".to_string()),
                         label: Some("Subscribe".to_string()),
                     })
                 } else {

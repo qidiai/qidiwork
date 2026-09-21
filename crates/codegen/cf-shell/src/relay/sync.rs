@@ -25,10 +25,10 @@ const MAX_PENDING: usize = 256;
 const DROP_BATCH_SIZE: usize = 64;
 
 /// Build the share URL for a session.
-/// Format: https://grok.com/build/{sessionId}
+/// Format: https://qidiwork.qidiai.ltd/build/{sessionId}
 pub fn build_share_url(session_id: &str) -> String {
-    let base_url =
-        std::env::var("QIDI_CODE_WEB_URL").unwrap_or_else(|_| "https://grok.com".to_string());
+    let base_url = std::env::var("QIDI_CODE_WEB_URL")
+        .unwrap_or_else(|_| "https://qidiwork.qidiai.ltd".to_string());
     format!("{}/build/{}", base_url, session_id)
 }
 
@@ -836,7 +836,7 @@ mod tests {
     #[test]
     fn test_build_share_url_default() {
         let url = build_share_url("test-session-123");
-        assert_eq!(url, "https://grok.com/build/test-session-123");
+        assert_eq!(url, "https://qidiwork.qidiai.ltd/build/test-session-123");
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         let url = build_share_url("01937d8a-1234-7abc-9def-0123456789ab");
         assert_eq!(
             url,
-            "https://grok.com/build/01937d8a-1234-7abc-9def-0123456789ab"
+            "https://qidiwork.qidiai.ltd/build/01937d8a-1234-7abc-9def-0123456789ab"
         );
     }
 

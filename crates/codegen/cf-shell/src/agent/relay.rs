@@ -172,7 +172,7 @@ async fn attempt_auth_recovery(
     context: &str,
 ) -> bool {
     let Some(ref am) = config.auth_manager else {
-        teprintln!("Authentication required. Run `grok login` to re-authenticate.");
+        teprintln!("需要登录。请运行 `qidiwork login` 重新登录。");
         cancel.cancel();
         return false;
     };

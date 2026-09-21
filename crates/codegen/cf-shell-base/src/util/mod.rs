@@ -62,18 +62,18 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
-/// True for first-party xAI endpoints (`*.x.ai`, cli-chat-proxy, and optional
-/// non-production first-party hosts when that feature is enabled).
+/// True for first-party Qidi endpoints (`*.qidiai.ltd`, cli-chat-proxy, and
+/// optional non-production first-party hosts when that feature is enabled).
 /// `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and
-/// exempt. Safe against invalid URLs and suffix attacks (`evil-x.ai.example`).
-pub fn is_first_party_xai_url(url: &str) -> bool {
+/// exempt. Safe against invalid URLs and suffix attacks (`evil-qidiai.ltd.example`).
+pub fn is_first_party_qidi_url(url: &str) -> bool {
     if is_cli_chat_proxy_url(url) {
         return true;
     }
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_owned()))
-        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+        .is_some_and(|host| host == "qidiai.ltd" || host.ends_with(".qidiai.ltd"))
 }
 /// Truncate a string to at most `max_chars` characters.
 /// Slices at char boundaries so multi-byte UTF-8 never panics.
@@ -210,45 +210,46 @@ mod tests {
     #[test]
     fn test_is_cli_chat_proxy_url_accepts_proxy_subpath() {
         assert!(is_cli_chat_proxy_url(
-            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+            "https://api.qidiai.ltd/v1/chat/completions"
         ));
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_public_api() {
-        assert!(!is_cli_chat_proxy_url("https://api.x.ai/v1"));
+        assert!(!is_cli_chat_proxy_url("https://api.qidiai.ltd"));
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_spoofed_hostname() {
         assert!(!is_cli_chat_proxy_url(
-            "https://cli-chat-proxy.grok.com.evil.example/v1"
+            "https://api.qidiai.ltd.evil.example/v1"
         ));
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_v11_prefix_confusion() {
         assert!(!is_cli_chat_proxy_url(
-            "https://cli-chat-proxy.grok.com/v11/chat/completions"
+            "https://api.qidiai.ltd/v11/chat/completions"
         ));
     }
     #[test]
-    fn test_is_first_party_xai_url() {
-        assert!(is_first_party_xai_url("https://api.x.ai/v1"));
-        assert!(is_first_party_xai_url(
-            "https://api.x.ai/v1/chat/completions"
+    fn test_is_first_party_qidi_url() {
+        assert!(is_first_party_qidi_url("https://api.qidiai.ltd/v1"));
+        assert!(is_first_party_qidi_url(
+            "https://api.qidiai.ltd/v1/chat/completions"
         ));
-        assert!(is_first_party_xai_url("https://x.ai"));
-        assert!(is_first_party_xai_url(
-            "https://cli-chat-proxy.grok.com/v1/chat/completions"
+        assert!(is_first_party_qidi_url("https://qidiai.ltd"));
+        assert!(is_first_party_qidi_url("https://www.qidiai.ltd"));
+        assert!(is_first_party_qidi_url(
+            "https://api.qidiai.ltd/v1/chat/completions"
         ));
-        assert!(!is_first_party_xai_url("https://api.openai.com/v1"));
-        assert!(!is_first_party_xai_url("https://api.anthropic.com/v1"));
-        assert!(!is_first_party_xai_url(
+        assert!(!is_first_party_qidi_url("https://api.openai.com/v1"));
+        assert!(!is_first_party_qidi_url("https://api.anthropic.com/v1"));
+        assert!(!is_first_party_qidi_url(
             "https://generativelanguage.googleapis.com"
         ));
-        assert!(!is_first_party_xai_url("https://api.x.ai.evil.example/v1"));
-        assert!(!is_first_party_xai_url("https://evil-x.ai.attacker.com/v1"));
-        assert!(!is_first_party_xai_url("https://prefixx.ai/v1"));
-        assert!(!is_first_party_xai_url("not-a-url"));
-        assert!(!is_first_party_xai_url(""));
+        assert!(!is_first_party_qidi_url("https://api.qidiai.ltd.evil.example/v1"));
+        assert!(!is_first_party_qidi_url("https://evil-qidiai.ltd.attacker.com/v1"));
+        assert!(!is_first_party_qidi_url("https://prefixqidiai.ltd/v1"));
+        assert!(!is_first_party_qidi_url("not-a-url"));
+        assert!(!is_first_party_qidi_url(""));
     }
     #[test]
     fn test_truncate() {

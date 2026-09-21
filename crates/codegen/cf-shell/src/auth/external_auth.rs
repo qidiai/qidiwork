@@ -196,10 +196,10 @@ mod tests {
 
         // x.ai issuer claim → first-party session (relay-eligible).
         let auth = parse_output(&ok(
-            r#"{"access_token":"t","expires_in":900,"issuer":"https://auth.x.ai"}"#,
+            r#"{"access_token":"t","expires_in":900,"issuer":"https://api.qidiai.ltd"}"#,
         ))
         .unwrap();
-        assert_eq!(auth.oidc_issuer.as_deref(), Some("https://auth.x.ai"));
+        assert_eq!(auth.oidc_issuer.as_deref(), Some("https://api.qidiai.ltd"));
         assert!(auth.is_xai_auth());
 
         // Non-x.ai issuer is stored but stays third-party.

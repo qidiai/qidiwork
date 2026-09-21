@@ -2662,7 +2662,7 @@ fn dispatch_cycle_mode_refreshes_open_modal_snapshot() {
         "current_value_for must read the refreshed snapshot",
     );
 }
-/// `dispatch(Action::SetTheme("grokday"), &mut app)` emits
+/// `dispatch(Action::SetTheme("qidi-light"), &mut app)` emits
 /// exactly one `Effect::PersistSetting`, mutates
 /// `app.current_ui.theme`, fires a toast, and toggles AUTO_MODE
 /// off (kind is concrete).
@@ -2682,7 +2682,7 @@ fn set_theme_emits_persist_setting_with_correct_payload() {
         let mut app = test_app_with_agent();
         assert_eq!(app.current_ui.theme, None);
         crate::theme::cache::set(crate::theme::ThemeKind::GrokNight);
-        let effects = dispatch(Action::SetTheme("grokday".into()), &mut app);
+        let effects = dispatch(Action::SetTheme("qidi-light".into()), &mut app);
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting {
@@ -2691,12 +2691,12 @@ fn set_theme_emits_persist_setting_with_correct_payload() {
                 rollback_value,
             } => {
                 assert_eq!(*key, "theme");
-                assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*value, SettingValue::Enum("qidi-light"));
+                assert_eq!(*rollback_value, SettingValue::Enum("qidi-dark"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(app.current_ui.theme.as_deref(), Some("grokday"));
+        assert_eq!(app.current_ui.theme.as_deref(), Some("qidi-light"));
         assert!(
             !crate::theme::cache::is_auto_mode(),
             "concrete theme commit must disable AUTO_MODE",
@@ -2714,7 +2714,7 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let effects = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
+        let effects = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting {
@@ -2723,12 +2723,12 @@ fn set_auto_dark_theme_emits_persist_setting_with_correct_payload() {
                 rollback_value,
             } => {
                 assert_eq!(*key, "auto_dark_theme");
-                assert_eq!(*value, SettingValue::Enum("grokday"));
-                assert_eq!(*rollback_value, SettingValue::Enum("groknight"));
+                assert_eq!(*value, SettingValue::Enum("qidi-light"));
+                assert_eq!(*rollback_value, SettingValue::Enum("qidi-dark"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("grokday"));
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-light"));
     });
 }
 #[test]
@@ -2736,7 +2736,7 @@ fn set_auto_light_theme_emits_persist_setting_with_correct_payload() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let effects = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
+        let effects = dispatch(Action::SetAutoLightTheme("qidi-dark".into()), &mut app);
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting {
@@ -2745,14 +2745,14 @@ fn set_auto_light_theme_emits_persist_setting_with_correct_payload() {
                 rollback_value,
             } => {
                 assert_eq!(*key, "auto_light_theme");
-                assert_eq!(*value, SettingValue::Enum("groknight"));
-                assert_eq!(*rollback_value, SettingValue::Enum("grokday"));
+                assert_eq!(*value, SettingValue::Enum("qidi-dark"));
+                assert_eq!(*rollback_value, SettingValue::Enum("qidi-light"));
             }
             other => panic!("expected PersistSetting, got {other:?}"),
         }
         assert_eq!(
             app.current_ui.auto_light_theme.as_deref(),
-            Some("groknight"),
+            Some("qidi-dark"),
         );
     });
 }
@@ -2805,8 +2805,8 @@ fn preview_auto_light_theme_emits_no_persist_and_no_current_ui_mutation() {
 /// Auto-theme commit applies the live theme **only** when
 /// `theme="auto"` AND the system is in the matching mode.
 ///
-/// Scenario: `theme="groknight"` (concrete) + system=Dark. User
-/// commits `auto_dark_theme="grokday"`. The setting is dormant
+/// Scenario: `theme="qidi-dark"` (concrete) + system=Dark. User
+/// commits `auto_dark_theme="qidi-light"`. The setting is dormant
 /// (parent theme is concrete, not auto), so the live display
 /// must stay on GrokNight even though we're committing a
 /// different theme. Uses `grokday` to avoid `clamp_to_terminal`
@@ -2818,18 +2818,18 @@ fn set_auto_dark_theme_does_not_apply_when_theme_is_not_auto() {
             crate::theme::system_appearance::SystemAppearance::Dark,
         ));
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetTheme("qidi-dark".into()), &mut app);
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokNight,
         );
-        let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokNight,
             "auto_dark_theme commit must NOT change live display when theme is not auto",
         );
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("grokday"));
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-light"));
     });
 }
 /// Auto-theme commit DOES apply the live theme when both
@@ -2855,7 +2855,7 @@ fn set_auto_dark_theme_applies_when_theme_is_auto_and_system_is_dark() {
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokNight,
         );
-        let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokDay,
@@ -2881,13 +2881,13 @@ fn set_auto_dark_theme_does_not_apply_when_system_is_light() {
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokDay,
         );
-        let _ = dispatch(Action::SetAutoDarkTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-dark".into()), &mut app);
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokDay,
             "auto_dark_theme commit must NOT change live display when system=Light",
         );
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("groknight"),);
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-dark"),);
     });
 }
 /// Symmetric to the dark test: `set_auto_light_theme` applies only
@@ -2905,7 +2905,7 @@ fn set_auto_light_theme_applies_when_theme_is_auto_and_system_is_light() {
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokDay,
         );
-        let _ = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetAutoLightTheme("qidi-dark".into()), &mut app);
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokNight,
@@ -2982,14 +2982,14 @@ fn set_auto_light_theme_rejects_auto_value() {
 fn set_theme_toast_format_uses_display_name() {
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetTheme("grokday".into()), &mut app);
+        let _ = dispatch(Action::SetTheme("qidi-light".into()), &mut app);
         let toast = read_toast(&app);
         assert!(
             toast.contains("Theme"),
             "toast must contain label, got: {toast:?}",
         );
         assert!(
-            toast.contains("Grok Day"),
+            toast.contains("QIDI 浅色"),
             "toast must use display name `Grok Day`, not canonical `grokday`, got: {toast:?}",
         );
         assert!(toast.contains('\u{2713}'), "toast must contain the ✓ glyph");
@@ -2999,10 +2999,10 @@ fn set_theme_toast_format_uses_display_name() {
 fn set_auto_dark_theme_toast_format_uses_display_name() {
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
         let toast = read_toast(&app);
         assert!(toast.contains("Auto dark theme"));
-        assert!(toast.contains("Grok Day"));
+        assert!(toast.contains("QIDI 浅色"));
         assert!(toast.contains('\u{2713}'));
     });
 }
@@ -3010,10 +3010,10 @@ fn set_auto_dark_theme_toast_format_uses_display_name() {
 fn set_auto_light_theme_toast_format_uses_display_name() {
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetAutoLightTheme("qidi-dark".into()), &mut app);
         let toast = read_toast(&app);
         assert!(toast.contains("Auto light theme"));
-        assert!(toast.contains("Grok Night"));
+        assert!(toast.contains("QIDI 深色"));
     });
 }
 /// `apply_setting_rollback` for theme keys: a failed persist
@@ -3028,8 +3028,8 @@ fn rollback_theme_reverts_current_ui_and_cache() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetTheme("grokday".into()), &mut app);
-        assert_eq!(app.current_ui.theme.as_deref(), Some("grokday"));
+        let _ = dispatch(Action::SetTheme("qidi-light".into()), &mut app);
+        assert_eq!(app.current_ui.theme.as_deref(), Some("qidi-light"));
         assert_eq!(
             crate::theme::cache::current_kind(),
             crate::theme::ThemeKind::GrokDay,
@@ -3037,14 +3037,14 @@ fn rollback_theme_reverts_current_ui_and_cache() {
         let _ = dispatch(
             Action::TaskComplete(TaskResult::SettingPersistFailed {
                 key: "theme",
-                rollback_value: SettingValue::Enum("groknight"),
+                rollback_value: SettingValue::Enum("qidi-dark"),
                 error: "disk full".into(),
             }),
             &mut app,
         );
         assert_eq!(
             app.current_ui.theme.as_deref(),
-            Some("groknight"),
+            Some("qidi-dark"),
             "rollback must update app.current_ui.theme",
         );
         assert_eq!(
@@ -3059,17 +3059,17 @@ fn rollback_auto_dark_theme_reverts_current_ui() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("grokday"));
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-light"));
         let _ = dispatch(
             Action::TaskComplete(TaskResult::SettingPersistFailed {
                 key: "auto_dark_theme",
-                rollback_value: SettingValue::Enum("groknight"),
+                rollback_value: SettingValue::Enum("qidi-dark"),
                 error: "disk full".into(),
             }),
             &mut app,
         );
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("groknight"),);
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-dark"),);
     });
 }
 #[test]
@@ -3077,20 +3077,20 @@ fn rollback_auto_light_theme_reverts_current_ui() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetAutoLightTheme("qidi-dark".into()), &mut app);
         assert_eq!(
             app.current_ui.auto_light_theme.as_deref(),
-            Some("groknight"),
+            Some("qidi-dark"),
         );
         let _ = dispatch(
             Action::TaskComplete(TaskResult::SettingPersistFailed {
                 key: "auto_light_theme",
-                rollback_value: SettingValue::Enum("grokday"),
+                rollback_value: SettingValue::Enum("qidi-light"),
                 error: "disk full".into(),
             }),
             &mut app,
         );
-        assert_eq!(app.current_ui.auto_light_theme.as_deref(), Some("grokday"));
+        assert_eq!(app.current_ui.auto_light_theme.as_deref(), Some("qidi-light"));
     });
 }
 /// Edge case — if the rollback value is
@@ -3105,8 +3105,8 @@ fn rollback_auto_dark_theme_with_auto_value_clears_to_none() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoDarkTheme("grokday".into()), &mut app);
-        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("grokday"));
+        let _ = dispatch(Action::SetAutoDarkTheme("qidi-light".into()), &mut app);
+        assert_eq!(app.current_ui.auto_dark_theme.as_deref(), Some("qidi-light"));
         let _ = dispatch(
             Action::TaskComplete(TaskResult::SettingPersistFailed {
                 key: "auto_dark_theme",
@@ -3127,10 +3127,10 @@ fn rollback_auto_light_theme_with_auto_value_clears_to_none() {
     use crate::settings::SettingValue;
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
-        let _ = dispatch(Action::SetAutoLightTheme("groknight".into()), &mut app);
+        let _ = dispatch(Action::SetAutoLightTheme("qidi-dark".into()), &mut app);
         assert_eq!(
             app.current_ui.auto_light_theme.as_deref(),
-            Some("groknight"),
+            Some("qidi-dark"),
         );
         let _ = dispatch(
             Action::TaskComplete(TaskResult::SettingPersistFailed {

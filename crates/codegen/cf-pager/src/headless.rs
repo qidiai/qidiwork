@@ -507,14 +507,14 @@ fn auto_respond_to_permissions(
 /// "Not signed in" error message, tailored to the session type.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
-        "Not signed in. Run `grok login` to authenticate \
-         (or `grok login --device-code` if no browser is available)."
+        "尚未登录。请运行 `qidiwork login` 完成登录 \
+         （没有浏览器时可用 `qidiwork login --device-code`）。"
             .to_string()
     } else {
-        "Not signed in. To authenticate without a browser, run:\n  \
-         grok login --device-code\n\n\
-         Alternatively, set the XAI_API_KEY environment variable \
-         or run `grok login` on a machine with a browser."
+        "尚未登录。如无浏览器，请运行：\n  \
+         qidiwork login --device-code\n\n\
+         或者设置 XAI_API_KEY 环境变量，\
+         或在有浏览器的机器上运行 `qidiwork login`。"
             .to_string()
     }
 }

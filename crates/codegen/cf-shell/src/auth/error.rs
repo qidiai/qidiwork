@@ -3,28 +3,28 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AuthError {
-    #[error("Not logged in. Run `grok login`.")]
+    #[error("尚未登录。请运行 `qidiwork login`。")]
     NotLoggedIn,
 
     /// Token expired and no refresh authority available.
-    #[error("Token expired. Run `grok login` to re-authenticate.")]
+    #[error("登录令牌已过期。请运行 `qidiwork login` 重新登录。")]
     TokenExpiredNoRefresh,
 
     /// Server rejected the token (401) with no recovery path.
-    #[error("Authentication rejected by server. Run `grok login` to re-authenticate.")]
+    #[error("服务端拒绝了认证。请运行 `qidiwork login` 重新登录。")]
     ServerRejectedNoRecovery,
 
     /// All recovery strategies exhausted.
-    #[error("Auth recovery exhausted; re-authentication required.")]
+    #[error("认证恢复已尝试全部策略，需要重新登录。")]
     RecoveryExhausted,
 
     /// A session's team principal violates the `force_login_team_uuid` pin.
     /// `message` states which team is required vs. returned.
-    #[error("{message} Run `grok login` to sign in with the required team.")]
+    #[error("{message} 请运行 `qidiwork login` 登录到指定的团队。")]
     PinnedTeamMismatch { message: String },
 
     /// Cached API-key session rejected because API-key auth is disabled.
-    #[error("API-key auth is disabled by your administrator. Run `grok login` to authenticate.")]
+    #[error("管理员已禁用 API Key 认证。请运行 `qidiwork login` 登录。")]
     ApiKeyAuthDisabled,
 
     /// Outcome of a refresh-authority attempt. Recoverability (and, for
@@ -106,13 +106,13 @@ impl RefreshTokenFailedReason {
     pub(crate) fn user_message(self) -> &'static str {
         match self {
             Self::RefreshTokenRejected => {
-                "Your session has expired. Run `grok login` to sign in again."
+                "你的会话已过期。请运行 `qidiwork login` 重新登录。"
             }
             Self::ClientRejected => {
-                "Authentication is temporarily unavailable. Run `grok login` if this persists."
+                "认证暂时不可用。如果持续如此，请运行 `qidiwork login`。"
             }
             Self::Other => {
-                "Authentication could not be refreshed. Run `grok login` to sign in again."
+                "无法刷新认证。请运行 `qidiwork login` 重新登录。"
             }
         }
     }

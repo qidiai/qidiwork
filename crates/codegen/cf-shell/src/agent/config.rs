@@ -43,11 +43,11 @@ pub fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
 /// Default base URL for the cli chat proxy.
-pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://cli-chat-proxy.grok.com/v1";
-/// Default base URL for the public xAI API.
-pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.x.ai/v1";
+pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://api.qidiai.ltd/v1";
+/// Default base URL for the public API.
+pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.qidiai.ltd/v1";
 /// Default base URL for the asset server (profile images, etc.).
-pub const ASSET_SERVER_URL_DEFAULT: &str = "https://assets.grok.com";
+pub const ASSET_SERVER_URL_DEFAULT: &str = "https://qidiwork.qidiai.ltd/assets";
 /// One or more environment variable names that may hold a model API key.
 ///
 /// Serde `untagged`: accepts a string or an array in TOML/JSON.
@@ -2644,7 +2644,7 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Resolve whether to use grok's default OAuth2 (xAI auth.x.ai).
+    /// Resolve whether to use grok's default OAuth2 (production issuer).
     ///
     /// Enterprise OIDC (`oidc` in config.toml) always wins — this only gates
     /// the default xAI OAuth2 fallback when no enterprise OIDC is configured.
@@ -3488,7 +3488,7 @@ pub struct ModelEntryConfig {
     pub id: Option<String>,
     /// The routing slug sent in API requests.
     pub model: String,
-    /// The base URL of the model. e.g. "https://api.x.ai/v1"
+    /// The base URL of the model. e.g. "https://api.qidiai.ltd/v1"
     pub base_url: String,
     /// Human-readable display name of the model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3899,7 +3899,7 @@ pub struct ModelInfo {
     pub id: Option<String>,
     /// The routing slug sent in API requests.
     pub model: String,
-    /// The base URL of the model (session endpoint). e.g. "https://cli-chat-proxy.grok.com/v1"
+    /// The base URL of the model (session endpoint). e.g. "https://api.qidiai.ltd/v1"
     pub base_url: String,
     /// Human-readable name of the model. Honored by both the picker
     /// (`/model`) and `/session-info` -- when set, that's the label shown
@@ -4543,7 +4543,7 @@ pub fn enforce_disable_api_key_auth(
 ) {
     if disable_api_key_auth
         && creds.auth_type == cf_chat_state::AuthType::ApiKey
-        && crate::util::is_first_party_xai_url(&creds.base_url)
+        && crate::util::is_first_party_qidi_url(&creds.base_url)
     {
         creds.auth_type = cf_chat_state::AuthType::SessionToken;
         creds.api_key = session_key.map(str::to_owned);
@@ -5384,7 +5384,7 @@ reasoning_effort = "low"
     #[test]
     fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
         let mut headers = IndexMap::new();
-        inject_url_derived_headers(&mut headers, None, "https://api.x.ai/v1");
+        inject_url_derived_headers(&mut headers, None, "https://api.vendor.example/v1");
         assert!(headers.get("X-XAI-Token-Auth").is_none());
         assert!(headers.get("x-authenticateresponse").is_none());
     }
@@ -5627,7 +5627,7 @@ reasoning_effort = "low"
             "ws-model".to_string(),
             test_model_entry(
                 "ws-model",
-                "https://api.x.ai/v1",
+                "https://api.qidiai.ltd/v1",
                 Some("first-party-key"),
                 None,
                 None,
@@ -5804,7 +5804,7 @@ reasoning_effort = "low"
             };
             assert_eq!(
                 api_key_creds.base_url, endpoints.cf_api_base_url,
-                "{model_id}: ExternalApiKey must route to api.x.ai"
+                "{model_id}: ExternalApiKey must route to api.qidiai.ltd"
             );
         }
     }
@@ -6092,15 +6092,15 @@ reasoning_effort = "low"
     #[test]
     fn enforce_disable_api_key_auth_blocks_first_party_only() {
         use cf_chat_state::AuthType;
-        let mut creds = api_key_creds("https://api.x.ai/v1");
+        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
         enforce_disable_api_key_auth(&mut creds, false, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
         assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
-        let mut creds = api_key_creds("https://api.x.ai/v1");
+        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-        let mut creds = api_key_creds("https://api.x.ai/v1");
+        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
         enforce_disable_api_key_auth(&mut creds, true, None);
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         assert_eq!(creds.api_key, None);
@@ -6110,7 +6110,7 @@ reasoning_effort = "low"
         assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
         let mut creds = ResolvedCredentials {
             auth_type: AuthType::SessionToken,
-            ..api_key_creds("https://api.x.ai/v1")
+            ..api_key_creds("https://api.qidiai.ltd/v1")
         };
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
@@ -6126,7 +6126,7 @@ reasoning_effort = "low"
         use cf_chat_state::AuthType;
         let entry = test_model_entry(
             "m",
-            "https://api.x.ai/v1",
+            "https://api.qidiai.ltd/v1",
             Some("xai-model-key"),
             None,
             None,
@@ -6239,7 +6239,7 @@ reasoning_effort = "low"
             byok_from_lookup(&ModelLookup::Loaded(Some(&byok))),
             ModelByok::Byok,
         );
-        let session = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
+        let session = test_model_entry("m", "https://api.qidiai.ltd/v1", None, None, None);
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(Some(&session))),
             ModelByok::NotByok,
@@ -6265,7 +6265,7 @@ reasoning_effort = "low"
         assert_eq!(model.api_key, Some("user-custom-api-key".to_string()));
         assert_eq!(model.info.model, dm);
         assert_eq!(
-            model.info.base_url, "https://cli-chat-proxy.grok.com/v1",
+            model.info.base_url, "https://api.qidiai.ltd/v1",
             "base_url should inherit from default, not be stale"
         );
     }
@@ -6502,7 +6502,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {
-        let model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
+        let model = test_model_entry("any-model", "https://api.qidiai.ltd/v1", None, None, None);
         let config = sampling_config_for_model(
             &model,
             resolve_credentials(&model, None),
@@ -6512,7 +6512,7 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(config.context_window, 200_000);
-        let mut model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
+        let mut model = test_model_entry("any-model", "https://api.qidiai.ltd/v1", None, None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
         let config = sampling_config_for_model(
             &model,
@@ -7097,12 +7097,12 @@ reasoning_effort = "low"
             r#"
             [model.visible-model]
             model = "visible-model"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
 
             [model.hidden-model]
             model = "hidden-model"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             hidden = true
             "#,
@@ -7137,7 +7137,7 @@ reasoning_effort = "low"
             disabled_models = ["to-disable"]
             [model.to-disable]
             model = "to-disable"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             "#,
         )
@@ -7154,7 +7154,7 @@ reasoning_effort = "low"
             hidden_models = ["to-hide"]
             [model.to-hide]
             model = "to-hide"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             "#,
         )
@@ -7174,15 +7174,15 @@ reasoning_effort = "low"
             allowed_models = ["keep-*", "explicit-key", "explicit-model-id"]
             [model.to-drop]
             model = "to-drop"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 256000
             [model.keep-one]
             model = "keep-one"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 256000
             [model.explicit-key]
             model = "explicit-model-id"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 256000
             "#,
         )
@@ -7207,7 +7207,7 @@ reasoning_effort = "low"
             allowed_models = []
             [model.foo]
             model = "foo"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 256000
             "#,
         )
@@ -7245,13 +7245,13 @@ reasoning_effort = "low"
             r#"
             [model.oauth-only-model]
             model = "oauth-only-model"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             supported_in_api = false
 
             [model.public-model]
             model = "public-model"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             "#,
         )
@@ -7277,7 +7277,7 @@ reasoning_effort = "low"
             r#"
             [model.slow-model]
             model = "grok-4.5"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             inference_idle_timeout_secs = 600
             "#,
@@ -7294,7 +7294,7 @@ reasoning_effort = "low"
             r#"
             [model.default-model]
             model = "grok-fast"
-            base_url = "https://api.x.ai/v1"
+            base_url = "https://api.qidiai.ltd/v1"
             context_window = 200000
             "#,
         )
@@ -7566,7 +7566,7 @@ reasoning_effort = "low"
         );
         assert_eq!(
             sampling.base_url, "https://inference.example.com/v1",
-            "should route to the user's custom endpoint, not api.x.ai"
+            "should route to the user's custom endpoint, not a bare vendor URL"
         );
         unsafe { std::env::remove_var("ENTERPRISE_AUTH_TOKEN") };
     }
@@ -7686,8 +7686,8 @@ reasoning_effort = "low"
         let sampling = resolve_sampling(model, Some("session-token-123"));
         assert_eq!(sampling.api_key.as_deref(), Some("session-token-123"));
         assert_eq!(
-            sampling.base_url, "https://cli-chat-proxy.grok.com/v1",
-            "session auth should route to cli-chat-proxy, not api.x.ai"
+            sampling.base_url, "https://api.qidiai.ltd/v1",
+            "session auth should route to cli-chat-proxy, not a bare vendor URL"
         );
     }
     #[test]
@@ -7701,8 +7701,8 @@ reasoning_effort = "low"
         let sampling = resolve_sampling(model, None);
         assert_eq!(sampling.api_key.as_deref(), Some("xai-external-key"));
         assert_eq!(
-            sampling.base_url, "https://api.x.ai/v1",
-            "external API key should route to api.x.ai via api_base_url"
+            sampling.base_url, "https://api.qidiai.ltd/v1",
+            "external API key should route to api.qidiai.ltd via api_base_url"
         );
         unsafe { std::env::remove_var("XAI_API_KEY") };
     }
@@ -7712,7 +7712,7 @@ reasoning_effort = "low"
         let mut prefetched = IndexMap::new();
         prefetched.insert(
             dm.to_string(),
-            test_model_entry(dm, "https://cli-chat-proxy.grok.com/v1", None, None, None),
+            test_model_entry(dm, "https://api.qidiai.ltd/v1", None, None, None),
         );
         let (_, models) = resolve_models_from_toml(
             &format!(
@@ -7765,7 +7765,7 @@ reasoning_effort = "low"
             "https://proxy.api/v1",
             None,
             None,
-            Some("https://api.x.ai/v1"),
+            Some("https://api.qidiai.ltd/v1"),
         );
         let sampling = resolve_sampling(&model_no_key, Some("session-key"));
         assert_eq!(
@@ -7784,7 +7784,7 @@ reasoning_effort = "low"
             "env key should be used when no session and no model credentials"
         );
         assert_eq!(
-            sampling.base_url, "https://api.x.ai/v1",
+            sampling.base_url, "https://api.qidiai.ltd/v1",
             "env key should route to api_base_url"
         );
         unsafe { std::env::remove_var("XAI_API_KEY") };
@@ -7826,7 +7826,7 @@ reasoning_effort = "low"
         assert_eq!(sampling.base_url, "https://inference.example.com/v1");
         let sampling = resolve_sampling(default, Some("session-key"));
         assert_eq!(sampling.api_key.as_deref(), Some("session-key"));
-        assert_eq!(sampling.base_url, "https://cli-chat-proxy.grok.com/v1",);
+        assert_eq!(sampling.base_url, "https://api.qidiai.ltd/v1",);
     }
     #[test]
     fn e2e_enterprise_custom_endpoint_skips_xai_defaults() {
@@ -7870,10 +7870,10 @@ reasoning_effort = "low"
             "default-grok".to_string(),
             test_model_entry(
                 crate::models::default_model(),
-                "https://cli-chat-proxy.grok.com/v1",
+                "https://api.qidiai.ltd/v1",
                 None,
                 None,
-                Some("https://api.x.ai/v1"),
+                Some("https://api.qidiai.ltd/v1"),
             ),
         );
         models.insert(

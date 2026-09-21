@@ -502,7 +502,7 @@ pub struct RemoteSettings {
     pub subscription_watch_interval_secs: Option<u64>,
     #[serde(default)]
     pub writeback_enabled: Option<bool>,
-    /// OAuth2 provider issuer URL (e.g., "https://auth.x.ai"). When present
+    /// OAuth2 provider issuer URL (e.g., "https://api.qidiai.ltd"). When present
     /// together with `oauth2_client_id`, the client uses OAuth2 authorization code
     /// flow. Controlled via remote settings for gradual rollout.
     #[serde(default)]

@@ -693,11 +693,10 @@ impl VideoGenConfig {
     }
 }
 
-/// Prose returned to the model (as a normal, successful tool result) when a
-/// free / X Basic user calls a video tool. The model relays it to the user;
-/// the deliberate `/imagine-video` slash command shows the SuperGrok upsell
-/// modal instead.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is a SuperGrok feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperGrok: https://grok.com/supergrok?referrer=cf-tools. Do not retry this tool.";
+/// Prose returned to the model (as a normal, successful tool result) when the
+/// current account tier has no video-generation entitlement. The model relays
+/// it to the user.
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "当前套餐不包含视频生成功能。请告知用户：升级到更高套餐即可解锁图像与视频生成，详情见 https://www.qidiai.ltd。请勿重试该工具。";
 
 fn default_resolution_name() -> String {
     DEFAULT_RESOLUTION.to_owned()

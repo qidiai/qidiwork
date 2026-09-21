@@ -427,8 +427,8 @@ async fn run_upload(
                 "trace_cmd: no upload credentials available"
             );
             anyhow::bail!(
-                "No upload credentials. Run `grok login` or set a deployment key. \
-                 See {} for upload overrides.",
+                "没有可用于上传的凭据。请运行 `qidiwork login` 或设置 deployment key。\
+                 上传相关覆盖项见 {}。",
                 crate::util::display_user_grok_path("docs/user-guide")
             );
         }
@@ -559,10 +559,10 @@ impl UploadAttempt<'_> {
             println!("{}", serde_json::to_string(&result).unwrap_or_default());
         } else {
             eprintln!();
-            eprintln!("Trace upload failed: {error}");
-            eprintln!("  Bundle: {}", export_path.display());
-            eprintln!("  Log:    {}", log_path.display());
-            eprintln!("  Retry:  grok trace {}", self.session_id);
+            eprintln!("追踪上传失败：{error}");
+            eprintln!("  打包：{}", export_path.display());
+            eprintln!("  日志：{}", log_path.display());
+            eprintln!("  重试：qidiwork trace {}", self.session_id);
             println!("{}", export_path.display());
         }
 
@@ -577,7 +577,7 @@ impl UploadAttempt<'_> {
         let _ = writeln!(log, "Trace upload debug log");
         let _ = writeln!(log, "======================");
         let _ = writeln!(log, "Timestamp:    {}", chrono::Utc::now().to_rfc3339());
-        let _ = writeln!(log, "Grok version: {}", env!("VERSION_WITH_COMMIT"));
+        let _ = writeln!(log, "QIDI version: {}", env!("VERSION_WITH_COMMIT"));
         let _ = writeln!(
             log,
             "OS:           {} {}",

@@ -158,7 +158,7 @@ fn seed_fake_oauth_local_issuer(content: &ContentController, user: &str) {
         grok_home.join("auth.json"),
         format!(
             r#"{{
-  "http://localhost:22255::b1a00492-073a-47ea-816f-4c329264a828": {{
+  "http://localhost:22255::qidi-code": {{
     "key": "pty-test-oauth-token",
     "auth_mode": "oidc",
     "create_time": "2026-01-01T00:00:00Z",
@@ -167,7 +167,7 @@ fn seed_fake_oauth_local_issuer(content: &ContentController, user: &str) {
     "expires_at": "2030-01-01T00:00:00Z",
     "refresh_token": "pty-test-refresh-token",
     "oidc_issuer": "http://localhost:22255",
-    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
+    "oidc_client_id": "qidi-code"
   }}
 }}"#
         ),

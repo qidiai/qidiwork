@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Grok CLI installer (enterprise channel) — https://x.ai/cli/enterprise-install.sh
+# Grok CLI installer (enterprise channel) — https://qidiwork.qidiai.ltd/cli/enterprise-install.sh
 #
 # Standalone installer for the enterprise channel. This is intentionally a full
 # copy of the install logic (not a wrapper around install.sh) so that changes to
@@ -10,9 +10,9 @@
 # Env: GROK_BIN_DIR, GROK_PROXY_URL
 #
 # Usage:
-#   curl -fsSL https://x.ai/cli/enterprise-install.sh | bash            # latest enterprise
-#   curl -fsSL https://x.ai/cli/enterprise-install.sh | bash -s 0.1.42  # specific version
-#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://x.ai/cli/enterprise-install.sh)
+#   curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash            # latest enterprise
+#   curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash -s 0.1.42  # specific version
+#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh)
 #
 # Windows: run under Git for Windows / MSYS2 Bash (same curl | bash flow); WSL
 # uses the Linux binary.
@@ -122,7 +122,7 @@ read_grok_token() {
 }
 
 # Resolve auth: GROK_DEPLOYMENT_KEY > OIDC token > legacy token
-OIDC_SCOPE="https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+OIDC_SCOPE="https://api.qidiai.ltd::qidi-code"
 LEGACY_SCOPE="https://accounts.x.ai/sign-in"
 AUTH_SOURCE=""
 
@@ -155,8 +155,8 @@ case "$(uname -m)" in
     *)                    echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-BASE_URL_PRIMARY="https://x.ai/cli"
-BASE_URL_FALLBACK="https://storage.googleapis.com/grok-build-public-artifacts/cli"
+BASE_URL_PRIMARY="https://qidiwork.qidiai.ltd/cli"
+BASE_URL_FALLBACK="https://qidiwork.qidiai.ltd/cli"
 DOWNLOAD_DIR="$HOME/.grok/downloads"
 BIN_DIR="${GROK_BIN_DIR:-$HOME/.grok/bin}"
 mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
@@ -280,7 +280,7 @@ fi
 
 # Fetch managed_config.toml + requirements.toml from server (deployment key only).
 if [ -n "$GROK_DEPLOYMENT_KEY" ]; then
-    PROXY_URL="${GROK_PROXY_URL:-https://cli-chat-proxy.grok.com/v1}"
+    PROXY_URL="${GROK_PROXY_URL:-https://api.qidiai.ltd/v1}"
     echo "  Fetching deployment config..." >&2
     DEPLOY_RESPONSE=""
     AUTH_HEADER_FILE=$(mktemp 2>/dev/null) || AUTH_HEADER_FILE=""

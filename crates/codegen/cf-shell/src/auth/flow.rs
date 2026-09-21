@@ -664,7 +664,7 @@ async fn run_auth_flow_inner(
         "auth: no OAuth2 configuration available (neither enterprise OIDC nor xAI OAuth2 configured)"
     );
     anyhow::bail!(
-        "No OAuth2 configuration available. Run `grok login` to authenticate, or contact your administrator if you use enterprise SSO."
+        "没有可用的 OAuth2 配置。请运行 `qidiwork login` 登录；若你使用企业级 SSO，请联系管理员。"
     )
 }
 
@@ -912,7 +912,7 @@ pub async fn run_cli_login(
         // OIDC has no device endpoint, so `--device-auth` falls back here.
         if device_auth && crate::auth::oidc::is_configured(&config.grok_com_config) {
             eprintln!(
-                "Device-code login isn't available for your SSO provider; using browser sign-in."
+                "你的 SSO 提供方不支持设备码登录；已改用浏览器登录。"
             );
         }
         // Loopback. `reauth=true` clears creds up front (legacy-scope hygiene),

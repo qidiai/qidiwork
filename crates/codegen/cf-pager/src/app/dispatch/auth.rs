@@ -410,7 +410,7 @@ pub(super) fn handle_mcp_auth_trigger_done(
             // Brittle if the shell ever quotes a name shape that doesn't
             // match `server_name` here — replace with a structured
             // discriminator on McpAuthTriggerResponse if that happens.
-            let msg = if e.starts_with("To authenticate") {
+            let msg = if e.starts_with("如需认证") {
                 format!("{server_name}: {e}")
             } else if e.contains(&server_name) {
                 format!("Auth failed: {e}")

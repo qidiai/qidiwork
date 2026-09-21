@@ -684,7 +684,7 @@ pub fn render_welcome(
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
-            let label = params.login_label.unwrap_or("grok.com");
+            let label = params.login_label.unwrap_or("QIDI");
             let login_text = format!("Login with {}", label);
             let menu = [("l", login_text.as_str()), ("q", "Quit")];
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
@@ -1938,7 +1938,7 @@ fn render_welcome_done(
         let gate_text = p
             .gate
             .map(|g| g.message.as_str())
-            .unwrap_or("SuperGrok subscription required");
+            .unwrap_or("需要升级到 pro 订阅 / Upgrade to a pro plan");
         let msg = Line::from(Span::styled(
             gate_text,
             Style::default().fg(theme.gray_bright),
@@ -1962,7 +1962,7 @@ fn render_welcome_done(
             let gate_link = p
                 .gate
                 .and_then(|g| g.url.as_deref())
-                .unwrap_or("https://grok.com/supergrok?referrer=cf-tools");
+                .unwrap_or("https://www.qidiai.ltd");
             let url = Line::from(Span::styled(
                 gate_link,
                 Style::default()

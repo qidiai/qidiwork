@@ -22,7 +22,7 @@ pub enum Command {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
-        /// Use QIDI Code OAuth via auth.x.ai.
+        /// Use QIDI Code OAuth via api.qidiai.ltd.
         #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
@@ -296,13 +296,13 @@ impl AgentArgs {
                 Ok(canonical) if canonical.is_dir() => Some(canonical),
                 Ok(_) => {
                     eprintln!(
-                        "grok: --plugin-dir {}: not a directory; skipping",
+                        "qidi: --plugin-dir {}: not a directory; skipping",
                         p.display()
                     );
                     None
                 }
                 Err(e) => {
-                    eprintln!("grok: --plugin-dir {}: {e}; skipping", p.display());
+                    eprintln!("qidi: --plugin-dir {}: {e}; skipping", p.display());
                     None
                 }
             })
@@ -314,7 +314,7 @@ impl AgentArgs {
 pub enum AgentCmd {
     /// Run the agent over stdio
     Stdio,
-    /// Run the agent headlessly over the Grok WebSocket relay
+    /// 通过 QIDI WebSocket 中继以 headless 方式运行 agent
     Headless(HeadlessArgs),
     /// Run the agent as a WebSocket server
     Serve(ServeArgs),
@@ -364,7 +364,7 @@ pub struct LeaderArgs {
     /// Keep the leader running after the last client disconnects.
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
-    /// Defer the grok.com relay WebSocket until the first headless IPC client
+    /// Defer the QIDI relay WebSocket until the first headless IPC client
     /// registers. Without this flag the leader connects the relay eagerly at
     /// startup — required for bare leaders (headless remote env / systemd) that
     /// receive remote prompts *through* the relay. Passed by leaders auto-spawned
@@ -393,7 +393,7 @@ fn version_with_channel() -> &'static str {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "qidi",
+    name = "qidiwork",
     version = version_with_channel(),
     about = "QIDI Code — AI coding assistant",
     disable_version_flag = true,
@@ -708,13 +708,13 @@ pub struct PagerArgs {
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
     /// Sticky: records `[ui] screen_mode = "minimal"` in ~/.qidi/config.toml
-    /// so future plain `grok` invocations open in minimal mode too.
+    /// so future plain `qidiwork` invocations open in minimal mode too.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI, overriding a sticky minimal
     /// preference. Sticky counterpart of --minimal: records
     /// `[ui] screen_mode = "fullscreen"` in ~/.qidi/config.toml so future
-    /// plain `grok` invocations open fullscreen again. Fullscreen-vs-inline
+    /// plain `qidiwork` invocations open fullscreen again. Fullscreen-vs-inline
     /// still follows the alt-screen policy (--no-alt-screen, [terminal]
     /// alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
@@ -734,7 +734,7 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
-    /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
+    /// Initial prompt for the interactive session, e.g. `qidiwork "fix the bug"` or `qidiwork --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
         conflicts_with_all = &["single",

@@ -42,7 +42,7 @@ pub enum ManagedConfigError {
     )]
     DeploymentKeyRejected,
     #[error(
-        "Your team sign-in was rejected. It may have expired or lack access. Run `grok login` to sign in again."
+        "你的团队登录已被拒绝，可能已过期或缺少访问权限。请运行 `qidiwork login` 重新登录。"
     )]
     TeamAuthRejected,
     #[error("The server returned an unexpected error (HTTP {status}). Try again in a few minutes.")]

@@ -125,12 +125,12 @@ pub struct OAuth2ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub referrer: Option<String>,
 }
-pub const XAI_OAUTH2_ISSUER: &str = "https://auth.x.ai";
+pub const XAI_OAUTH2_ISSUER: &str = "https://api.qidiai.ltd";
 /// Production accounts-app origin allowlist — the only origins builds without
 /// non-production builds accept. Lives in its own const, referenced by both
 /// profiles below, so the frozen-contract test (monorepo CI compiles with
 /// that feature enabled) still pins this production-origin const.
-const PROD_ACCOUNTS_APP_ORIGINS: &[&str] = &["https://accounts.x.ai"];
+const PROD_ACCOUNTS_APP_ORIGINS: &[&str] = &["https://api.qidiai.ltd"];
 /// See the opt-in non-production feature variant above — builds without
 /// the feature accept only the production accounts app.
 pub fn allowed_accounts_app_origins() -> Vec<String> {
@@ -161,7 +161,7 @@ pub fn accounts_app_cors_layer(method: axum::http::Method) -> tower_http::cors::
 }
 /// Local-dev OAuth2 issuer (accounts-app running on localhost).
 const XAI_OAUTH2_LOCAL_ISSUER: &str = "http://localhost:22255";
-const DEFAULT_OAUTH2_REFERRER: &str = "cf-tools";
+const DEFAULT_OAUTH2_REFERRER: &str = "qidi-code";
 /// Returns `true` when `QIDI_LOCAL_AUTH=1` is set,
 /// indicating the local accounts-app should be used as the OAuth2 issuer.
 pub fn use_local_auth() -> bool {
@@ -272,7 +272,7 @@ impl Default for GrokComConfig {
             Some(
                 OAuth2ProviderConfig::from_env().unwrap_or_else(|| OAuth2ProviderConfig {
                     issuer: cf_oauth2_issuer().to_owned(),
-                    client_id: obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828").to_owned(),
+                    client_id: obfstr::obfstr!("qidi-code").to_owned(),
                     scopes: default_oauth2_scopes(),
                     principal_type: None,
                     principal_id: None,
@@ -340,14 +340,14 @@ mod tests {
     #[test]
     fn team_auth_scope_is_base_scope() {
         let cfg = OAuth2ProviderConfig {
-            issuer: "https://auth.x.ai".into(),
+            issuer: "https://api.qidiai.ltd".into(),
             client_id: "client-123".into(),
             scopes: default_team_oauth2_scopes(),
             principal_type: Some("Team".into()),
             principal_id: Some("team-abc".into()),
-            referrer: Some("cf-tools".into()),
+            referrer: Some("qidi-code".into()),
         };
-        assert_eq!(cfg.auth_scope(), "https://auth.x.ai::client-123");
+        assert_eq!(cfg.auth_scope(), "https://api.qidiai.ltd::client-123");
     }
     #[test]
     fn env_flag_enabled_treats_falsy_spellings_as_off() {
@@ -361,14 +361,14 @@ mod tests {
     #[test]
     fn personal_auth_scope_is_base_scope() {
         let cfg = OAuth2ProviderConfig {
-            issuer: "https://auth.x.ai".into(),
+            issuer: "https://api.qidiai.ltd".into(),
             client_id: "client-123".into(),
             scopes: default_oauth2_scopes(),
             principal_type: None,
             principal_id: None,
-            referrer: Some("cf-tools".into()),
+            referrer: Some("qidi-code".into()),
         };
-        assert_eq!(cfg.auth_scope(), "https://auth.x.ai::client-123");
+        assert_eq!(cfg.auth_scope(), "https://api.qidiai.ltd::client-123");
     }
     /// FROZEN loopback contract: the accounts-app origins the CLI's loopback
     /// callback server accepts cross-origin requests from. The consent page
@@ -378,7 +378,7 @@ mod tests {
     /// Non-production / local-dev origins are opt-in only.
     #[test]
     fn allowed_accounts_app_origins_are_frozen() {
-        assert_eq!(PROD_ACCOUNTS_APP_ORIGINS, &["https://accounts.x.ai"]);
+        assert_eq!(PROD_ACCOUNTS_APP_ORIGINS, &["https://api.qidiai.ltd"]);
         assert_eq!(allowed_accounts_app_origins(), PROD_ACCOUNTS_APP_ORIGINS);
     }
     /// FROZEN client contract: the 8 scopes the xAI OAuth2 client requests.

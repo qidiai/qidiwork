@@ -1,5 +1,5 @@
 #
-# Grok CLI installer (enterprise channel) for PowerShell — https://x.ai/cli/enterprise-install.ps1
+# Grok CLI installer (enterprise channel) for PowerShell — https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1
 #
 # Standalone installer for the enterprise channel. Intentionally a full copy of
 # the install logic so changes to the stable installer cannot break enterprise.
@@ -8,10 +8,10 @@
 # Env: GROK_BIN_DIR, GROK_PROXY_URL
 #
 # Usage:
-#   irm https://x.ai/cli/enterprise-install.ps1 | iex                                       # latest enterprise
-#   & ([scriptblock]::Create((irm https://x.ai/cli/enterprise-install.ps1))) -Version 0.1.42 # specific version
-#   $env:GROK_VERSION="0.1.42"; irm https://x.ai/cli/enterprise-install.ps1 | iex           # specific version (alt)
-#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://x.ai/cli/enterprise-install.ps1 | iex
+#   irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex                                       # latest enterprise
+#   & ([scriptblock]::Create((irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1))) -Version 0.1.42 # specific version
+#   $env:GROK_VERSION="0.1.42"; irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex           # specific version (alt)
+#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex
 #
 
 param(
@@ -34,7 +34,7 @@ if (-not $Version -and $env:GROK_VERSION) {
 
 # This script is Windows-only. PS 5.1 has no Platform property and only runs on Windows.
 if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
-    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://x.ai/cli/enterprise-install.sh | bash"
+    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash"
     exit 1
 }
 
@@ -113,7 +113,7 @@ if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-\S+)?$') {
 
 # --- Resolve auth ---
 
-$OidcScope = 'https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828'
+$OidcScope = 'https://api.qidiai.ltd::qidi-code'
 $LegacyScope = 'https://accounts.x.ai/sign-in'
 $AuthSource = ''
 
@@ -150,8 +150,8 @@ $platform = "windows-$arch"
 
 # --- Resolve version ---
 
-$BaseUrlPrimary = 'https://x.ai/cli'
-$BaseUrlFallback = 'https://storage.googleapis.com/grok-build-public-artifacts/cli'
+$BaseUrlPrimary = 'https://qidiwork.qidiai.ltd/cli'
+$BaseUrlFallback = 'https://qidiwork.qidiai.ltd/cli'
 $DownloadDir = Join-Path $GrokDir 'downloads'
 $BinDir = if ($env:GROK_BIN_DIR) { $env:GROK_BIN_DIR } else { Join-Path $GrokDir 'bin' }
 
@@ -281,7 +281,7 @@ if (-not (Test-Path $ConfigFile)) {
 # --- Fetch deployment config (deployment key only) ---
 
 if ($env:GROK_DEPLOYMENT_KEY) {
-    $ProxyUrl = if ($env:GROK_PROXY_URL) { $env:GROK_PROXY_URL } else { 'https://cli-chat-proxy.grok.com/v1' }
+    $ProxyUrl = if ($env:GROK_PROXY_URL) { $env:GROK_PROXY_URL } else { 'https://api.qidiai.ltd/v1' }
     Write-Host '  Fetching deployment config...' -ForegroundColor DarkGray
     try {
         $headers = @{ 'Authorization' = "Bearer $($env:GROK_DEPLOYMENT_KEY)" }

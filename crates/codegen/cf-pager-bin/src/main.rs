@@ -152,25 +152,25 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
 async fn run_setup_command(json: bool) {
     use cf_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
-        eprintln!("No deployment key or team sign-in found.");
+        eprintln!("未找到 deployment key 或团队登录。");
         eprintln!();
-        eprintln!("To install managed configuration, sign in with a team using `grok login`,");
-        eprintln!("or set a deployment key:");
+        eprintln!("如需安装受管配置，请先使用团队账户登录：运行 `qidiwork login`，");
+        eprintln!("或设置一个 deployment key：");
         eprintln!();
         if cfg!(unix) {
             eprintln!("  export QIDI_DEPLOYMENT_KEY=<your-key>");
         } else {
             eprintln!("  $env:QIDI_DEPLOYMENT_KEY=\"<your-key>\"");
         }
-        eprintln!("  grok setup");
+        eprintln!("  qidiwork setup");
         eprintln!();
-        eprintln!("Or add the key to ~/.qidi/config.toml:");
+        eprintln!("或者把该 key 写入 ~/.qidi/config.toml：");
         eprintln!();
         eprintln!("  [endpoints]");
         eprintln!("  deployment_key = \"<your-key>\"");
         eprintln!();
         eprintln!(
-            "If you don't have a deployment key, contact your organization's QIDI Code administrator."
+            "如果你没有 deployment key，请联系你组织的 QIDI Code 管理员。"
         );
         std::process::exit(1);
     }
@@ -182,26 +182,26 @@ async fn run_setup_command(json: bool) {
                 println!("{out}");
                 if !report.configured {
                     eprintln!(
-                        "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                        "你的团队尚未配置受管配置。请让团队管理员在 QIDI 控制台进行设置。"
                     );
                 }
             }
             Err(e) => {
-                eprintln!("Couldn't fetch managed configuration. {e}");
+                eprintln!("无法获取受管配置。{e}");
                 std::process::exit(1);
             }
         }
         return;
     }
     match managed_config::run_setup().await {
-        SetupOutcome::Installed => eprintln!("Applied managed configuration."),
+        SetupOutcome::Installed => eprintln!("已应用受管配置。"),
         SetupOutcome::NothingConfigured => {
             eprintln!(
-                "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                "你的团队尚未配置受管配置。请让团队管理员在 QIDI 控制台进行设置。"
             );
         }
         SetupOutcome::Failed(e) => {
-            eprintln!("Couldn't apply managed configuration. {e}");
+            eprintln!("无法应用受管配置。{e}");
             std::process::exit(1);
         }
     }
@@ -297,15 +297,15 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Enabled => {}
         WorkspaceGate::Disabled => {
             anyhow::bail!(
-                "`grok workspace` is not enabled for this account \
-             (gated by a server-side feature flag that is currently off)."
+                "此账户未启用 `qidiwork workspace` \
+             （由服务端功能开关控制，当前处于关闭状态）。"
             )
         }
         WorkspaceGate::Unknown => {
             anyhow::bail!(
-                "Could not load your settings for `grok workspace`. Check your \
-             network connection (run `grok login` if you are signed out), then \
-             try again."
+                "无法加载 `qidiwork workspace` 的你的设置。请检查你的\
+             网络连接（若已登出请运行 `qidiwork login`），然后\
+             重试。"
             )
         }
     }
@@ -334,8 +334,8 @@ fn ensure_workspace_caps(reg: &LeaderRegistration) -> Result<()> {
     let caps = ensure_control_caps(reg)?;
     if !caps.workspace_exposure {
         anyhow::bail!(
-            "the running leader does not support workspace exposure — stop the \
-             leader process and re-run to pick up the new version"
+            "当前运行的 leader 不支持 workspace 暴露——请停止 \
+             leader 进程并重新运行以加载新版本"
         );
     }
     Ok(())
@@ -359,8 +359,8 @@ async fn connect_workspace_control(
     .await
     .map_err(|e| {
         anyhow::anyhow!(
-            "no running leader for this environment ({e}). \
-             Start a grok session, or run `grok workspace start`."
+            "此环境没有正在运行的 leader（{e}）。\
+             请启动一个 QIDI 会话，或运行 `qidiwork workspace start`。"
         )
     })
 }
@@ -400,14 +400,14 @@ async fn workspace_start(
     );
     if !use_leader {
         anyhow::bail!(
-            "`grok workspace` requires leader mode (the workspace is shared via the leader).\n\
-             Enable it with `[cli] use_leader = true` in ~/.qidi/config.toml, or pass --leader."
+            "`qidiwork workspace` 需要 leader 模式（workspace 通过 leader 共享）。\n\
+             请在 ~/.qidi/config.toml 中设置 `[cli] use_leader = true`，或传入 --leader。"
         );
     }
     ensure_authenticated(
         &agent_config.grok_com_config,
         false,
-        Some("No cached credentials found. Run `grok login` first."),
+        Some("未找到缓存的凭据。请先运行 `qidiwork login`。"),
     )
     .await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
@@ -825,8 +825,8 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
-const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
-     load per-process plugins";
+const PLUGIN_DIR_LEADER_WARNING: &str = "qidiwork: --plugin-dir 在 leader 模式下会被忽略；请使用 --no-leader \
+     以加载按进程的插件";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 async fn run_agent_command(
     agent_args: Box<cf_pager::app::AgentArgs>,
@@ -911,7 +911,7 @@ async fn run_agent_command(
         None,
     );
     if let Some(warning) = launch_yolo.blocked_warning {
-        eprintln!("grok: {warning}");
+        eprintln!("qidiwork: {warning}");
     }
     agent_config.default_yolo_mode = launch_yolo.yolo;
     // B5: seed the launch-scoped YOLO tool allowlist (`--yolo-tools`) so every
@@ -923,7 +923,7 @@ async fn run_agent_command(
     if let Some(msg) =
         cf_shell::util::config::yolo_launch_refusal(launch_yolo.yolo, agent_args.ack_no_sandbox)
     {
-        eprintln!("grok: {msg}");
+        eprintln!("qidiwork: {msg}");
         std::process::exit(1);
     }
     agent_config.default_auto_mode = cf_shell::util::config::effective_auto_for_launch(
@@ -1636,7 +1636,7 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
                     println!(
-                        "grok {}",
+                        "qidiwork {}",
                         cf_version::display_version_with_commit(
                             env!("VERSION_WITH_COMMIT"),
                             cf_update::channel_label(),
@@ -1653,8 +1653,8 @@ async fn async_main() -> Result<()> {
                         "--no-leader"
                     };
                     anyhow::bail!(
-                        "top-level {flag} applies to the pager TUI, not the agent subcommand. \
-                         Use `grok-pager agent {flag}` instead."
+                        "顶层 {flag} 作用于 pager TUI，而非 agent 子命令。\
+                         请改用 `qidiwork agent {flag}`。"
                     );
                 }
                 enforce_minimum_version_or_exit(&update_config).await;
@@ -1820,7 +1820,7 @@ async fn async_main() -> Result<()> {
             None,
         );
         if let Some(warning) = launch_yolo.blocked_warning {
-            eprintln!("grok: {warning}");
+            eprintln!("qidiwork: {warning}");
         }
         // B5: same launch-scoped YOLO allowlist + startup guard as the agent
         // subcommand path. Headless is unattended, so an unrestricted --yolo
@@ -1829,7 +1829,7 @@ async fn async_main() -> Result<()> {
         if let Some(msg) =
             cf_shell::util::config::yolo_launch_refusal(launch_yolo.yolo, args.ack_no_sandbox)
         {
-            eprintln!("grok: {msg}");
+            eprintln!("qidiwork: {msg}");
             std::process::exit(1);
         }
         let json_schema = args
@@ -1913,9 +1913,9 @@ async fn async_main() -> Result<()> {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("Update installed. Run `grok` to start.");
+                eprintln!("更新已安装。运行 `qidiwork` 启动。");
             } else {
-                eprintln!("Update did not complete. Run `grok update` to retry.");
+                eprintln!("更新未完成。运行 `qidiwork update` 重试。");
             }
             Ok(())
         }

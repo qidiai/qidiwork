@@ -5,6 +5,7 @@
 //! 拿到真实应用二进制,传输层测试spawn 真实 exe 的 mock 分支。
 
 pub mod acp;
+pub mod auth;
 pub mod commands;
 pub mod logging;
 #[cfg(any(test, debug_assertions))]
@@ -56,7 +57,10 @@ pub fn run() -> i32 {
             commands::session_resume,
             commands::sessions_count,
             commands::sessions_clear,
-            commands::office_delete_workspace
+            commands::office_delete_workspace,
+            auth::auth_status,
+            auth::auth_login,
+            auth::auth_logout
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

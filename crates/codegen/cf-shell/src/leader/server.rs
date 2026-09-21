@@ -953,7 +953,7 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         profile_formats: manager.profile_formats().to_vec(),
     }
 }
-const PROD_COMPUTER_HUB_URL: &str = "wss://computer-hub.grok.com/v1/tools";
+const PROD_COMPUTER_HUB_URL: &str = "wss://qidiwork.qidiai.ltd/v1/tools";
 const WORKSPACE_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 fn workspace_err(message: impl Into<String>) -> ControlError {
     ControlError {

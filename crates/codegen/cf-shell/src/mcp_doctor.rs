@@ -238,9 +238,9 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     (sources, servers)
 }
 
-// ── Managed (grok.com) server discovery ─────────────────────────
+// ── Managed (QIDI) server discovery ─────────────────────────
 
-const MANAGED_SOURCE_LABEL: &str = "grok.com";
+const MANAGED_SOURCE_LABEL: &str = "QIDI";
 
 fn managed_skipped(reason: impl Into<String>) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
     (
@@ -284,7 +284,7 @@ async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredSe
 
     let token = match auth_manager.get_valid_token().await {
         Ok(key) => key,
-        Err(_) => return managed_skipped("auth expired — run `grok login`"),
+        Err(_) => return managed_skipped("登录已过期，请运行 `qidiwork login`"),
     };
 
     let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
@@ -656,8 +656,8 @@ pub fn print_report(report: &DoctorReport) {
     println!();
 
     if report.servers.is_empty() {
-        println!("  No MCP servers configured.");
-        println!("  Run `grok mcp add --help` to get started.");
+        println!("  未配置 MCP 服务器。");
+        println!("  可运行 `qidiwork mcp add --help` 开始。");
         println!();
         return;
     }
@@ -687,7 +687,7 @@ pub fn print_report(report: &DoctorReport) {
         report.healthy_count,
         report.failing_count,
         if report.failing_count > 0 {
-            " Run `grok mcp doctor --json` for full diagnostics."
+            " 可运行 `qidiwork mcp doctor --json` 查看完整诊断。"
         } else {
             ""
         }

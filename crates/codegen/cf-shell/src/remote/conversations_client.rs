@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthManager, GrokAuth};
 
-const QIDI_WEB_URL: &str = "https://grok.com";
+const QIDI_WEB_URL: &str = "https://qidiwork.qidiai.ltd";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]

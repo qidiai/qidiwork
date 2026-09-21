@@ -763,11 +763,11 @@ pub fn session_token_auth_gate(
 
 pub const AUTH_ERROR_SESSION_EXPIRED: &str =
 
-    "Session expired. Run `grok login` to re-authenticate.";
+    "会话已过期。请运行 `qidiwork login` 重新登录。";
 
 
 
-pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `qidi login`, set XAI_API_KEY, or add api_key to ~/.qidi/config.toml.";
+pub const AUTH_ERROR_API_KEY: &str = "Authentication failed. Run `qidiwork login`, set XAI_API_KEY, or add api_key to ~/.qidi/config.toml.";
 
 
 
@@ -827,7 +827,7 @@ pub const PREFERRED_API_KEY_UNAVAILABLE: &str = "preferred_method=api_key but no
 
 pub const PREFERRED_OIDC_UNAVAILABLE: &str =
 
-    "preferred_method=oidc but no session is available. Run `grok login` to authenticate.";
+    "配置了 preferred_method=oidc，但没有可用会话。请运行 `qidiwork login` 登录。";
 
 
 
@@ -893,7 +893,7 @@ pub fn grok_com_auth_method(
 
 ) -> acp::AuthMethod {
 
-    let name = label.unwrap_or("Grok");
+    let name = label.unwrap_or("QIDI");
 
     let meta = if has_auth_provider_command {
 
@@ -913,7 +913,7 @@ pub fn grok_com_auth_method(
 
         acp::AuthMethodAgent::new(acp::AuthMethodId::new(QIDI_COM_METHOD_ID), name.to_string())
 
-            .description(Some(format!("Sign in with {name}")))
+            .description(Some(format!("使用 {name} 登录")))
 
             .meta(meta),
 
@@ -937,7 +937,7 @@ pub fn oidc_auth_method(issuer: &str, label: Option<&str>) -> acp::AuthMethod {
 
         acp::AuthMethodAgent::new(acp::AuthMethodId::new(OIDC_METHOD_ID), name.clone())
 
-            .description(Some(format!("Sign in with {name}"))),
+            .description(Some(format!("使用 {name} 登录"))),
 
     )
 

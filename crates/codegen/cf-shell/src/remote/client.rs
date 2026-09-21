@@ -5,9 +5,9 @@ use indexmap::IndexMap;
 use prod_mc_cli_chat_proxy_types::SubagentBundle;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-const QIDI_CODE_BACKEND_URL: &str = "https://code.grok.com";
+const QIDI_CODE_BACKEND_URL: &str = "https://api.qidiai.ltd";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const QIDI_CODE_WEB_URL: &str = "https://grok.com";
+const QIDI_CODE_WEB_URL: &str = "https://qidiwork.qidiai.ltd";
 /// Build a share URL from a permission ID
 pub fn share_url(permission_id: &str) -> String {
     let web_url =
@@ -1401,9 +1401,9 @@ mod tests {
             { "id" : "grok-3", "object" : "model", "owned_by" : "xai", "context_window" :
             131072 }
         );
-        let result = parse_remote_model_value(&value, "https://api.x.ai/v1").unwrap();
+        let result = parse_remote_model_value(&value, "https://api.qidiai.ltd/v1").unwrap();
         assert_eq!(result.model, "grok-3");
-        assert_eq!(result.base_url, "https://api.x.ai/v1");
+        assert_eq!(result.base_url, "https://api.qidiai.ltd/v1");
         assert_eq!(result.name.as_deref(), Some("grok-3"));
     }
     #[test]
@@ -1754,10 +1754,10 @@ mod tests {
     fn list_url_derived_from_base_url() {
         let ep = endpoints(
             "https://proxy.grok.com/v1",
-            Some("https://api.x.ai/v1"),
+            Some("https://api.qidiai.ltd/v1"),
             None,
         );
-        assert_eq!(ep.resolve_models_list_url(), "https://api.x.ai/v1/models");
+        assert_eq!(ep.resolve_models_list_url(), "https://api.qidiai.ltd/v1/models");
     }
     #[test]
     fn list_url_explicit_overrides_derivation() {
@@ -1795,10 +1795,10 @@ mod tests {
             .unwrap(),
         );
         let session = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::Session);
-        assert_eq!(session.url, "https://cli-chat-proxy.grok.com/v1/models");
+        assert_eq!(session.url, "https://api.qidiai.ltd/v1/models");
         assert_eq!(session.auth, EndpointAuth::Session);
         let deployment = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::Deployment);
-        assert_eq!(deployment.url, "https://cli-chat-proxy.grok.com/v1/models");
+        assert_eq!(deployment.url, "https://api.qidiai.ltd/v1/models");
         assert_eq!(deployment.auth, EndpointAuth::Session);
         let api = ListModelsEndpoint::from_endpoints(&cfg, ModelFetchAuth::ApiKey);
         assert_eq!(api.url, "https://inference.acme-corp.example/xai/v1/models");
@@ -1806,7 +1806,7 @@ mod tests {
         let default = EndpointsConfig::from_config_value(&toml::Value::Table(Default::default()));
         assert_eq!(
             ListModelsEndpoint::from_endpoints(&default, ModelFetchAuth::ApiKey).url,
-            "https://api.x.ai/v1/models"
+            "https://api.qidiai.ltd/v1/models"
         );
         let custom = EndpointsConfig::from_config_value(
             &toml::from_str(
@@ -1840,7 +1840,7 @@ mod tests {
         )
         .unwrap();
         let url = EndpointsConfig::from_config_value(&managed).resolve_managed_config_url();
-        assert_eq!(url, "https://cli-chat-proxy.grok.com/v1/deployment/config");
+        assert_eq!(url, "https://api.qidiai.ltd/v1/deployment/config");
         assert!(
             !url.contains("acme-corp"),
             "deployment key would be sent to the inference host: {url}"

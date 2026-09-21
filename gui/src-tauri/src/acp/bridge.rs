@@ -132,6 +132,9 @@ fn with_office_task_meta(
     let Some(task) = office_task else {
         return params;
     };
+    if task.trim().is_empty() {
+        return params;
+    }
     let Some(root) = params.as_object_mut() else {
         return params;
     };

@@ -343,7 +343,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn tail_seek_at_line_boundary_keeps_first_line() {
         let path = tmp_file("tail-boundary");
         // Exact 1024-byte lines: size - 2MB then always lands on a line start.
@@ -373,6 +372,7 @@ mod tests {
         );
         assert_eq!(page.loaded_upto, 952, "first window line index kept");
     }
+    #[test]
     fn percent_encode_matches_kernel_urlencoding() {
         // 内核样例:urlencoding::encode("G:\\qidicode") = "G%3A%5Cqidicode"
         assert_eq!(percent_encode("G:\\qidicode"), "G%3A%5Cqidicode");

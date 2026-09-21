@@ -3,7 +3,7 @@
 //! Expected format:
 //! ```toml
 //! [[marketplace.sources]]
-//! name = "xAI Official"
+//! name = "QIDI Official"
 //! git = "https://github.com/xai-org/xai-plugin-marketplace.git"
 //!
 //! [[marketplace.sources]]
@@ -294,7 +294,7 @@ mod tests {
         let config: toml::Value = toml::from_str(
             r#"
             [[marketplace.sources]]
-            name = "xAI Official"
+            name = "QIDI Official"
             git = "https://github.com/xai-org/xai-plugin-marketplace.git"
             branch = "main"
             "#,
@@ -302,7 +302,7 @@ mod tests {
         .unwrap();
         let sources = load_sources(&config);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].name, "xAI Official");
+        assert_eq!(sources[0].name, "QIDI Official");
         assert!(
             matches!(&sources[0].kind, SourceKind::Git { url, branch } if url.contains("xai-org") && branch.as_deref() == Some("main"))
         );

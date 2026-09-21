@@ -1681,7 +1681,7 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_grok() {
+    fn cli_command_name_is_qidiwork() {
         use clap::CommandFactory;
         assert_eq!(PagerArgs::command().get_name(), "qidiwork");
     }

@@ -23,7 +23,7 @@ pub use scanner::scan_marketplace;
 pub use types::*;
 
 /// Display name of the official xAI marketplace source.
-pub const OFFICIAL_SOURCE_NAME: &str = "xAI Official";
+pub const OFFICIAL_SOURCE_NAME: &str = "QIDI Official";
 
 /// Git URL of the official marketplace source. Auto-registered on first run.
 pub const OFFICIAL_SOURCE_GIT_URL: &str = "https://github.com/qidiai/plugin-marketplace.git";

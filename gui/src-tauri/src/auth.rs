@@ -86,13 +86,13 @@ struct StoredAuth {
 }
 
 #[derive(Debug, Serialize)]
-struct UsageToday {
+pub struct UsageToday {
     requests: i64,
     tokens: i64,
 }
 
 #[derive(Debug, Serialize)]
-struct Quota {
+pub struct Quota {
     requests_limit: i64,
     tokens_limit: i64,
     requests_left: i64,
@@ -116,11 +116,16 @@ pub struct AuthStatus {
 fn read_stored(home: &Path) -> Option<StoredAuth> {
     let raw = std::fs::read_to_string(auth_json_path(home)).ok()?;
     let map: std::collections::BTreeMap<String, StoredAuth> = serde_json::from_str(&raw).ok()?;
-    map.get(&scope_key()).cloned().or_else(|| {
-        // 兜底:env 覆盖 issuer/client_id 与登录时不一致的老文件,取唯一非 API key 项。
-        map.into_values()
-            .find(|a| !a.key.trim().is_empty())
-    })
+    if let Some(a) = map.get(&scope_key()) {
+        return Some(a.clone());
+    }
+    // 兜底:env 覆盖 issuer/client_id 与登录时不一致的老文件。仅当文件里恰好
+    // 只有一条记录时才取该项,避免多账号场景下误选他人登录态。
+    if map.len() == 1 {
+        map.into_values().next()
+    } else {
+        None
+    }
 }
 
 // ------------------------------------------------------------- 状态查询 --

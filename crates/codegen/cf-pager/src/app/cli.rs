@@ -296,13 +296,13 @@ impl AgentArgs {
                 Ok(canonical) if canonical.is_dir() => Some(canonical),
                 Ok(_) => {
                     eprintln!(
-                        "qidi: --plugin-dir {}: not a directory; skipping",
+                        "qidiwork: --plugin-dir {}: not a directory; skipping",
                         p.display()
                     );
                     None
                 }
                 Err(e) => {
-                    eprintln!("qidi: --plugin-dir {}: {e}; skipping", p.display());
+                    eprintln!("qidiwork: --plugin-dir {}: {e}; skipping", p.display());
                     None
                 }
             })

@@ -1,4 +1,4 @@
-# QIDI Code 一键发布链脚本(内核 release + NSIS 安装包)
+﻿# QIDI Code 一键发布链脚本(内核 release + NSIS 安装包)
 # 用法:在 PowerShell 里执行  .\build_release.ps1
 #   .\build_release.ps1 -SkipInstaller   仅构建内核(跳过 GUI 安装包)
 # 结果写入 build_result.txt,日志写入 build_log.txt

@@ -85,7 +85,7 @@ impl cf_tool_runtime::Tool for MonitorTool {
         let resolved_timeout = input.resolved_timeout_ms();
         let description = input.description.clone();
 
-        let (terminal, notification_handle, cwd, session_folder, owner_session_id) = {
+        let (terminal, notification_handle, cwd, session_folder, owner_session_id, office_task) = {
             let res = resources.lock().await;
             let terminal = res.require::<Terminal>()?.0.clone();
             let notif = res
@@ -103,7 +103,10 @@ impl cf_tool_runtime::Tool for MonitorTool {
             let owner = res
                 .get::<crate::types::resources::OwnerSessionId>()
                 .map(|o| o.0.clone());
-            (terminal, notif, cwd, session_folder, owner)
+            let office_task = res
+                .get::<crate::types::resources::OfficeTask>()
+                .map(|o| o.0.clone());
+            (terminal, notif, cwd, session_folder, owner, office_task)
         };
 
         // Output file lives in the session folder alongside bash terminal logs.
@@ -132,6 +135,7 @@ impl cf_tool_runtime::Tool for MonitorTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Monitor,
                 owner_session_id,
+                office_task,
             })
             .await
             .map_err(|e| cf_tool_runtime::ToolError::custom("process_manager", e.to_string()))?;
@@ -449,6 +453,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                office_task: None,
             })
             .await
             .expect("spawn monitor");
@@ -525,6 +530,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("session-A".to_string()),
+                office_task: None,
             })
             .await
             .expect("spawn monitor");
@@ -594,6 +600,7 @@ mod tests {
                 foreground_block_budget: None,
                 kind: TaskKind::Monitor,
                 owner_session_id: Some("child-session".to_string()),
+                office_task: None,
             })
             .await
             .expect("spawn monitor");

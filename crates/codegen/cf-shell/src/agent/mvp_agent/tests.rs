@@ -1069,6 +1069,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
+        office_task: None,
         parent_scheduler_handle: None,
         skills: vec![],
         state_path: tmp.path().join("state.json"),
@@ -4423,5 +4424,53 @@ mod soft_default_settings_emit {
                 let _ = args.response_tx.send(Ok(()));
             })
             .await;
+    }
+}
+
+/// `_meta.office_task` -> per-session office-artifact binding. Receive side of the
+/// `QIDI_OFFICE_TASK` injection contract with the pager (T-D writes the key into
+/// `session/new` / `session/load` params `_meta`; unbound requests omit it).
+mod office_task_meta_tests {
+    use super::resolve_office_task;
+
+    /// Build a `_meta` map (`acp::Meta` is `serde_json::Map<String, Value>`).
+    fn meta(office_task: Option<serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        if let Some(v) = office_task {
+            m.insert("office_task".to_string(), v);
+        }
+        m
+    }
+
+    #[test]
+    fn bound_workspace_is_returned_trimmed() {
+        let m = meta(Some(serde_json::json!("  writing-proposal  ")));
+        assert_eq!(
+            resolve_office_task(Some(&m)).as_deref(),
+            Some("writing-proposal")
+        );
+    }
+
+    #[test]
+    fn absent_key_yields_none() {
+        assert_eq!(resolve_office_task(Some(&meta(None))), None);
+        assert_eq!(resolve_office_task(None), None);
+    }
+
+    #[test]
+    fn empty_or_blank_value_yields_none() {
+        assert_eq!(
+            resolve_office_task(Some(&meta(Some(serde_json::json!(""))))),
+            None
+        );
+        assert_eq!(
+            resolve_office_task(Some(&meta(Some(serde_json::json!("   "))))),
+            None
+        );
+        // A non-string value is ignored rather than coerced.
+        assert_eq!(
+            resolve_office_task(Some(&meta(Some(serde_json::json!(42))))),
+            None
+        );
     }
 }

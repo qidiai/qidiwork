@@ -110,6 +110,16 @@ pub struct TerminalRunRequest {
     /// `kill_all_background_tasks_by_owner` only targets the requesting
     /// session's processes — not the parent's or sibling's.
     pub owner_session_id: Option<String>,
+
+    /// Office-artifact workspace this session is bound to, mirroring
+    /// [`Self::owner_session_id`]'s per-session plumbing.
+    ///
+    /// When `Some`, the terminal actor exports `QIDI_OFFICE_TASK=<task>` to the
+    /// child *before* the request env is merged, so an explicit request-env
+    /// value still wins and `card.py`'s `--task` (which outranks the env var)
+    /// is unaffected. `None` means no binding: nothing is exported and
+    /// behaviour is byte-identical to before.
+    pub office_task: Option<String>,
 }
 
 /// Distinguishes different types of background tasks.

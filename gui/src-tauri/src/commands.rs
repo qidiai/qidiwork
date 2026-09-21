@@ -218,12 +218,15 @@ pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatusInf
 
 /// 开启(或恢复)一个 ACP 会话:确保 agent + 桥 + initialize,
 /// 然后 session/new。返回 sessionId。
+/// `office_task`:绑定的办公任务工作区名(前端按当前工作区/cwd 目录名取值),
+/// 随 session/new 透传给内核并落入登记簿(续接/恢复时按它还原绑定)。
 #[tauri::command]
 pub async fn session_start(
     app: AppHandle,
     agent: State<'_, AgentState>,
     bridge: State<'_, BridgeState>,
     cwd: Option<String>,
+    office_task: Option<String>,
 ) -> Result<String, String> {
     let process = ensure_agent(&app, &agent).await?;
     let bridge = ensure_bridge(&app, &process, &bridge).await?;
@@ -232,7 +235,7 @@ pub async fn session_start(
         .map(PathBuf::from)
         .or_else(|| app.path().home_dir().ok());
     let cwd = cwd.unwrap_or_else(|| PathBuf::from("."));
-    let session_id = bridge.new_session(cwd.clone()).await?;
+    let session_id = bridge.new_session(cwd.clone(), office_task.clone()).await?;
     // 会话登记落盘(k3 M3 审计登记项:GUI 重启后可续接)。
     if let Ok(dir) = app.path().app_data_dir() {
         if let Err(e) = persist::upsert_session(
@@ -241,6 +244,7 @@ pub async fn session_start(
                 session_id: session_id.clone(),
                 cwd: cwd.to_string_lossy().into_owned(),
                 title: None,
+                task: office_task,
             },
         ) {
             tracing::warn!(%session_id, error = %e, "会话登记落盘失败");
@@ -343,7 +347,7 @@ pub async fn agent_recover(
 ) -> Result<usize, String> {
     // 会话清单以磁盘为准(进程内旧桥可能已丢);两处合并去重。
     let data_dir = app.path().app_data_dir().ok();
-    let mut sessions: Vec<(String, PathBuf)> = {
+    let mut sessions: Vec<(String, PathBuf, Option<String>)> = {
         let guard = bridge.inner.lock().await;
         guard.as_ref().map(|b| b.sessions()).unwrap_or_default()
     };
@@ -355,8 +359,8 @@ pub async fn agent_recover(
                 tracing::warn!(session_id = %s.session_id, cwd = %s.cwd, "持久化会话 cwd 无效,跳过");
                 continue;
             }
-            let entry = (s.session_id, cwd);
-            if !sessions.iter().any(|(id, _)| *id == entry.0) {
+            let entry = (s.session_id, cwd, s.task);
+            if !sessions.iter().any(|(id, _, _)| *id == entry.0) {
                 sessions.push(entry);
             }
         }
@@ -576,13 +580,14 @@ pub async fn session_resume(
     let process = ensure_agent(&app, &agent).await?;
     let b = ensure_bridge(&app, &process, &bridge).await?;
     b.ensure_initialized().await?;
-    if b.sessions().iter().any(|(id, _)| id == &session_id) {
+    if b.sessions().iter().any(|(id, _, _)| id == &session_id) {
         // 已在本桥也要发事件:前端只在收到 SessionRestored 时切 active
         // sessionId,早退不发会让点击静默无效(k3 审计)
         b.notify_session_restored(&session_id);
         return Ok(());
     }
-    b.load_session(&session_id, cwd).await?;
+    // 登记簿的绑定随 session/load 一并还原(office_task;续接后产物面板跟着走)
+    b.load_session(&session_id, cwd, s.task).await?;
     b.notify_session_restored(&session_id);
     Ok(())
 }

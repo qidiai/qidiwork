@@ -803,6 +803,13 @@ pub struct Terminal(pub Arc<dyn TerminalBackend>);
 /// the subagent's own tasks on a shared terminal backend.
 #[derive(Debug, Clone)]
 pub struct OwnerSessionId(pub String);
+/// Office-artifact workspace this session is bound to (`_meta.office_task` on
+/// `session/new` / `session/load`). Mirrors [`OwnerSessionId`]: it is the
+/// per-session binding the terminal layer exports to child processes as
+/// `QIDI_OFFICE_TASK`, replacing the TUI's process-level env read in
+/// `cf-pager` office_watch. Absent resource means unbound: no injection.
+#[derive(Debug, Clone)]
+pub struct OfficeTask(pub String);
 /// Shared citation counter for `[web:N]` numbering across web tools.
 ///
 /// Stored as `State<WebCitationCounter>` in Resources so web tools that emit

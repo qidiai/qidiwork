@@ -213,6 +213,9 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_model_id: acp::ModelId,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
+    /// Office-artifact workspace binding from `_meta.office_task`. `None` means
+    /// unbound: no `QIDI_OFFICE_TASK` is exported to child processes.
+    pub office_task: Option<String>,
     pub prompt_display_cwd: Option<String>,
 }
 #[derive(Clone, Copy)]
@@ -350,6 +353,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_model_id,
         session_yolo_mode,
         session_auto_mode: false,
+        office_task: resolve_office_task(session_meta),
         prompt_display_cwd: None,
     }
 }
@@ -387,6 +391,23 @@ pub(crate) fn resolve_session_auto_mode(
     meta.and_then(|m| m.get("autoMode").or_else(|| m.get("auto_mode")))
         .and_then(|v| v.as_bool())
         .unwrap_or(default_auto_mode && !session_yolo_mode)
+}
+/// Resolve the office-artifact workspace binding from `_meta.office_task`.
+///
+/// Contract with the pager (T-D): `session/new` / `session/load` params carry
+/// `{"_meta":{"office_task":"<workspace>"}}`; unbound requests omit the key
+/// entirely. Read side is deliberately lenient: the value is trimmed and a
+/// missing / non-string / empty / whitespace-only value resolves to `None`, so
+/// an unbound session is indistinguishable from one whose key was absent.
+///
+/// Shared by the `session/new` / `session/load` parse paths and unit-tested
+/// directly (see `tests::office_task_meta_tests`).
+pub(crate) fn resolve_office_task(meta: Option<&acp::Meta>) -> Option<String> {
+    meta.and_then(|m| m.get("office_task"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|task| !task.is_empty())
+        .map(str::to_string)
 }
 /// Typed `_meta` payload for `PromptResponse`.
 /// camelCase keys match the bot's `_META_TOKEN_KEY_MAP`.

@@ -1875,7 +1875,7 @@ impl cf_tool_runtime::Tool for BashTool {
         let tool_call_id = ctx.call_id.clone();
 
         // --- Read resources ---
-        let (backend, session_folder, env, notification_handle, owner_session_id) = {
+        let (backend, session_folder, env, notification_handle, owner_session_id, office_task) = {
             let res = resources.lock().await;
             (
                 res.require::<Terminal>()?.0.clone(),
@@ -1883,6 +1883,8 @@ impl cf_tool_runtime::Tool for BashTool {
                 res.require::<SessionEnv>()?.0.as_ref().clone(),
                 res.require::<NotificationHandle>()?.0.clone(),
                 res.get::<crate::types::resources::OwnerSessionId>()
+                    .map(|o| o.0.clone()),
+                res.get::<crate::types::resources::OfficeTask>()
                     .map(|o| o.0.clone()),
             )
         };
@@ -2051,6 +2053,7 @@ impl cf_tool_runtime::Tool for BashTool {
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                office_task: office_task.clone(),
             };
 
             let handle = match backend.run_background(request).await {
@@ -2156,6 +2159,7 @@ impl cf_tool_runtime::Tool for BashTool {
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
+                office_task: office_task.clone(),
             };
 
             let result = match backend.run(request).await {
@@ -3226,6 +3230,55 @@ mod tests {
             req.env.get("PYTHONUNBUFFERED").map(String::as_str),
             Some("1")
         );
+    }
+
+    /// The bash tool stamps the session's `OfficeTask` resource onto the request;
+    /// that field is what the terminal actor turns into `QIDI_OFFICE_TASK`.
+    #[tokio::test]
+    async fn office_task_resource_reaches_request() {
+        let (mock, captured) = MockTerminal::background_ok_capturing("bg-office");
+        let mut resources = make_resources(mock);
+        resources.insert(crate::types::resources::OfficeTask(
+            "office-workspace".to_string(),
+        ));
+        let tool = BashTool;
+
+        let _ = cf_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_bg_input("python3 script.py"),
+        )
+        .await
+        .unwrap();
+
+        let req = captured.lock().unwrap();
+        let req = req
+            .as_ref()
+            .expect("run_background should have been called");
+        assert_eq!(req.office_task.as_deref(), Some("office-workspace"));
+    }
+
+    /// An unbound session leaves the field `None`, so the terminal actor exports
+    /// no `QIDI_OFFICE_TASK` at all (zero behaviour change).
+    #[tokio::test]
+    async fn unbound_session_leaves_office_task_unset() {
+        let (mock, captured) = MockTerminal::background_ok_capturing("bg-unbound");
+        let resources = make_resources(mock);
+        let tool = BashTool;
+
+        let _ = cf_tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            make_bg_input("python3 script.py"),
+        )
+        .await
+        .unwrap();
+
+        let req = captured.lock().unwrap();
+        let req = req
+            .as_ref()
+            .expect("run_background should have been called");
+        assert_eq!(req.office_task, None);
     }
 
     #[cfg(unix)]

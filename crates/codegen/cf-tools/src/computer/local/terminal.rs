@@ -89,6 +89,47 @@ fn notification_interval() -> Duration {
     Duration::from_millis(DEFAULT_NOTIFICATION_INTERVAL_MS)
 }
 
+/// Env var exported to child processes with the session's office-artifact
+/// workspace binding. Read by the office-artifact skill's `card.py` as a
+/// fallback when its `--task` argument is not given.
+const OFFICE_TASK_ENV: &str = "QIDI_OFFICE_TASK";
+
+/// Pure injection decision for one spawn: `Some(task)` when the child must
+/// receive `QIDI_OFFICE_TASK=task`, `None` when nothing is injected.
+///
+/// - no session binding -> `None`
+/// - blank binding -> `None` (unbound, mirroring the receive-side
+///   `resolve_office_task` normalization)
+/// - the request env already pins `QIDI_OFFICE_TASK` -> `None`: an explicit
+///   request-env value always wins over the session binding
+fn office_task_to_inject<'a>(
+    request_env: &HashMap<String, String>,
+    office_task: Option<&'a str>,
+) -> Option<&'a str> {
+    let task = office_task.map(str::trim).filter(|task| !task.is_empty())?;
+    if request_env.contains_key(OFFICE_TASK_ENV) {
+        return None;
+    }
+    Some(task)
+}
+
+/// The env map to hand the spawner: the request env plus the session's
+/// `QIDI_OFFICE_TASK` binding when [`office_task_to_inject`] says so.
+///
+/// Returns `None` when nothing is injected, so callers borrow the request env
+/// unchanged and an unbound session allocates nothing and spawns byte-identically
+/// to before. Merging here (rather than at each `cmd.env` site) covers all three
+/// env-merge paths at once: `spawn_persistent_command` (unix persistent),
+/// `spawn_shell_command` unix branch, and its Windows branch -- each of them
+/// applies the request env after `shell_env_overrides()` and before
+/// `pager_env()`, so the injected value lands in exactly the request-env slot.
+fn office_task_spawn_env(request: &TerminalRunRequest) -> Option<HashMap<String, String>> {
+    let task = office_task_to_inject(&request.env, request.office_task.as_deref())?;
+    let mut env = request.env.clone();
+    env.insert(OFFICE_TASK_ENV.to_string(), task.to_string());
+    Some(env)
+}
+
 /// Exit status of a terminal process
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExitStatus {
@@ -884,7 +925,16 @@ impl LocalTerminalActor {
             process_group,
             state_dump_handle,
         } = match self
-            .spawn_command(&request.command, &request.working_directory, &request.env)
+            .spawn_command(
+                &request.command,
+                &request.working_directory,
+                // Inject this session's office-artifact binding (if any) into
+                // the request env handed to the spawner. `None` means: borrow the
+                // request env unchanged.
+                office_task_spawn_env(&request)
+                    .as_ref()
+                    .unwrap_or(&request.env),
+            )
             .await
         {
             Ok(r) => r,
@@ -1012,7 +1062,16 @@ impl LocalTerminalActor {
             process_group,
             state_dump_handle,
         } = match self
-            .spawn_command(&request.command, &request.working_directory, &request.env)
+            .spawn_command(
+                &request.command,
+                &request.working_directory,
+                // Inject this session's office-artifact binding (if any) into
+                // the request env handed to the spawner. `None` means: borrow the
+                // request env unchanged.
+                office_task_spawn_env(&request)
+                    .as_ref()
+                    .unwrap_or(&request.env),
+            )
             .await
         {
             Ok(r) => r,
@@ -2905,7 +2964,76 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         }
+    }
+
+    // ---- office-task env injection (`QIDI_OFFICE_TASK`) ----------------------
+    //
+    // The decision is a pure function so the three spawn paths' shared
+    // behaviour is testable without spawning a child.
+
+    #[test]
+    fn office_task_is_injected_when_session_is_bound() {
+        let env = HashMap::new();
+        assert_eq!(office_task_to_inject(&env, Some("office-workspace")), Some("office-workspace"));
+    }
+
+    #[test]
+    fn office_task_is_not_injected_when_session_is_unbound() {
+        let env = HashMap::new();
+        assert_eq!(office_task_to_inject(&env, None), None);
+        // Blank bindings are treated as unbound (mirrors the receive-side
+        // `resolve_office_task` normalization).
+        assert_eq!(office_task_to_inject(&env, Some("")), None);
+        assert_eq!(office_task_to_inject(&env, Some("   ")), None);
+    }
+
+    #[test]
+    fn office_task_does_not_override_explicit_request_env() {
+        let env = HashMap::from([(OFFICE_TASK_ENV.to_string(), "explicit".to_string())]);
+        assert_eq!(
+            office_task_to_inject(&env, Some("session-bound")),
+            None,
+            "an explicit request-env value must win over the session binding"
+        );
+    }
+
+    /// `office_task_spawn_env` is `None` (meaning: caller borrows the request env
+    /// verbatim) exactly when nothing is injected: unbound sessions spawn with
+    /// a byte-identical env map.
+    #[test]
+    fn spawn_env_is_untouched_when_unbound() {
+        let mut request = make_request("true");
+        assert!(office_task_spawn_env(&request).is_none());
+
+        request.office_task = Some("office-workspace".to_string());
+        let env = office_task_spawn_env(&request).expect("bound session injects");
+        assert_eq!(env.get(OFFICE_TASK_ENV).map(String::as_str), Some("office-workspace"));
+        // The request env itself is never mutated.
+        assert!(!request.env.contains_key(OFFICE_TASK_ENV));
+    }
+
+    /// An explicit request-env value wins: nothing is injected, so the caller
+    /// hands the spawner the request env unchanged -- which already carries the
+    /// explicit value.
+    #[test]
+    fn spawn_env_keeps_explicit_request_value_when_bound() {
+        let mut request = make_request("true");
+        request.office_task = Some("session-bound".to_string());
+        request
+            .env
+            .insert(OFFICE_TASK_ENV.to_string(), "explicit".to_string());
+
+        assert!(
+            office_task_spawn_env(&request).is_none(),
+            "an explicit request-env value must not be overridden"
+        );
+        assert_eq!(
+            request.env.get(OFFICE_TASK_ENV).map(String::as_str),
+            Some("explicit"),
+            "the effective spawn env still carries the explicit value"
+        );
     }
 
     /// Poll `get_task` every 25ms until the task reports `completed`, returning
@@ -2983,6 +3111,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3014,6 +3143,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3077,6 +3207,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let start = Instant::now();
@@ -3148,6 +3279,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3194,6 +3326,7 @@ mod tests {
             foreground_block_budget: Some(Duration::from_millis(300)),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let start = Instant::now();
@@ -3245,6 +3378,7 @@ mod tests {
             foreground_block_budget: Some(Duration::MAX),
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let start = Instant::now();
@@ -3296,6 +3430,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3354,6 +3489,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3390,6 +3526,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         // Start background task
@@ -3430,6 +3567,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let handle = backend.run_background(request).await.unwrap();
@@ -3470,6 +3608,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3545,6 +3684,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3611,6 +3751,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3646,6 +3787,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3680,6 +3822,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3710,6 +3853,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         backend.run(request).await.unwrap();
@@ -3749,6 +3893,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         backend.run(request).await.unwrap();
@@ -3797,6 +3942,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3830,6 +3976,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let handle = backend.run_background(request).await.unwrap();
@@ -3874,6 +4021,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let result = backend.run(request).await.unwrap();
@@ -3906,6 +4054,7 @@ mod tests {
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         };
 
         let start = Instant::now();

@@ -18,6 +18,11 @@ pub struct PersistedSession {
     /// 旧版 sessions.json 无此字段,serde default 保持可读。
     #[serde(default)]
     pub title: Option<String>,
+    /// 绑定的办公任务工作区名(session/new|load 的 `office_task`,即产物
+    /// 登记 card.py 的 `--task` 归属)。旧版 sessions.json 无此字段,
+    /// serde default 保持可读。
+    #[serde(default)]
+    pub task: Option<String>,
 }
 
 /// 读全部持久化会话。文件不存在/损坏 → 空列表(损坏文件改名留证)。
@@ -142,6 +147,7 @@ mod tests {
                 session_id: "a".into(),
                 cwd: "C:\\ws".into(),
                 title: None,
+                task: None,
             },
         )
         .unwrap();
@@ -151,6 +157,7 @@ mod tests {
                 session_id: "a".into(),
                 cwd: "C:\\ws2".into(),
                 title: None,
+                task: None,
             },
         )
         .unwrap();
@@ -160,6 +167,7 @@ mod tests {
                 session_id: "b".into(),
                 cwd: "C:\\ws".into(),
                 title: None,
+                task: None,
             },
         )
         .unwrap();
@@ -198,6 +206,7 @@ mod tests {
                 session_id: "s1".into(),
                 cwd: "C:\\ws".into(),
                 title: None,
+                task: None,
             },
         )
         .unwrap();
@@ -217,6 +226,7 @@ mod tests {
                 session_id: "s1".into(),
                 cwd: "C:\\ws".into(),
                 title: None,
+                task: None,
             },
         )
         .unwrap();
@@ -248,6 +258,42 @@ mod tests {
         let list = load_sessions(&dir);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].title, None);
+    }
+
+    /// 旧版 sessions.json(无 task 字段)必须能反序列化:serde default
+    /// 保持向后兼容,读到的绑定为 None。
+    #[test]
+    fn legacy_file_without_task_field_loads() {
+        let dir = fresh_dir("legacy-task");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sessions.json"),
+            r#"[{"session_id":"old","cwd":"C:\\ws","title":"周报"}]"#,
+        )
+        .unwrap();
+        let list = load_sessions(&dir);
+        assert_eq!(list.len(), 1, "无 task 字段的旧 JSON 必须可读");
+        assert_eq!(list[0].task, None, "缺省即未绑定");
+        assert_eq!(list[0].title.as_deref(), Some("周报"));
+    }
+
+    /// 带绑定的会话落盘后原样读回(写侧支持 task 字段)。
+    #[test]
+    fn upsert_roundtrip_preserves_task_binding() {
+        let dir = fresh_dir("task-roundtrip");
+        upsert_session(
+            &dir,
+            PersistedSession {
+                session_id: "s1".into(),
+                cwd: "C:\\ws".into(),
+                title: None,
+                task: Some("写标书".into()),
+            },
+        )
+        .unwrap();
+        let list = load_sessions(&dir);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].task.as_deref(), Some("写标书"));
     }
 
 }

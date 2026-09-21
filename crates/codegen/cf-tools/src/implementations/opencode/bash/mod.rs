@@ -396,6 +396,7 @@ impl cf_tool_runtime::Tool for BashTool {
             foreground_block_budget: None,
             kind: crate::computer::types::TaskKind::Bash,
             owner_session_id: None, // OpenCode doesn't use shared terminal backends
+            office_task: None,      // ...nor the office-artifact session binding
         };
 
         let result = match backend.run(request).await {

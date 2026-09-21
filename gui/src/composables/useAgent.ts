@@ -16,6 +16,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { initNotifyPermission, isWindowFocused, notify, notifyThrottled } from "../services/notify";
 import { parseUsageMeta, accumulateUsage, emptySessionUsage, type UsageInfo, type SessionUsage } from "../services/usage";
+import { currentWorkspaceName, switchTask } from "./useOffice";
 
 export interface ToolCallItem {
   toolCallId: string;
@@ -288,31 +289,68 @@ const REPLAY_CONFIRM_BYTES = 10 * 1024 * 1024;
 /** session_id → cwd 缓存(登记簿字段;回放定位文件所需)。 */
 const sessionCwd = new Map<string, string>();
 
+/** session_id → 绑定的办公任务工作区名(登记簿 task 字段;产物面板同步所需)。 */
+const sessionTask = new Map<string, string>();
+
 /** 登记某会话的 cwd(续接点击处已知,免去额外拉取)。 */
 export function rememberSessionCwd(id: string, cwd: string): void {
   if (id && cwd) sessionCwd.set(id, cwd);
 }
 
-/** 取会话 cwd:先查缓存,未命中则拉一次登记簿(失败静默,回退 null)。
- * 并发去重:崩溃恢复会同时抛多个 session_restored,只拉一次登记簿。 */
-let cwdLoading: Promise<void> | null = null;
-async function cwdFor(id: string): Promise<string | null> {
-  const cached = sessionCwd.get(id);
-  if (cached) return cached;
-  if (!cwdLoading) {
-    cwdLoading = (async () => {
+/** 登记某会话的办公工作区绑定(新建/续接点击处已知,免去额外拉取)。 */
+export function rememberSessionBinding(id: string, task?: string | null): void {
+  if (id && task) sessionTask.set(id, task);
+}
+
+/** 登记簿整表加载一次(并发去重:崩溃恢复会同时抛多个 session_restored)。 */
+let registryLoading: Promise<void> | null = null;
+async function ensureRegistryLoaded(): Promise<void> {
+  if (!registryLoading) {
+    registryLoading = (async () => {
       try {
-        const list = await invoke<{ session_id: string; cwd: string }[]>("sessions_history");
-        for (const h of list) sessionCwd.set(h.session_id, h.cwd);
+        const list = await invoke<
+          { session_id: string; cwd: string; task?: string | null }[]
+        >("sessions_history");
+        for (const h of list) {
+          sessionCwd.set(h.session_id, h.cwd);
+          if (h.task) sessionTask.set(h.session_id, h.task);
+        }
       } catch {
-        /* 登记簿读取失败:回放降级为不可用 */
+        /* 登记簿读取失败:回放/绑定同步降级为不可用 */
       } finally {
-        cwdLoading = null;
+        registryLoading = null;
       }
     })();
   }
-  await cwdLoading;
+  await registryLoading;
+}
+
+/** 取会话 cwd:先查缓存,未命中则拉一次登记簿(失败静默,回退 null)。 */
+async function cwdFor(id: string): Promise<string | null> {
+  const cached = sessionCwd.get(id);
+  if (cached) return cached;
+  await ensureRegistryLoaded();
   return sessionCwd.get(id) ?? null;
+}
+
+/** 取会话绑定的办公工作区名:先查缓存,未命中则拉一次登记簿(失败静默)。 */
+async function taskFor(id: string): Promise<string | null> {
+  const cached = sessionTask.get(id);
+  if (cached) return cached;
+  await ensureRegistryLoaded();
+  return sessionTask.get(id) ?? null;
+}
+
+/** 活动会话切换时:按登记簿绑定把产物面板切到该会话的工作区(会话 → 面板
+ * 单向同步)。无绑定/读取失败保持现状,不打扰用户当前视图。 */
+async function syncWorkspaceForSession(id: string): Promise<void> {
+  if (!id) return;
+  try {
+    const task = await taskFor(id);
+    if (task) await switchTask(task);
+  } catch {
+    /* 面板同步失败:保持现状,不阻断会话切换 */
+  }
 }
 
 /** 内核原始消息抽取纯文本(user 的 content 可能是 content-blocks 数组)。 */
@@ -578,6 +616,8 @@ async function onAcpEvent(ev: AcpEvent) {
       }
       // 重连换桥后模型缓存是新的:补查一次,状态栏不空窗
       void refreshModelState(id);
+      // 续接/恢复后按登记簿还原绑定,产物面板跟着会话走(无绑定保持现状)
+      void syncWorkspaceForSession(id);
       // 桶已存在(切回活动会话)时不重放提示、不清转录,保留实时流
       break;
     }
@@ -652,18 +692,40 @@ export async function initAgent(): Promise<void> {
 /** 用户最近一次显式选择的工作目录:新建/自动开会话都默认复用它。 */
 const LAST_CWD_KEY = "qidi.lastCwd";
 
+/** 会话绑定的办公工作区名取值策略:优先「当前工作区」(GUI 的工作区由
+ * card.py 按 --task 创建,无独立创建入口,故以用户当前查看的工作区为首选);
+ * 未选工作区时回退 cwd 目录名;两者皆无则不绑定。 */
+function resolveOfficeTask(cwd: string | undefined): string | undefined {
+  const current = currentWorkspaceName();
+  if (current) return current;
+  if (cwd) {
+    const base = cwd.split(/[\\/]/).filter(Boolean).pop();
+    if (base) return base;
+  }
+  return undefined;
+}
+
 /** 新建任务会话(用户点「+ 新建任务」或首次发送)。回合进行中也可开
  * 新会话:各会话桶独立,后台会话继续跑。未显式传 cwd 时复用上次选择的
- * 目录;都没选过则交给内核默认(用户主目录)。 */
+ * 目录;都没选过则交给内核默认(用户主目录)。
+ * 新建即绑定:会话创建成功后把 task=工作区名落进登记簿(后端 upsert),
+ * 并让产物面板切到该工作区。 */
 export async function startSession(cwd?: string): Promise<void> {
   const dir = cwd ?? localStorage.getItem(LAST_CWD_KEY) ?? undefined;
-  const id = await invoke<string>("session_start", { cwd: dir ?? null });
+  const officeTask = resolveOfficeTask(dir);
+  const id = await invoke<string>("session_start", {
+    cwd: dir ?? null,
+    officeTask: officeTask ?? null,
+  });
   if (dir) localStorage.setItem(LAST_CWD_KEY, dir);
   const bucket = ensureBucket(id);
   activeId.value = id;
   connected.value = true;
+  if (officeTask) rememberSessionBinding(id, officeTask);
   pushBucketSystem(bucket, `已开启任务会话(${id})${dir ? `，工作目录 ${dir}` : ""}。`);
   void refreshModelState(id);
+  // 产物面板跟着新会话的绑定走(无绑定保持现状)
+  if (officeTask) void syncWorkspaceForSession(id);
 }
 
 /** 拉取会话模型状态入桶(session/new|load 应答由桥缓存,事件与查询双通道
@@ -746,9 +808,13 @@ export function removeQueued(id: number): void {
   bucket.queue = bucket.queue.filter((q) => q.id !== id);
 }
 
-/** 切换到指定会话(仅限已在本进程建有桶的会话,即「任务会话」)。 */
+/** 切换到指定会话(仅限已在本进程建有桶的会话,即「任务会话」)。
+ * 产物面板同步跟着切(按登记簿绑定;无绑定保持现状)。 */
 export function switchSession(id: string): void {
-  if (buckets.value[id]) activeId.value = id;
+  if (buckets.value[id]) {
+    activeId.value = id;
+    void syncWorkspaceForSession(id);
+  }
 }
 
 export function resolvePermission(optionId: string): void {

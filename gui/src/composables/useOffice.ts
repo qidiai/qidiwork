@@ -57,6 +57,11 @@ export async function switchTask(name: string): Promise<void> {
   artifacts.value = await invoke<ArtifactCard[]>("office_artifacts", { task: name });
 }
 
+/** 当前查看的工作区名(会话绑定取值:新建会话时优先复用它);空 = 未选。 */
+export function currentWorkspaceName(): string {
+  return currentTask.value;
+}
+
 /** 删除任务工作区(含目录内全部产物,后端有根约束;不可恢复)。
  * 删除的是当前工作区时,自动切到剩余的第一个。 */
 export async function deleteWorkspace(name: string): Promise<void> {

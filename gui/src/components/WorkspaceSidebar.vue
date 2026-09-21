@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { pushSystem, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
+import { pushSystem, rememberSessionBinding, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
@@ -62,6 +62,8 @@ interface HistoryEntry {
   session_id: string;
   cwd: string;
   title: string | null;
+  /** 绑定的办公任务工作区名(登记簿 task;null = 未绑定)。 */
+  task: string | null;
 }
 const history = ref<HistoryEntry[]>([]);
 const resuming = ref(false);
@@ -150,8 +152,10 @@ async function resumeSession(h: HistoryEntry): Promise<void> {
   }
   resuming.value = true;
   try {
-    // 先登记 cwd,回放(session_restored 事件)定位内核转录文件时复用
+    // 先登记 cwd 与绑定:回放(session_restored 事件)定位内核转录文件、
+    // 同步产物面板时复用,免去额外拉取
     rememberSessionCwd(h.session_id, h.cwd);
+    rememberSessionBinding(h.session_id, h.task);
     await invoke("session_resume", { sessionId: h.session_id });
   } catch (e) {
     pushSystem(`恢复会话失败:${String(e)}`);
@@ -310,6 +314,9 @@ function pick(name: string): void {
             :class="{ on: h.session_id === sessionId, run: liveOf(h.session_id)?.busy }"
           ></span>
           <span class="ws-name">{{ historyLabel(h) }}</span>
+          <span v-if="h.task" class="ws-task" :title="`绑定工作区:${h.task}`">{{
+            h.task
+          }}</span>
           <span v-if="liveOf(h.session_id)?.busy" class="ws-run">运行中</span>
           <span v-else-if="liveOf(h.session_id)?.queued" class="ws-count">{{
             liveOf(h.session_id)!.queued
@@ -510,6 +517,20 @@ function pick(name: string): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 历史会话条目的绑定工作区小标签(克制:小号弱化,不与主标题抢注意力) */
+.ws-task {
+  flex: none;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--text-disabled);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
 }
 
 .skill-grid {

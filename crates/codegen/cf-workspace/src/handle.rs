@@ -5257,6 +5257,7 @@ pub(crate) mod tests {
             foreground_block_budget: None,
             kind: cf_tools::computer::types::TaskKind::Bash,
             owner_session_id: None,
+            office_task: None,
         }
     }
     /// Start a `sleep 30` background task on `session`'s owned backend and

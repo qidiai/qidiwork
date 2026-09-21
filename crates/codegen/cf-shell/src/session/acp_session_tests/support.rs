@@ -88,6 +88,7 @@ async fn test_agent_from_config(
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
+        office_task: None,
         parent_scheduler_handle: None,
         skills: vec![],
         state_path: std::path::PathBuf::from("/tmp/tool_state.json"),

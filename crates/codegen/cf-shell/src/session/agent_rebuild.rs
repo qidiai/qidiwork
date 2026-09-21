@@ -130,6 +130,10 @@ pub(crate) struct AgentRebuildSpec {
     pub is_non_interactive: bool,
     pub system_prompt_label: String,
     pub owner_session_id: Option<String>,
+    /// Office-artifact workspace this session is bound to (`_meta.office_task`).
+    /// Mirrors `owner_session_id`: it rides the same builder path to `SessionContext`
+    /// and on to `Resources`, ending up as `QIDI_OFFICE_TASK` on child processes.
+    pub office_task: Option<String>,
     pub parent_scheduler_handle:
         Option<cf_tools::implementations::qidi_build::scheduler::types::SchedulerHandle>,
 }
@@ -223,6 +227,7 @@ impl AgentRebuildSpec {
             is_non_interactive,
             system_prompt_label,
             owner_session_id,
+            office_task,
             parent_scheduler_handle,
         } = self.as_ref();
         let _ = mcp_state;
@@ -273,6 +278,9 @@ impl AgentRebuildSpec {
         );
         if let Some(owner_session_id) = owner_session_id.clone() {
             builder = builder.with_owner_session_id(owner_session_id);
+        }
+        if let Some(office_task) = office_task.clone() {
+            builder = builder.with_office_task(office_task);
         }
         if let Some(handle) = parent_scheduler_handle.clone() {
             builder = builder.with_parent_scheduler_handle(handle);
@@ -427,6 +435,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         is_non_interactive: false,
         system_prompt_label: cf_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
         owner_session_id: Some("test-session".to_string()),
+        office_task: None,
         parent_scheduler_handle: None,
     })
 }

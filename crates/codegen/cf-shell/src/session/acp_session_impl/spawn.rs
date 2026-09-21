@@ -880,6 +880,10 @@ pub(crate) async fn spawn_session_actor(
         is_non_interactive: startup_hints.non_interactive,
         system_prompt_label,
         owner_session_id: Some(session_info.id.0.to_string()),
+        // Per-session office-artifact binding (`_meta.office_task`), threaded the
+        // same way as `session_env` above: it reaches `Resources::OfficeTask`
+        // and becomes `QIDI_OFFICE_TASK` on the shells this session spawns.
+        office_task: tool_context.office_task.clone(),
         parent_scheduler_handle: if startup_hints.is_subagent {
             parent_scheduler_handle
         } else {

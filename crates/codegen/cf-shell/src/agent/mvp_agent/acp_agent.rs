@@ -861,6 +861,10 @@ impl acp::Agent for MvpAgent {
             self.default_auto_mode,
             session_yolo_mode,
         );
+        // Office-artifact workspace binding (contract with the pager):
+        // `_meta.office_task` -> per-session `QIDI_OFFICE_TASK` exported to the
+        // shells this session spawns. Absent/empty means unbound.
+        let office_task = resolve_office_task(arguments.meta.as_ref());
         let session_id = match client_session_id {
             Some(s) => {
                 uuid::Uuid::try_parse(s)
@@ -1066,6 +1070,7 @@ impl acp::Agent for MvpAgent {
                         session_model_id,
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
+                        office_task,
                         prompt_display_cwd: None,
                     }
             };
@@ -1222,6 +1227,11 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .and_then(|m| m.get("x.ai/leaderClientId"))
             .cloned();
+        // Office-artifact workspace binding, mirroring `new_session`. A
+        // `session/load` that re-spawns the actor re-binds it; a reconnect to an
+        // already-live session keeps the binding it was spawned with (the
+        // handle is not re-created on that path).
+        let office_task = resolve_office_task(arguments.meta.as_ref());
         let acp::LoadSessionRequest {
             session_id,
             cwd,
@@ -1608,6 +1618,7 @@ impl acp::Agent for MvpAgent {
                         session_model_id: summary.current_model_id.clone(),
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
+                        office_task,
                         prompt_display_cwd,
                     },
                 )

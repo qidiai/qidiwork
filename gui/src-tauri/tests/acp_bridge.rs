@@ -67,7 +67,7 @@ async fn initialize_new_session_and_prompt_roundtrip() {
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
     let session = bridge
-        .new_session(PathBuf::from("."))
+        .new_session(PathBuf::from("."), None)
         .await
         .expect("session/new 失败");
     assert_eq!(session, "sess-1");
@@ -92,12 +92,55 @@ async fn initialize_new_session_and_prompt_roundtrip() {
     transport.shutdown().await;
 }
 
+/// 绑定会话(session/new 传 office_task)的 prompt 应前置产物登记硬指令;
+/// 未绑定会话保持原文(与旧版逐字一致)。同一 office_task 值由 session/new
+/// 透传后被桥留档,prompt 时取用——覆盖 T-D 的绑定→注入全链路。
+#[tokio::test]
+async fn prompt_injects_office_task_directive_only_when_bound() {
+    let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
+    let bridge = AcpBridge::attach(transport.clone()).unwrap();
+    bridge.ensure_initialized().await.unwrap();
+
+    // 绑定会话:注入硬指令(含绑定的 task 名)
+    let bound = bridge
+        .new_session(PathBuf::from("."), Some("写标书".into()))
+        .await
+        .unwrap();
+    let mut rx = bridge.subscribe();
+    bridge.prompt(&bound, "登记这次产物").unwrap();
+    let events = collect_until_turn_completed(&mut rx, &bound).await;
+    let texts = update_texts(&events, &bound);
+    assert!(
+        texts.iter().any(|t| t.contains("[系统指令]")
+            && t.contains("card.py")
+            && t.contains("--task \"写标书\"")),
+        "绑定会话应前置产物登记硬指令,texts={texts:?}"
+    );
+
+    // 未绑定会话:不注入,原文下发
+    let unbound = bridge.new_session(PathBuf::from("."), None).await.unwrap();
+    let mut rx2 = bridge.subscribe();
+    bridge.prompt(&unbound, "登记这次产物").unwrap();
+    let events2 = collect_until_turn_completed(&mut rx2, &unbound).await;
+    let texts2 = update_texts(&events2, &unbound);
+    assert!(
+        !texts2.iter().any(|t| t.contains("[系统指令]")),
+        "未绑定会话不应注入,texts={texts2:?}"
+    );
+    assert!(
+        texts2.iter().any(|t| t.contains("done: 登记这次产物")),
+        "未绑定会话原文下发,texts={texts2:?}"
+    );
+
+    transport.shutdown().await;
+}
+
 #[tokio::test]
 async fn permission_roundtrip_allow_and_deny() {
     let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
-    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx = bridge.subscribe();
 
     // allow 路径
@@ -157,7 +200,7 @@ async fn reconnect_restores_sessions_and_reports_lost() {
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
     let mut rx = bridge.subscribe();
-    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     // session/new 现在会广播一条 ModelState(应答 models),先消费掉再断连
     let setup = next_event(&mut rx).await;
     assert!(
@@ -173,8 +216,8 @@ async fn reconnect_restores_sessions_and_reports_lost() {
     let (bridge2, restored, failed) = reconnect(
         transport2,
         vec![
-            (session.clone(), PathBuf::from(".")),
-            ("lost".to_string(), PathBuf::from(".")),
+            (session.clone(), PathBuf::from("."), None),
+            ("lost".to_string(), PathBuf::from("."), None),
         ],
     )
     .await
@@ -196,7 +239,7 @@ async fn model_state_flows_and_hot_switch() {
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
     let mut rx = bridge.subscribe();
-    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
 
     // session/new 应答的 models → 缓存并广播(subscribe 先于 new_session)
     let ev = next_event(&mut rx).await;
@@ -253,7 +296,7 @@ async fn resolve_rejects_unknown_option_but_keeps_entry() {
     let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
-    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx = bridge.subscribe();
 
     bridge.prompt(&session, "需要权限:写文件").unwrap();
@@ -279,7 +322,7 @@ async fn cancel_permission_completes_roundtrip_once() {
     let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
     let bridge = AcpBridge::attach(transport.clone()).unwrap();
     bridge.ensure_initialized().await.unwrap();
-    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx = bridge.subscribe();
 
     bridge.prompt(&session, "需要权限:操作").unwrap();

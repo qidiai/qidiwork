@@ -89,6 +89,9 @@ pub enum BridgeEvent {
 struct SessionRecord {
     id: String,
     cwd: PathBuf,
+    /// 绑定的办公任务工作区名(session/new|load 透传的 `office_task`)。
+    /// 留档用于 prompt 时前置产物登记硬指令(见 `decorate_prompt`)。
+    office_task: Option<String>,
 }
 
 /// 在途权限请求的登记项。
@@ -114,6 +117,36 @@ pub struct AcpBridge {
     sessions: Mutex<Vec<SessionRecord>>,
     /// 每会话最近一次模型状态(内核应答原样缓存;查询走 model_state)。
     model_states: Mutex<HashMap<String, serde_json::Value>>,
+}
+
+/// 把办公任务绑定合入 params 的官方扩展通道 `_meta`(契约:`_meta.office_task`,
+/// snake_case)。未绑定 → params 原样返回(不落键,与旧版逐字一致);已有
+/// `_meta` 对象时**合入**而非覆盖(保留其它 `_meta` 键)。
+/// 不放顶层:ACP 的 NewSessionRequest/LoadSessionRequest 为 camelCase +
+/// `#[non_exhaustive]` 且无 `deny_unknown_fields`(agent-client-protocol-schema
+/// 0.11.4 `agent.rs:905` / `:1078`),顶层未知键会被内核静默丢弃。
+fn with_office_task_meta(
+    mut params: serde_json::Value,
+    office_task: Option<&str>,
+) -> serde_json::Value {
+    let Some(task) = office_task else {
+        return params;
+    };
+    let Some(root) = params.as_object_mut() else {
+        return params;
+    };
+    let meta = root.entry("_meta").or_insert_with(|| serde_json::json!({}));
+    if !meta.is_object() {
+        // 畸形 _meta(非对象):重建为空对象,避免静默丢绑定
+        *meta = serde_json::json!({});
+    }
+    if let Some(meta_obj) = meta.as_object_mut() {
+        meta_obj.insert(
+            "office_task".to_string(),
+            serde_json::Value::String(task.to_string()),
+        );
+    }
+    params
 }
 
 impl AcpBridge {
@@ -164,10 +197,15 @@ impl AcpBridge {
     }
 
     /// 注册时记录的会话(M3 恢复编排用)。
-    pub fn sessions(&self) -> Vec<(String, PathBuf)> {
+    /// 三元组含绑定的 office_task(reconnect 时原样带回 session/load)。
+    pub fn sessions(&self) -> Vec<(String, PathBuf, Option<String>)> {
         self.sessions
             .lock()
-            .map(|s| s.iter().map(|r| (r.id.clone(), r.cwd.clone())).collect())
+            .map(|s| {
+                s.iter()
+                    .map(|r| (r.id.clone(), r.cwd.clone(), r.office_task.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -478,8 +516,17 @@ impl AcpBridge {
         Ok(())
     }
 
-    pub async fn new_session(&self, cwd: PathBuf) -> Result<String, String> {
-        let params = serde_json::json!({"cwd": cwd.to_string_lossy(), "mcpServers": []});
+    pub async fn new_session(
+        &self,
+        cwd: PathBuf,
+        office_task: Option<String>,
+    ) -> Result<String, String> {
+        // 办公任务绑定透传:官方扩展通道 _meta.office_task(仅绑定时落键;
+        // 顶层不放——内核 camelCase 结构体会静默丢弃顶层未知键)。
+        let params = with_office_task_meta(
+            serde_json::json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
+            office_task.as_deref(),
+        );
         let result = self.rpc("session/new", params, RPC_TIMEOUT).await?;
         let session_id = result
             .get("sessionId")
@@ -493,6 +540,7 @@ impl AcpBridge {
             .push(SessionRecord {
                 id: session_id.clone(),
                 cwd,
+                office_task,
             });
         Ok(session_id)
     }
@@ -500,12 +548,22 @@ impl AcpBridge {
     /// 恢复既有会话(重 spawn 后)。成功即重新登记。
     /// 注:load 期间的历史重放(session/update)发生在登记前,会被路由
     /// 循环按未知会话丢弃——恢复场景前端以 SessionRestored 为准。
-    pub async fn load_session(&self, session_id: &str, cwd: PathBuf) -> Result<(), String> {
-        let params = serde_json::json!({
-            "sessionId": session_id,
-            "cwd": cwd.to_string_lossy(),
-            "mcpServers": []
-        });
+    pub async fn load_session(
+        &self,
+        session_id: &str,
+        cwd: PathBuf,
+        office_task: Option<String>,
+    ) -> Result<(), String> {
+        // 与 session/new 同一契约:绑定的办公任务工作区名走 _meta.office_task
+        // (未绑定不落键;已有 _meta 时合入,不覆盖其它键)。
+        let params = with_office_task_meta(
+            serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.to_string_lossy(),
+                "mcpServers": []
+            }),
+            office_task.as_deref(),
+        );
         self.rpc("session/load", params, RPC_TIMEOUT)
             .await
             .map(|result| self.cache_model_state(session_id, &result))?;
@@ -515,6 +573,7 @@ impl AcpBridge {
             .push(SessionRecord {
                 id: session_id.to_string(),
                 cwd,
+                office_task,
             });
         Ok(())
     }
@@ -536,11 +595,33 @@ impl AcpBridge {
         });
     }
 
+    /// 会话绑定的办公任务工作区名(未登记/未绑定 → None)。
+    fn office_task_of(&self, session_id: &str) -> Option<String> {
+        let guard = self.sessions.lock().ok()?;
+        guard
+            .iter()
+            .find(|r| r.id == session_id)
+            .and_then(|r| r.office_task.clone())
+    }
+
+    /// prompt 拼装:绑定会话前置一行产物登记硬指令(注入点 = prompt 组装处,
+    /// 与 ACP session/prompt 的文本块同路下发,不进前端可见转录)。
+    /// 未绑定会话原文返回(与旧版逐字一致)。
+    fn decorate_prompt(&self, session_id: &str, text: &str) -> String {
+        match self.office_task_of(session_id) {
+            Some(task) => format!(
+                "[系统指令] 本次会话产物登记一律调用 card.py 时使用 --task \"{task}\" 参数。\n{text}"
+            ),
+            None => text.to_string(),
+        }
+    }
+
     /// 发起回合:立即返回,回合完成经 [`BridgeEvent::TurnCompleted`] 通知
     /// (GUI 调用不应阻塞数分钟)。`self: &Arc<Self>` 以便等待任务克隆桥。
     /// 注意:30 分钟超时 ≠ 取消——超时只发错误事件,agent 仍在跑,
     /// 真正中断需 `cancel`(M4 编排)。
     pub fn prompt(self: &Arc<Self>, session_id: &str, text: &str) -> Result<(), String> {
+        let text = self.decorate_prompt(session_id, text);
         let params = serde_json::json!({
             "sessionId": session_id,
             "prompt": [{"type": "text", "text": text}]
@@ -686,15 +767,15 @@ impl AcpBridge {
 /// 返回 (新桥, 恢复成功的会话 id, 失败清单 [(id, 错误)])。
 pub async fn reconnect(
     transport: Arc<dyn AgentTransport>,
-    sessions: Vec<(String, PathBuf)>,
+    sessions: Vec<(String, PathBuf, Option<String>)>,
 ) -> Result<(Arc<AcpBridge>, Vec<String>, Vec<(String, String)>), String> {
     let bridge = AcpBridge::attach(transport).map_err(|e| e.to_string())?;
     bridge.initialize().await?;
     bridge.initialized.store(true, Ordering::Relaxed);
     let mut restored = Vec::new();
     let mut failed = Vec::new();
-    for (id, cwd) in sessions {
-        match bridge.load_session(&id, cwd).await {
+    for (id, cwd, office_task) in sessions {
+        match bridge.load_session(&id, cwd, office_task).await {
             Ok(()) => {
                 let _ = bridge.event_tx.send(BridgeEvent::SessionRestored {
                     session_id: id.clone(),
@@ -717,5 +798,51 @@ pub async fn reconnect(
 impl From<TransportError> for String {
     fn from(e: TransportError) -> Self {
         e.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 绑定会话:office_task 落在 `_meta` 通道,顶层不落键(内核会丢弃顶层未知键)。
+    #[test]
+    fn office_task_goes_into_meta_not_top_level() {
+        let params = with_office_task_meta(
+            serde_json::json!({"cwd": "C:\\ws", "mcpServers": []}),
+            Some("写标书"),
+        );
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "cwd": "C:\\ws",
+                "mcpServers": [],
+                "_meta": {"office_task": "写标书"}
+            })
+        );
+        assert!(
+            params.get("office_task").is_none(),
+            "顶层不得出现 office_task: {params}"
+        );
+    }
+
+    /// 未绑定:params 与旧版逐字一致(无 _meta 键)。
+    #[test]
+    fn unbound_params_carry_no_meta_key() {
+        let params =
+            with_office_task_meta(serde_json::json!({"cwd": "C:\\ws", "mcpServers": []}), None);
+        assert_eq!(params, serde_json::json!({"cwd": "C:\\ws", "mcpServers": []}));
+        assert!(params.get("_meta").is_none());
+    }
+
+    /// 已有 _meta 时合入:保留其它键,只新增 office_task(不覆盖)。
+    #[test]
+    fn office_task_merges_into_existing_meta() {
+        let params = with_office_task_meta(
+            serde_json::json!({"cwd": "C:\\ws", "_meta": {"keep": 1}}),
+            Some("周报"),
+        );
+        assert_eq!(params["_meta"]["keep"], serde_json::json!(1));
+        assert_eq!(params["_meta"]["office_task"], serde_json::json!("周报"));
     }
 }

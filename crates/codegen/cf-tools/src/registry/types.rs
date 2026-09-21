@@ -286,6 +286,12 @@ pub struct SessionContext {
     /// Session ID that owns processes spawned by this session's tools.
     /// Used to scope kill operations on a shared terminal backend.
     pub owner_session_id: Option<String>,
+    /// Office-artifact workspace bound to this session (`_meta.office_task` on
+    /// `session/new` / `session/load`). Inserted into `Resources` as
+    /// [`crate::types::resources::OfficeTask`] so the bash tool can stamp it
+    /// onto `TerminalRunRequest`; the terminal actor then exports it to child
+    /// processes as `QIDI_OFFICE_TASK`. `None` means unbound: zero behaviour change.
+    pub office_task: Option<String>,
     /// Parent's scheduler handle. When `Some`, the session reuses the parent's
     /// scheduler actor instead of spawning its own, so scheduled tasks survive
     /// subagent exit.
@@ -1025,6 +1031,9 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::SessionEnv(ctx.session_env));
         if let Some(owner_session_id) = ctx.owner_session_id {
             resources.insert(crate::types::resources::OwnerSessionId(owner_session_id));
+        }
+        if let Some(office_task) = ctx.office_task {
+            resources.insert(crate::types::resources::OfficeTask(office_task));
         }
         let scheduler_notification_handle = ctx.notification_handle.clone();
         resources.insert(crate::types::resources::NotificationHandle(
@@ -2066,6 +2075,7 @@ mod tests {
             session_env: Arc::new(HashMap::new()),
             notification_handle: crate::notification::ToolNotificationHandle::noop(),
             owner_session_id: None,
+            office_task: None,
             parent_scheduler_handle: None,
             skills: vec![],
             state_path: tmp.path().join("state.json"),
@@ -2085,6 +2095,45 @@ mod tests {
             attribution_callback: None,
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
+    }
+    /// `SessionContext.office_task` must reach `Resources` as `OfficeTask` (the
+    /// bash tool's source for `QIDI_OFFICE_TASK`); an unbound session must leave
+    /// the resource absent, which is what keeps unbound behaviour unchanged.
+    #[tokio::test]
+    async fn office_task_reaches_resources_only_when_bound() {
+        use crate::types::resources::OfficeTask;
+
+        fn config() -> ToolServerConfig {
+            ToolServerConfig {
+                tools: vec![ToolConfig::for_tool::<qidi_build::ListDirTool>()],
+                behavior_preset: None,
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+
+        let mut bound = test_session_context(&tmp);
+        bound.office_task = Some("office-workspace".to_string());
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config(), bound)
+            .expect("finalize bound session");
+        assert_eq!(
+            toolset
+                .resources
+                .lock()
+                .await
+                .get::<OfficeTask>()
+                .map(|o| o.0.as_str()),
+            Some("office-workspace"),
+        );
+
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config(), test_session_context(&tmp))
+            .expect("finalize unbound session");
+        assert!(
+            toolset.resources.lock().await.get::<OfficeTask>().is_none(),
+            "unbound session must not expose an OfficeTask resource"
+        );
     }
     /// Regression test: `kind_params` must merge input params from ALL tools
     /// that share a `ToolKind`, not just the first one.

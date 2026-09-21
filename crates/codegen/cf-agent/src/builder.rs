@@ -54,6 +54,7 @@ pub struct AgentBuilder {
     fs_backend: Arc<dyn AsyncFileSystem>,
     notification_handle: ToolNotificationHandle,
     owner_session_id: Option<String>,
+    office_task: Option<String>,
     parent_scheduler_handle:
         Option<cf_tools::implementations::qidi_build::scheduler::types::SchedulerHandle>,
     /// The agent definition — set via from_definition() or built up
@@ -190,6 +191,7 @@ impl AgentBuilder {
             fs_backend,
             notification_handle,
             owner_session_id: None,
+            office_task: None,
             parent_scheduler_handle: None,
             definition: None,
             persona_summaries: Vec::new(),
@@ -401,6 +403,15 @@ impl AgentBuilder {
     /// Set the session ID that owns processes spawned by this session's tools.
     pub fn with_owner_session_id(mut self, id: String) -> Self {
         self.owner_session_id = Some(id);
+        self
+    }
+    /// Bind this session to an office-artifact workspace (`_meta.office_task`).
+    ///
+    /// Mirrors [`Self::with_owner_session_id`]: the value reaches `Resources` as
+    /// `OfficeTask`, which the bash tool stamps onto `TerminalRunRequest` so the
+    /// terminal actor exports `QIDI_OFFICE_TASK` to child processes.
+    pub fn with_office_task(mut self, task: String) -> Self {
+        self.office_task = Some(task);
         self
     }
     /// Share the parent's scheduler handle so scheduled tasks survive subagent exit.
@@ -1021,6 +1032,7 @@ impl AgentBuilder {
                 session_env: self.session_env.unwrap_or_default(),
                 notification_handle: self.notification_handle.clone(),
                 owner_session_id: self.owner_session_id.clone(),
+                office_task: self.office_task.clone(),
                 parent_scheduler_handle: self.parent_scheduler_handle.take(),
                 skills: skill_info.clone(),
                 state_path,

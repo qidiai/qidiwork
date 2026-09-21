@@ -2894,6 +2894,7 @@ impl MvpAgent {
             session_model_id,
             session_yolo_mode,
             session_auto_mode,
+            office_task,
             prompt_display_cwd,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
@@ -3091,7 +3092,8 @@ impl MvpAgent {
                 hunk_tracker_handle,
                 session_env,
             )
-            .with_hunk_tracking_enabled(hunk_tracking_enabled);
+            .with_hunk_tracking_enabled(hunk_tracking_enabled)
+            .with_office_task(office_task);
         let workspace_ops = self
             .resolve_workspace_ops()
             .map_err(|_| {

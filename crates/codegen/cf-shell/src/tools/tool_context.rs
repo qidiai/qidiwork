@@ -46,6 +46,13 @@ pub struct ToolContext {
     pub cwd: AbsPathBuf,
     pub file_state_handle: Option<FileStateHandle>,
     pub session_env: Arc<HashMap<String, String>>,
+    /// Office-artifact workspace this session is bound to, from
+    /// `_meta.office_task` on `session/new` / `session/load`. Threaded into
+    /// [`AgentRebuildSpec`](crate::session::agent_rebuild::AgentRebuildSpec) and
+    /// on to `Resources::OfficeTask`, where the bash tool stamps it onto
+    /// `TerminalRunRequest` so child processes see `QIDI_OFFICE_TASK`.
+    /// `None` means unbound: no env injection.
+    pub office_task: Option<String>,
     pub hunk_tracker_handle: HunkTrackerHandle,
     /// Whether hunk tracking is active for this session. `false` when the
     /// resolved mode is `off`/`disabled` — `hunk_tracker_handle` is then a
@@ -134,6 +141,7 @@ impl ToolContext {
             cwd,
             file_state_handle: None,
             session_env: Arc::new(session_env),
+            office_task: None,
             hunk_tracker_handle,
             hunk_tracking_enabled: true,
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -170,6 +178,7 @@ impl ToolContext {
             cwd,
             file_state_handle: None,
             session_env: Arc::new(session_env),
+            office_task: None,
             hunk_tracker_handle,
             hunk_tracking_enabled: true,
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
@@ -191,6 +200,12 @@ impl ToolContext {
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
         self.file_state_handle = Some(handle);
+        self
+    }
+    /// Bind this session to an office-artifact workspace. `None` (the default)
+    /// leaves the session unbound: no `QIDI_OFFICE_TASK` reaches child processes.
+    pub fn with_office_task(mut self, office_task: Option<String>) -> Self {
+        self.office_task = office_task;
         self
     }
     pub fn with_prompt_index(mut self, prompt_index: Arc<tokio::sync::Mutex<usize>>) -> Self {
@@ -226,6 +241,7 @@ mod tests {
                 cwd,
                 file_state_handle: None,
                 session_env: Arc::new(HashMap::new()),
+                office_task: None,
                 hunk_tracker_handle: HunkTrackerHandle::noop(),
                 hunk_tracking_enabled: true,
                 prompt_index: Arc::new(tokio::sync::Mutex::new(0)),

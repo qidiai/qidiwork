@@ -8,6 +8,7 @@
     "opener:allow-open-url",
     "core:app:default",
     "core:window:default",
-    "notification:default"
+    "notification:default",
+    "dialog:allow-open"
   ]
 }

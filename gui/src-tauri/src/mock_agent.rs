@@ -8,8 +8,9 @@
 //!
 //! 行为:
 //! - `initialize` → `{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}`
-//! - `session/new` → 递增 `sess-N`
-//! - `session/load` → sessionId=="lost" 报 404 错误,其余原样确认
+//! - `session/new` → 递增 `sess-N`,并回传 `models` 状态(默认 mock-model-a)
+//! - `session/set_model` → 确认应答 + 广播 `model_changed` 回显通知
+//! - `session/load` → sessionId=="lost" 报 404 错误,其余原样确认(回传 mock-model-b)
 //! - `session/prompt` → 先后发两条 `session/update`(agent_message_chunk:
 //!   "处理中…" 与 "done: <原文>"),再以 `end_turn` 结束;
 //!   文本含"需要权限"时先发 `session/request_permission`(allow/deny),
@@ -39,6 +40,17 @@ fn update(session_id: &str, text: &str) -> Value {
                 "content": {"type": "text", "text": text}
             }
         }
+    })
+}
+
+/// 内核 session/new|load 应答的 models 字段形状(SessionModelState 线上格式)。
+fn mock_models(current: &str) -> Value {
+    json!({
+        "currentModelId": current,
+        "availableModels": [
+            {"modelId": "mock-model-a", "name": "模型 A"},
+            {"modelId": "mock-model-b", "name": "模型 B"}
+        ]
     })
 }
 
@@ -95,7 +107,38 @@ pub fn run(args: &[String]) -> i32 {
                 let sid = format!("sess-{session_counter}");
                 if !send(
                     &mut out,
-                    &json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":sid}}),
+                    &json!({"jsonrpc":"2.0","id":id,
+                            "result":{"sessionId":sid,"models":mock_models("mock-model-a")}}),
+                ) {
+                    return 0;
+                }
+            }
+            (Some("session/set_model"), Some(id)) => {
+                let sid = params
+                    .get("sessionId")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let model = params
+                    .get("modelId")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !send(&mut out, &json!({"jsonrpc":"2.0","id":id,"result":{}})) {
+                    return 0;
+                }
+                // 真实内核切换成功后会广播 model_changed 回显(Leader fan-out),
+                // mock 照抄线上格式以覆盖桥的回显解析路径。
+                if !send(
+                    &mut out,
+                    &json!({
+                        "jsonrpc":"2.0",
+                        "method":"x.ai/session_notification",
+                        "params":{
+                            "sessionId": sid,
+                            "update": {"sessionUpdate":"model_changed","model_id": model}
+                        }
+                    }),
                 ) {
                     return 0;
                 }
@@ -108,7 +151,8 @@ pub fn run(args: &[String]) -> i32 {
                 let msg = if sid == "lost" {
                     json!({"jsonrpc":"2.0","id":id,"error":{"code":404,"message":"unknown session"}})
                 } else {
-                    json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":sid}})
+                    json!({"jsonrpc":"2.0","id":id,
+                           "result":{"sessionId":sid,"models":mock_models("mock-model-b")}})
                 };
                 if !send(&mut out, &msg) {
                     return 0;

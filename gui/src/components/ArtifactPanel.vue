@@ -6,6 +6,8 @@
 import { initOffice, openArtifact, useOfficeState, type ArtifactCard } from "../composables/useOffice";
 import { openPreview, previewKey } from "../composables/usePreview";
 import { pushSystem } from "../composables/useAgent";
+import { ref, watch } from "vue";
+import { panelCollapsed, panelWidth, PANEL_MIN, PANEL_MAX } from "../composables/useUiLayout";
 
 async function open(card: ArtifactCard): Promise<void> {
   try {
@@ -41,6 +43,36 @@ function timeText(epoch: number): string {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// 折叠期间有新产物登记 → 竖条上亮红点,展开即消。
+const unseen = ref(false);
+let lastCount = artifacts.value.length;
+watch(artifacts, (a) => {
+  if (a.length > lastCount && panelCollapsed.value) unseen.value = true;
+  lastCount = a.length;
+});
+watch(panelCollapsed, (v) => {
+  if (!v) unseen.value = false;
+});
+
+/** 拖拽左缘调宽:mousemove 全程挂 window,松手即卸。 */
+function startResize(e: MouseEvent): void {
+  const startX = e.clientX;
+  const startW = panelWidth.value;
+  const onMove = (ev: MouseEvent): void => {
+    panelWidth.value = Math.min(
+      PANEL_MAX,
+      Math.max(PANEL_MIN, startW - (ev.clientX - startX))
+    );
+  };
+  const onUp = (): void => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  e.preventDefault();
+}
+
 function iconFor(name: string): string {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
   if (["docx", "doc"].includes(ext)) return "📄";
@@ -54,8 +86,17 @@ function iconFor(name: string): string {
 </script>
 
 <template>
-  <aside class="artifact-panel">
-    <div class="panel-title">产物面板</div>
+  <aside v-if="panelCollapsed" class="artifact-rail" title="展开产物面板" @click="panelCollapsed = false">
+    <button class="rail-expand">»</button>
+    <span class="rail-text">产物</span>
+    <span v-if="unseen" class="rail-dot"></span>
+  </aside>
+  <aside v-else class="artifact-panel">
+    <div class="resize-handle" @mousedown="startResize"></div>
+    <div class="panel-title">
+      产物面板
+      <button class="collapse-btn" title="折叠产物面板" @click="panelCollapsed = true">⇆</button>
+    </div>
     <div class="panel-body">
       <p v-if="!currentTask" class="empty-hint">
         任务产出的交付文件会出现在这里。
@@ -93,6 +134,75 @@ function iconFor(name: string): string {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
+}
+
+/* 折叠竖条:窄条 + 竖排文字,有新产物时亮红点 */
+.artifact-rail {
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 10px;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.artifact-rail:hover {
+  background: var(--bg-hover);
+}
+
+.rail-expand {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px;
+}
+
+.rail-text {
+  writing-mode: vertical-rl;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  letter-spacing: 0.2em;
+}
+
+.rail-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger, #c0392b);
+}
+
+/* 左缘拖拽调宽的热区 */
+.resize-handle {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 5;
+}
+
+.resize-handle:hover {
+  background: var(--accent-soft);
+}
+
+.collapse-btn {
+  float: right;
+  border: none;
+  background: none;
+  color: var(--text-disabled);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+
+.collapse-btn:hover {
+  color: var(--text-primary);
 }
 
 .panel-title {

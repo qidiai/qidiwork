@@ -291,7 +291,12 @@ fn clone_with_cli(url: &str, branch: Option<&str>, dest: &Path) -> Result<(), St
     validate_clone_url(url)?;
 
     let mut cmd = git_command();
-    cmd.args(["clone", "--depth", "1", "--no-hooks"]);
+    // `clone --no-hooks` is not a portable git flag (Git for Windows rejects it);
+    // point core.hooksPath at a nonexistent dir for this invocation instead.
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", ".qidi-hooks-disabled");
+    cmd.args(["clone", "--depth", "1"]);
     if let Some(b) = branch {
         cmd.args(["--branch", b]);
     }

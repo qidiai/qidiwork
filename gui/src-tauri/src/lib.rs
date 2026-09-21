@@ -27,6 +27,8 @@ pub fn run() -> i32 {
         .plugin(tauri_plugin_opener::init())
         // 系统通知(P2):任务完成/需审批时窗口失焦则提醒
         .plugin(tauri_plugin_notification::init())
+        // 目录选择对话框(前端 plugin-dialog 的 open 命令)
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_focus();
@@ -40,6 +42,8 @@ pub fn run() -> i32 {
             commands::session_start,
             commands::session_prompt,
             commands::session_cancel,
+            commands::session_models,
+            commands::session_set_model,
             commands::permission_respond,
             commands::permission_cancel,
             commands::agent_recover,

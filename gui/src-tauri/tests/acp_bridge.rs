@@ -158,6 +158,12 @@ async fn reconnect_restores_sessions_and_reports_lost() {
     bridge.ensure_initialized().await.unwrap();
     let mut rx = bridge.subscribe();
     let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+    // session/new 现在会广播一条 ModelState(应答 models),先消费掉再断连
+    let setup = next_event(&mut rx).await;
+    assert!(
+        matches!(setup, BridgeEvent::ModelState { .. }),
+        "new_session 应发 ModelState,实际 {setup:?}"
+    );
     transport.shutdown().await;
     let ev = next_event(&mut rx).await;
     assert!(matches!(ev, BridgeEvent::Disconnected { .. }));
@@ -177,6 +183,46 @@ async fn reconnect_restores_sessions_and_reports_lost() {
     assert_eq!(failed.len(), 1);
     assert_eq!(failed[0].0, "lost");
     assert_eq!(bridge2.sessions().len(), 1, "桥内登记同样只含成功会话");
+    assert_eq!(
+        bridge2.model_state(&session).unwrap()["currentModelId"],
+        "mock-model-b",
+        "load_session 应答的 models 应入缓存(恢复后 session_models 查询走它)"
+    );
+}
+
+#[tokio::test]
+async fn model_state_flows_and_hot_switch() {
+    let transport = AgentProcess::spawn(mock_cfg()).await.unwrap();
+    let bridge = AcpBridge::attach(transport.clone()).unwrap();
+    bridge.ensure_initialized().await.unwrap();
+    let mut rx = bridge.subscribe();
+    let session = bridge.new_session(PathBuf::from(".")).await.unwrap();
+
+    // session/new 应答的 models → 缓存并广播(subscribe 先于 new_session)
+    let ev = next_event(&mut rx).await;
+    let BridgeEvent::ModelState { session_id, state } = ev else {
+        panic!("new_session 后应收到 ModelState,实际 {ev:?}");
+    };
+    assert_eq!(session_id, session);
+    assert_eq!(state["currentModelId"], "mock-model-a");
+    assert_eq!(state["availableModels"].as_array().unwrap().len(), 2);
+
+    // 热切换:set_model 返回新状态快照,缓存同步更新
+    let after = bridge.set_model(&session, "mock-model-b").await.unwrap();
+    assert_eq!(after["currentModelId"], "mock-model-b");
+    assert_eq!(
+        bridge.model_state(&session).unwrap()["currentModelId"],
+        "mock-model-b"
+    );
+    // mock 随后推送 model_changed 回显通知:桥解析为幂等的 ModelState
+    let ev = next_event(&mut rx).await;
+    assert!(
+        matches!(&ev, BridgeEvent::ModelState { state, .. }
+                  if state["currentModelId"] == "mock-model-b"),
+        "model_changed 回显应广播 ModelState,实际 {ev:?}"
+    );
+
+    transport.shutdown().await;
 }
 
 #[tokio::test]

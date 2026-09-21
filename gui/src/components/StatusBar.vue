@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, defineAsyncComponent } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { useAgentState, recoverAgent, startSession } from "../composables/useAgent";
+import { setModel, useAgentState, recoverAgent, startSession } from "../composables/useAgent";
 import { useAuth } from "../composables/useAuth";
 import { fmtTokens, fmtCost } from "../services/usage";
 // 设置弹窗按需加载,不进首屏 chunk
 const SettingsModal = defineAsyncComponent(() => import("./SettingsModal.vue"));
 
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
-const { connected, sessionId, sessionUsage } = useAgentState();
+const { connected, sessionId, sessionUsage, modelState } = useAgentState();
+const switchingModel = ref(false);
 const { status: auth, refresh: refreshAuth } = useAuth();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
@@ -34,6 +35,33 @@ const usageLabel = computed(() => {
     cost ? ` · ${u.costPartial ? "≈" : ""}${cost}` : ""
   }`;
 });
+
+// 模型指示降级链:内核模型状态 → 最近回合实际上报的模型 → 不显示。
+const modelLabel = computed(() => {
+  const st = modelState.value;
+  if (st?.currentModelId) {
+    return st.availableModels.find((m) => m.modelId === st.currentModelId)?.name ?? st.currentModelId;
+  }
+  const used = sessionUsage.value.models;
+  return used.length ? used[used.length - 1] : "";
+});
+
+// 可切换 = 内核给了候选清单且已连接;旧内核/无清单时退化为纯展示。
+const canSwitchModel = computed(
+  () => connected.value && (modelState.value?.availableModels.length ?? 0) > 0,
+);
+
+async function onModelPick(e: Event): Promise<void> {
+  const sel = e.target as HTMLSelectElement;
+  const id = sel.value;
+  if (!id || id === modelState.value?.currentModelId) return;
+  switchingModel.value = true;
+  try {
+    await setModel(id);
+  } finally {
+    switchingModel.value = false;
+  }
+}
 
 async function recover() {
   recovering.value = true;
@@ -74,6 +102,19 @@ onMounted(async () => {
       class="status-item muted"
       title="当前会话累计 token 用量与成本(≈ 为内核标记的不完整账单)"
     >{{ usageLabel }}</span>
+    <select
+      v-if="canSwitchModel && modelState"
+      class="model-select"
+      :value="modelState.currentModelId"
+      :disabled="switchingModel"
+      title="当前模型(点击切换,后续回合生效)"
+      @change="onModelPick"
+    >
+      <option v-for="m in modelState.availableModels" :key="m.modelId" :value="m.modelId">
+        {{ m.name }}
+      </option>
+    </select>
+    <span v-else-if="modelLabel" class="status-item muted" title="当前模型(内核上报)">{{ modelLabel }}</span>
     <span class="spacer"></span>
     <button
       class="link-btn"
@@ -137,5 +178,19 @@ onMounted(async () => {
   color: var(--accent);
   font-size: var(--font-size-sm);
   padding: 0;
+}
+
+.model-select {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  max-width: 160px;
+  padding: 2px 4px;
+}
+
+.model-select:disabled {
+  opacity: 0.6;
 }
 </style>

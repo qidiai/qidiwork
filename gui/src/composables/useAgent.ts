@@ -69,6 +69,34 @@ interface AcpEvent {
   error?: string;
   /** turn_usage 事件:session/prompt 应答 _meta 原样透传(桥层) */
   meta?: unknown;
+  /** model_state 事件:内核 SessionModelState 原样透传(桥层) */
+  state?: unknown;
+}
+
+/** 会话模型状态(session/new|load 应答的 models 字段,内核原样)。 */
+export interface ModelState {
+  currentModelId: string;
+  availableModels: { modelId: string; name: string }[];
+}
+
+/** 宽松解析内核模型状态(字段缺失/形态异常一律降级为 null,不抛错)。 */
+export function parseModelState(v: unknown): ModelState | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as { currentModelId?: unknown; availableModels?: unknown };
+  const current = typeof o.currentModelId === "string" ? o.currentModelId : "";
+  const available = Array.isArray(o.availableModels)
+    ? o.availableModels
+        .map((m) => {
+          const mm = (m ?? {}) as { modelId?: unknown; name?: unknown };
+          return {
+            modelId: String(mm.modelId ?? ""),
+            name: typeof mm.name === "string" && mm.name ? mm.name : String(mm.modelId ?? ""),
+          };
+        })
+        .filter((m) => m.modelId)
+    : [];
+  if (!current && !available.length) return null;
+  return { currentModelId: current, availableModels: available };
 }
 
 /** 单会话桶:界面转录 + 回合状态 + 排队消息。 */
@@ -86,6 +114,8 @@ interface SessionBucket {
   pendingUsage: UsageInfo | null;
   /** 会话累计用量(token/成本/模型清单) */
   usage: SessionUsage;
+  /** 内核报告的模型状态(未拿到前为 null,状态栏降级用到合上报) */
+  modelState: ModelState | null;
 }
 
 const buckets = ref<Record<string, SessionBucket>>({});
@@ -117,6 +147,7 @@ function ensureBucket(id: string): SessionBucket {
       title: "",
       pendingUsage: null,
       usage: emptySessionUsage(),
+      modelState: null,
     };
     // 先建桶再补挂暂存消息,保证响应式(读回代理再改)
     const bucket = buckets.value[id]!;
@@ -302,6 +333,12 @@ async function onAcpEvent(ev: AcpEvent) {
         );
       }
       break;
+    case "model_state": {
+      const bucket = bucketOf(ev.session_id);
+      const st = parseModelState(ev.state);
+      if (bucket && st) bucket.modelState = st;
+      break;
+    }
     case "session_restored": {
       const id = ev.session_id;
       if (!id) break;
@@ -318,6 +355,8 @@ async function onAcpEvent(ev: AcpEvent) {
           `会话 ${id} 已恢复(历史上下文已在内核侧续接;本次界面从新消息开始)。`,
         );
       }
+      // 重连换桥后模型缓存是新的:补查一次,状态栏不空窗
+      void refreshModelState(id);
       // 桶已存在(切回活动会话)时不重放提示、不清转录,保留实时流
       break;
     }
@@ -389,14 +428,50 @@ export async function initAgent(): Promise<void> {
   void initNotifyPermission(); // 失焦系统提醒的权限,启动时请求一次
 }
 
+/** 用户最近一次显式选择的工作目录:新建/自动开会话都默认复用它。 */
+const LAST_CWD_KEY = "qidi.lastCwd";
+
 /** 新建任务会话(用户点「+ 新建任务」或首次发送)。回合进行中也可开
- * 新会话:各会话桶独立,后台会话继续跑。 */
+ * 新会话:各会话桶独立,后台会话继续跑。未显式传 cwd 时复用上次选择的
+ * 目录;都没选过则交给内核默认(用户主目录)。 */
 export async function startSession(cwd?: string): Promise<void> {
-  const id = await invoke<string>("session_start", { cwd: cwd ?? null });
+  const dir = cwd ?? localStorage.getItem(LAST_CWD_KEY) ?? undefined;
+  const id = await invoke<string>("session_start", { cwd: dir ?? null });
+  if (dir) localStorage.setItem(LAST_CWD_KEY, dir);
   const bucket = ensureBucket(id);
   activeId.value = id;
   connected.value = true;
-  pushBucketSystem(bucket, `已开启任务会话(${id})。`);
+  pushBucketSystem(bucket, `已开启任务会话(${id})${dir ? `，工作目录 ${dir}` : ""}。`);
+  void refreshModelState(id);
+}
+
+/** 拉取会话模型状态入桶(session/new|load 应答由桥缓存,事件与查询双通道
+ * 以最后到达者为准)。失败静默:旧内核无此面时状态栏走降级显示。 */
+export async function refreshModelState(id: string): Promise<void> {
+  const bucket = bucketOf(id);
+  if (!bucket) return;
+  try {
+    const st = parseModelState(await invoke("session_models", { sessionId: id }));
+    if (st) bucket.modelState = st;
+  } catch {
+    /* 桥未就绪/旧内核:保留现状 */
+  }
+}
+
+/** 会话内热切换模型(不重启内核,后续回合生效)。结果写回本桶并系统提示。 */
+export async function setModel(modelId: string): Promise<void> {
+  const bucket = activeBucket();
+  if (!bucket) return;
+  try {
+    const st = parseModelState(
+      await invoke("session_set_model", { sessionId: bucket.id, modelId }),
+    );
+    if (st) bucket.modelState = st;
+    const name = st?.availableModels.find((m) => m.modelId === modelId)?.name || modelId;
+    pushBucketSystem(bucket, `模型已切换为「${name}」,本会话后续回合生效。`);
+  } catch (e) {
+    pushBucketSystem(bucket, `模型切换失败:${String(e)}`);
+  }
 }
 
 /** 发送一条任务;无会话或已断线时自动开启(断线重发=重连,原契约);
@@ -504,6 +579,8 @@ export function useAgentState() {
     queued: computed<QueuedMessage[]>(() => activeBucket()?.queue ?? []),
     /** 活动会话累计用量(token/成本/模型)。 */
     sessionUsage: computed<SessionUsage>(() => activeBucket()?.usage ?? emptySessionUsage()),
+    /** 活动会话的模型状态(内核应答;null=尚未拿到)。 */
+    modelState: computed<ModelState | null>(() => activeBucket()?.modelState ?? null),
     /** 全部活动会话(侧栏「任务会话」;不含 disconnected 兜底空桶)。 */
     sessionList: computed<SessionListItem[]>(() =>
       Object.values(buckets.value)

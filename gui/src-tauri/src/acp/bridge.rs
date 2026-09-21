@@ -68,6 +68,13 @@ pub enum BridgeEvent {
         session_id: String,
         meta: serde_json::Value,
     },
+    /// 会话模型状态(session/new / session/load 应答 models 字段与
+    /// set_model/model_changed 回显)。state 为内核 SessionModelState
+    /// 原样透传:{ currentModelId, availableModels:[{modelId,name}] }。
+    ModelState {
+        session_id: String,
+        state: serde_json::Value,
+    },
     /// 会话恢复结果(重 spawn 后)。
     SessionRestored {
         session_id: String,
@@ -105,6 +112,8 @@ pub struct AcpBridge {
     permission_pending: Arc<Mutex<HashMap<u64, PermissionEntry>>>,
     event_tx: broadcast::Sender<BridgeEvent>,
     sessions: Mutex<Vec<SessionRecord>>,
+    /// 每会话最近一次模型状态(内核应答原样缓存;查询走 model_state)。
+    model_states: Mutex<HashMap<String, serde_json::Value>>,
 }
 
 impl AcpBridge {
@@ -121,6 +130,7 @@ impl AcpBridge {
             permission_pending: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
             sessions: Mutex::new(Vec::new()),
+            model_states: Mutex::new(HashMap::new()),
         });
 
         let router = Arc::clone(&bridge);
@@ -245,6 +255,28 @@ impl AcpBridge {
                     let _ = self
                         .event_tx
                         .send(BridgeEvent::SessionUpdate { session_id, update });
+                }
+                Incoming::Notification { method, params }
+                    if method == "x.ai/session_notification" =>
+                {
+                    // 模型切换回显(update.model_changed):同步缓存并广播,
+                    // 前端状态栏随其他客户端/内核内部的切换刷新。
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    let update = params.get("update");
+                    let is_model_changed = update
+                        .and_then(|u| u.get("sessionUpdate"))
+                        .and_then(|t| t.as_str())
+                        == Some("model_changed");
+                    if is_model_changed && self.session_known(session_id) {
+                        if let Some(mid) =
+                            update.and_then(|u| u.get("model_id")).and_then(|m| m.as_str())
+                        {
+                            self.patch_current_model(session_id, mid);
+                        }
+                    }
                 }
                 Incoming::Request { id, method, params } => {
                     self.handle_agent_request(id, method, params);
@@ -454,6 +486,7 @@ impl AcpBridge {
             .and_then(|s| s.as_str())
             .ok_or_else(|| format!("session/new 应答缺少 sessionId: {result}"))?
             .to_string();
+        self.cache_model_state(&session_id, &result);
         self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -473,7 +506,9 @@ impl AcpBridge {
             "cwd": cwd.to_string_lossy(),
             "mcpServers": []
         });
-        self.rpc("session/load", params, RPC_TIMEOUT).await?;
+        self.rpc("session/load", params, RPC_TIMEOUT)
+            .await
+            .map(|result| self.cache_model_state(session_id, &result))?;
         self.sessions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -586,6 +621,62 @@ impl AcpBridge {
         self.transport
             .send(note.to_string())
             .map_err(|e| format!("发送 session/cancel 失败: {e}"))
+    }
+
+    /// 从 session/new|load 应答缓存 models 字段并透传给前端(缺字段=旧内核
+    /// 或未启用该 ACP 不稳定面,静默跳过,前端降级用到合模型上报)。
+    fn cache_model_state(&self, session_id: &str, result: &serde_json::Value) {
+        let Some(state) = result.get("models") else {
+            return;
+        };
+        if let Ok(mut m) = self.model_states.lock() {
+            m.insert(session_id.to_string(), state.clone());
+        }
+        let _ = self.event_tx.send(BridgeEvent::ModelState {
+            session_id: session_id.to_string(),
+            state: state.clone(),
+        });
+    }
+
+    /// 把 currentModelId 更新为 model_id 并广播;无缓存时以最小状态建一条
+    /// (availableModels 为空,前端仅展示 id)。返回更新后的快照。
+    fn patch_current_model(&self, session_id: &str, model_id: &str) -> serde_json::Value {
+        let state = {
+            let mut guard = self
+                .model_states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = guard
+                .entry(session_id.to_string())
+                .or_insert_with(|| serde_json::json!({"availableModels": []}));
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "currentModelId".to_string(),
+                    serde_json::Value::String(model_id.to_string()),
+                );
+            }
+            entry.clone()
+        };
+        let _ = self.event_tx.send(BridgeEvent::ModelState {
+            session_id: session_id.to_string(),
+            state: state.clone(),
+        });
+        state
+    }
+
+    /// 最近一次缓存的会话模型状态(无则 None;由 session_models 命令查询)。
+    pub fn model_state(&self, session_id: &str) -> Option<serde_json::Value> {
+        self.model_states
+            .lock()
+            .ok()
+            .and_then(|m| m.get(session_id).cloned())
+    }
+
+    /// 热切换会话模型(session/set_model,同会话立即生效,不重启内核)。
+    pub async fn set_model(&self, session_id: &str, model_id: &str) -> Result<serde_json::Value, String> {
+        let params = serde_json::json!({"sessionId": session_id, "modelId": model_id});
+        self.rpc("session/set_model", params, RPC_TIMEOUT).await?;
+        Ok(self.patch_current_model(session_id, model_id))
     }
 }
 

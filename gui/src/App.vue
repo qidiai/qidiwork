@@ -4,8 +4,15 @@ import MainTabs from "./components/MainTabs.vue";
 import ArtifactPanel from "./components/ArtifactPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
-import { onMounted } from "vue";
+import { computed, onMounted } from "vue";
 import { autoConnect, initAgent } from "./composables/useAgent";
+import {
+  PANEL_STRIP,
+  panelCollapsed,
+  panelWidth,
+  SIDEBAR_STRIP,
+  sidebarCollapsed,
+} from "./composables/useUiLayout";
 
 // 启动即自动连接内核(登记簿有会话时):免去每次手动「恢复会话」。
 // ChatView 的 onMounted 先于父组件执行,事件监听此时已绑定。
@@ -16,11 +23,18 @@ onMounted(() => {
     setTimeout(() => void autoConnect(), 500);
   })();
 });
+
+// 列宽由 useUiLayout 的折叠/拖拽状态驱动;折叠时收为窄竖条(组件自渲染把手)。
+const gridColumns = computed(() => {
+  const left = sidebarCollapsed.value ? `${SIDEBAR_STRIP}px` : "232px";
+  const right = panelCollapsed.value ? `${PANEL_STRIP}px` : `${panelWidth.value}px`;
+  return `${left} minmax(0, 1fr) ${right}`;
+});
 </script>
 
 <template>
   <div class="app-shell">
-    <div class="app-main">
+    <div class="app-main" :style="{ gridTemplateColumns: gridColumns }">
       <WorkspaceSidebar />
       <MainTabs />
       <ArtifactPanel />
@@ -40,14 +54,7 @@ onMounted(() => {
 
 .app-main {
   display: grid;
-  grid-template-columns: 232px minmax(0, 1fr) 320px;
   flex: 1;
   min-height: 0;
-}
-
-@media (max-width: 1100px) {
-  .app-main {
-    grid-template-columns: 200px minmax(0, 1fr) 260px;
-  }
 }
 </style>

@@ -6,10 +6,21 @@ import { pushSystem, sendTask, startSession, switchSession, useAgentState, type 
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
+import { open as pickDirectory } from "@tauri-apps/plugin-dialog";
+import { sidebarCollapsed } from "../composables/useUiLayout";
 
-async function newSession() {
+/** 新建任务。withDir=true 先弹系统目录选择器(取消则不动作)。
+ * 内核未连接也可点:session_start 自己会拉起内核(旧版 !connected
+ * 置灰是新手"新建任务永远点不动"的根因,勿再加回)。 */
+async function newSession(withDir = false) {
+  let cwd: string | undefined;
+  if (withDir) {
+    const dir = await pickDirectory({ directory: true, title: "选择项目文件夹" });
+    if (typeof dir !== "string") return;
+    cwd = dir;
+  }
   try {
-    await startSession();
+    await startSession(cwd);
     // 新会话落盘后立即可见(运行中开第二个会话不彼此阻塞)
     await loadHistory();
   } catch (e) {
@@ -17,7 +28,7 @@ async function newSession() {
   }
 }
 
-const { connected, sessionId, sessionList } = useAgentState();
+const { sessionId, sessionList } = useAgentState();
 
 /** 本进程已建有桶的会话(实时流在手):点击直接切换,不走重恢复。 */
 function liveOf(id: string): SessionListItem | undefined {
@@ -162,19 +173,27 @@ function pick(name: string): void {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <!-- 折叠态图标条:展开 / 新建 / 选目录 -->
+  <aside v-if="sidebarCollapsed" class="rail">
+    <button class="rail-btn" title="展开侧栏" @click="sidebarCollapsed = false">☰</button>
+    <button class="rail-btn" title="新建任务" @click="newSession()">＋</button>
+    <button class="rail-btn" title="选择文件夹新建" @click="newSession(true)">📁</button>
+  </aside>
+
+  <aside v-else class="sidebar">
     <div class="section">
       <div class="section-row">
         <span class="section-title">任务工作区</span>
+        <button class="rail-btn" title="折叠侧栏" @click="sidebarCollapsed = true">⇆</button>
       </div>
-      <button
-        class="new-task"
-        :disabled="!connected"
-        :title="connected ? '开启新会话' : '内核未连接,发送任务后自动开启'"
-        @click="newSession"
-      >
-        + 新建任务
-      </button>
+      <div class="new-task-row">
+        <button class="new-task" title="新建任务(复用上次工作目录)" @click="newSession()">
+          + 新建任务
+        </button>
+        <button class="new-task dir" title="选择项目文件夹后新建" @click="newSession(true)">
+          📁
+        </button>
+      </div>
       <ul class="ws-list">
         <li
           v-for="ws in workspaces"
@@ -309,13 +328,55 @@ function pick(name: string): void {
   letter-spacing: 0.05em;
 }
 
+.new-task-row {
+  display: flex;
+  gap: 6px;
+}
+
 .new-task {
+  flex: 1;
   border: 1px dashed var(--border);
   background: transparent;
   border-radius: var(--radius);
   padding: 8px;
   color: var(--text-secondary);
-  cursor: not-allowed;
+  cursor: pointer;
+}
+
+.new-task:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.new-task.dir {
+  flex: none;
+  padding: 8px 10px;
+}
+
+/* 折叠后的左栏图标条 */
+.rail {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  padding: 10px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.rail-btn {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 15px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+}
+
+.rail-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .ws-list {

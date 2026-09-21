@@ -275,6 +275,36 @@ pub async fn session_cancel(
     }
 }
 
+/// 会话模型状态查询(桥缓存的 session/new|load 应答 models 字段原样透传;
+/// 无缓存返回 null,前端降级用到合模型上报)。
+#[tauri::command]
+pub async fn session_models(
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+) -> Result<serde_json::Value, String> {
+    let b = bridge.inner.lock().await.clone();
+    match b {
+        Some(b) if b.is_running() => Ok(b.model_state(&session_id).unwrap_or(serde_json::Value::Null)),
+        _ => Err("桥未就绪(agent 未运行或已断开)".into()),
+    }
+}
+
+/// 会话内热切换模型(session/set_model):当前会话后续回合立即生效,
+/// 不重启内核。返回切换后的模型状态;内核拒绝(allowed_models 门禁/
+/// harness 不兼容等)时报错原文。
+#[tauri::command]
+pub async fn session_set_model(
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+    model_id: String,
+) -> Result<serde_json::Value, String> {
+    let b = bridge.inner.lock().await.clone();
+    match b {
+        Some(b) if b.is_running() => b.set_model(&session_id, &model_id).await,
+        _ => Err("桥未就绪(agent 未运行或已断开)".into()),
+    }
+}
+
 /// 回填权限审批选择(前端弹窗的结果)。
 #[tauri::command]
 pub async fn permission_respond(

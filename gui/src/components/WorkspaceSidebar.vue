@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { pushSystem, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
+import { pushSystem, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
@@ -74,9 +74,49 @@ function historyLabel(h: HistoryEntry): string {
   return `${task} · ${h.session_id.slice(0, 8)}`;
 }
 
+/** 会话摘要标题缓存:标题很少变,避免 turn_completed/session_restored 反复拉取。
+ * 只缓存非空标题(空标题即未命中,下次重试,新会话 summary 落盘后能升级)。 */
+const summaryCache = new Map<string, string>();
+
+/** 并行拉取前 50 条历史的真实标题(session_summary),返回 id→title(仅非空)。 */
+async function fetchTitles(entries: HistoryEntry[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  await Promise.all(
+    entries.map(async (h) => {
+      const cached = summaryCache.get(h.session_id);
+      if (cached) {
+        out.set(h.session_id, cached);
+        return;
+      }
+      try {
+        const s = await invoke<{ title: string | null }>("session_summary", {
+          sessionId: h.session_id,
+          cwd: h.cwd,
+        });
+        const title = s?.title ?? "";
+        if (title) {
+          summaryCache.set(h.session_id, title);
+          out.set(h.session_id, title);
+        }
+      } catch {
+        /* 摘要缺失:保留登记簿标题(historyLabel 回退 cwd 目录名) */
+      }
+    }),
+  );
+  return out;
+}
+
 async function loadHistory(): Promise<void> {
   try {
-    history.value = await invoke<HistoryEntry[]>("sessions_history");
+    const list = await invoke<HistoryEntry[]>("sessions_history");
+    history.value = list;
+    // 标题升级:session_summary 优先(前 50 条;超出不拉,避免刷屏)
+    const titles = await fetchTitles(list.slice(0, 50));
+    if (titles.size) {
+      history.value = list.map((h) =>
+        titles.has(h.session_id) ? { ...h, title: titles.get(h.session_id)! } : h,
+      );
+    }
   } catch (e) {
     pushSystem(`历史会话读取失败:${String(e)}`);
   }
@@ -110,6 +150,8 @@ async function resumeSession(h: HistoryEntry): Promise<void> {
   }
   resuming.value = true;
   try {
+    // 先登记 cwd,回放(session_restored 事件)定位内核转录文件时复用
+    rememberSessionCwd(h.session_id, h.cwd);
     await invoke("session_resume", { sessionId: h.session_id });
   } catch (e) {
     pushSystem(`恢复会话失败:${String(e)}`);

@@ -16,6 +16,7 @@ pub mod persist;
 pub mod process;
 pub mod settings;
 pub mod skills;
+pub mod transcript;
 pub mod transport;
 pub mod updater;
 
@@ -64,6 +65,9 @@ pub fn run() -> i32 {
             commands::sessions_count,
             commands::sessions_clear,
             commands::office_delete_workspace,
+            transcript::session_transcript_tail,
+            transcript::session_transcript_earlier,
+            transcript::session_summary,
             auth::auth_status,
             auth::auth_login,
             auth::auth_logout,

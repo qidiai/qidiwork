@@ -34,6 +34,8 @@ export interface ChatMessage {
   done: boolean;
   /** 本回合用量(turn_usage 事件在 turn_completed 前到达时挂载) */
   usage?: UsageInfo;
+  /** 历史回放消息(R5 续接回放):与实时消息样式区分,只读、不参与实时流 */
+  replay?: boolean;
 }
 
 /** 排队中的用户消息(回合进行中提交,回合结束自动续跑)。 */
@@ -99,6 +101,43 @@ export function parseModelState(v: unknown): ModelState | null {
   return { currentModelId: current, availableModels: available };
 }
 
+/** 内核 chat_history.jsonl 单条原始消息(Anthropic 消息格式)。 */
+interface RawTranscriptMessage {
+  type?: string;
+  content?: unknown;
+  summary?: unknown;
+  tool_calls?: unknown;
+  [k: string]: unknown;
+}
+
+/** transcript 命令返回页(字段名与 Rust 结构一致,serde snake_case)。 */
+interface TranscriptPage {
+  messages: RawTranscriptMessage[];
+  total_messages: number;
+  truncated: boolean;
+  missing: boolean;
+  loaded_upto: number;
+  size_bytes: number;
+}
+
+/** 单会话回放状态(折叠横幅 + 翻页游标)。 */
+export interface ReplayState {
+  /** 该会话的工作目录(定位内核转录文件所需) */
+  cwd: string;
+  /** summary.json 报告的消息总数(横幅「共 N 条」) */
+  total: number;
+  /** 已回放进转录区的条数 */
+  loaded: number;
+  /** 当前最早已加载行的全局行号(0 = 已到文件头) */
+  earliest: number;
+  /** 前面已无更多历史(横幅消失) */
+  fullyLoaded: boolean;
+  /** 正在拉取更早消息 */
+  loading: boolean;
+  /** 会话文件字节数(>10MB 时「加载全部」先确认) */
+  sizeBytes: number;
+}
+
 /** 单会话桶:界面转录 + 回合状态 + 排队消息。 */
 interface SessionBucket {
   id: string;
@@ -116,6 +155,8 @@ interface SessionBucket {
   usage: SessionUsage;
   /** 内核报告的模型状态(未拿到前为 null,状态栏降级用到合上报) */
   modelState: ModelState | null;
+  /** 续接/崩溃恢复时的历史回放状态(未回放为 null) */
+  replay: ReplayState | null;
 }
 
 const buckets = ref<Record<string, SessionBucket>>({});
@@ -148,6 +189,7 @@ function ensureBucket(id: string): SessionBucket {
       pendingUsage: null,
       usage: emptySessionUsage(),
       modelState: null,
+      replay: null,
     };
     // 先建桶再补挂暂存消息,保证响应式(读回代理再改)
     const bucket = buckets.value[id]!;
@@ -230,6 +272,188 @@ function upsertToolCall(bucket: SessionBucket, update: NonNullable<AcpEvent["upd
   } else {
     last.toolCalls.push({ toolCallId: id, title, status, raw: update });
   }
+}
+
+// ------------------------------------------------------- 会话转录回放(R5) --
+//
+// 续接(session_resume)/ 崩溃恢复(agent_recover)成功后,内核只在自身侧续接
+// 上下文,界面默认从新消息开始。这里直读内核会话文件回放最近若干条,并把更早
+// 消息折叠成顶部横幅(需要时「加载全部」)。一切失败静默降级,不阻断续接。
+
+/** 续接时回放的尾部条数。 */
+const REPLAY_TAIL_LIMIT = 50;
+/** 「加载全部」前的大文件确认阈值(10MB)。 */
+const REPLAY_CONFIRM_BYTES = 10 * 1024 * 1024;
+
+/** session_id → cwd 缓存(登记簿字段;回放定位文件所需)。 */
+const sessionCwd = new Map<string, string>();
+
+/** 登记某会话的 cwd(续接点击处已知,免去额外拉取)。 */
+export function rememberSessionCwd(id: string, cwd: string): void {
+  if (id && cwd) sessionCwd.set(id, cwd);
+}
+
+/** 取会话 cwd:先查缓存,未命中则拉一次登记簿(失败静默,回退 null)。
+ * 并发去重:崩溃恢复会同时抛多个 session_restored,只拉一次登记簿。 */
+let cwdLoading: Promise<void> | null = null;
+async function cwdFor(id: string): Promise<string | null> {
+  const cached = sessionCwd.get(id);
+  if (cached) return cached;
+  if (!cwdLoading) {
+    cwdLoading = (async () => {
+      try {
+        const list = await invoke<{ session_id: string; cwd: string }[]>("sessions_history");
+        for (const h of list) sessionCwd.set(h.session_id, h.cwd);
+      } catch {
+        /* 登记簿读取失败:回放降级为不可用 */
+      } finally {
+        cwdLoading = null;
+      }
+    })();
+  }
+  await cwdLoading;
+  return sessionCwd.get(id) ?? null;
+}
+
+/** 内核原始消息抽取纯文本(user 的 content 可能是 content-blocks 数组)。 */
+function rawText(raw: RawTranscriptMessage): string {
+  const c = raw.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    const parts: string[] = [];
+    for (const block of c) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as { type?: string; text?: unknown };
+      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+    }
+    return parts.join("");
+  }
+  return "";
+}
+
+/** 内核原始消息 → 前端 ChatMessage。
+ * 只回放 user/assistant(system/reasoning/tool_result 等内部类型跳过,避免刷屏);
+ * 纯工具调用的 assistant 回合渲染为一行工具摘要,不重建权限管道。 */
+function rawToChatMessage(raw: RawTranscriptMessage): ChatMessage | null {
+  const role = raw.type;
+  if (role !== "user" && role !== "assistant") return null;
+  const content = rawText(raw);
+  if (!content.trim()) {
+    if (role === "assistant" && Array.isArray(raw.tool_calls) && raw.tool_calls.length) {
+      const names = raw.tool_calls
+        .map((t) => String((t as { name?: unknown })?.name ?? "工具"))
+        .join("、");
+      return {
+        id: ++messageId,
+        role,
+        content: `🔧 调用工具:${names}`,
+        toolCalls: [],
+        done: true,
+        replay: true,
+      };
+    }
+    return null;
+  }
+  return { id: ++messageId, role, content, toolCalls: [], done: true, replay: true };
+}
+
+/** 把原始消息数组转成可渲染的 ChatMessage 列表(过滤掉跳过的类型)。 */
+function toReplayMessages(raws: RawTranscriptMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const raw of raws) {
+    const m = rawToChatMessage(raw);
+    if (m) out.push(m);
+  }
+  return out;
+}
+
+/** 回放某会话最近若干条历史(续接/恢复成功后调用,失败静默降级)。 */
+async function injectReplay(bucket: SessionBucket, cwd: string): Promise<void> {
+  let page: TranscriptPage;
+  try {
+    page = await invoke<TranscriptPage>("session_transcript_tail", {
+      sessionId: bucket.id,
+      cwd,
+      limit: REPLAY_TAIL_LIMIT,
+    });
+  } catch (e) {
+    pushBucketSystem(bucket, `历史消息回放不可用:${String(e)}`);
+    return;
+  }
+  const msgs = toReplayMessages(page.messages ?? []);
+  if (page.missing || !msgs.length) {
+    pushBucketSystem(
+      bucket,
+      `会话 ${bucket.id} 已恢复(未找到可回放的历史记录,本次界面从新消息开始)。`,
+    );
+    return;
+  }
+  // 回放消息按原顺序置于转录区顶部,再补一条分界提示
+  bucket.messages = msgs.concat(bucket.messages);
+  bucket.replay = {
+    cwd,
+    total: page.total_messages,
+    // 「已加载最近 N 条」按窗口内加载的原始消息数计(与 limit 对齐;内部类型
+    // 不渲染,故可见气泡数可能少于 N)
+    loaded: page.messages.length,
+    earliest: page.loaded_upto,
+    fullyLoaded: page.loaded_upto === 0,
+    loading: false,
+    sizeBytes: page.size_bytes,
+  };
+  pushBucketSystem(
+    bucket,
+    `已回放该会话最近 ${page.messages.length} 条历史消息(历史上下文已在内核侧续接)。`,
+  );
+}
+
+/** 续接/恢复成功后:解析 cwd 并回放(无 cwd 时降级为提示)。 */
+async function replayRestored(bucket: SessionBucket): Promise<void> {
+  const cwd = await cwdFor(bucket.id);
+  if (!cwd) {
+    pushBucketSystem(
+      bucket,
+      `会话 ${bucket.id} 已恢复(历史上下文已在内核侧续接;本次界面从新消息开始)。`,
+    );
+    return;
+  }
+  await injectReplay(bucket, cwd);
+}
+
+/** 「加载全部」:一次拉齐当前窗口之前的全部历史,并序合并到转录区顶部。
+ * 拉齐后横幅消失(fullyLoaded);>10MB 的文件确认在组件层先做。 */
+export async function loadEarlierMessages(): Promise<void> {
+  const bucket = activeBucket();
+  const r = bucket?.replay;
+  if (!bucket || !r || r.loading || r.fullyLoaded) return;
+  if (r.earliest <= 0) {
+    r.fullyLoaded = true;
+    return;
+  }
+  r.loading = true;
+  try {
+    const page = await invoke<TranscriptPage>("session_transcript_earlier", {
+      sessionId: bucket.id,
+      cwd: r.cwd,
+      before: r.earliest,
+      limit: r.earliest,
+    });
+    const msgs = toReplayMessages(page.messages ?? []);
+    bucket.messages = msgs.concat(bucket.messages);
+    r.loaded += page.messages.length;
+    r.earliest = page.loaded_upto;
+    r.fullyLoaded = true;
+  } catch (e) {
+    pushBucketSystem(bucket, `加载更早消息失败:${String(e)}`);
+  } finally {
+    r.loading = false;
+  }
+}
+
+/** 会话文件是否超过「加载全部」确认阈值。 */
+export function replayNeedsConfirm(): boolean {
+  const r = activeBucket()?.replay;
+  return !!r && r.sizeBytes > REPLAY_CONFIRM_BYTES;
 }
 
 async function onAcpEvent(ev: AcpEvent) {
@@ -349,11 +573,8 @@ async function onAcpEvent(ev: AcpEvent) {
       // 恢复的会话标题已在登记簿里,首条 prompt 不覆盖
       bucket.titleRecorded = true;
       if (!existing) {
-        // 消息不回放:恢复场景界面从新消息开始(历史上下文在内核侧续接)
-        pushBucketSystem(
-          bucket,
-          `会话 ${id} 已恢复(历史上下文已在内核侧续接;本次界面从新消息开始)。`,
-        );
+        // 新恢复的会话:回放最近历史(续接/崩溃恢复同一路径;失败静默降级)
+        void replayRestored(bucket);
       }
       // 重连换桥后模型缓存是新的:补查一次,状态栏不空窗
       void refreshModelState(id);
@@ -581,6 +802,8 @@ export function useAgentState() {
     sessionUsage: computed<SessionUsage>(() => activeBucket()?.usage ?? emptySessionUsage()),
     /** 活动会话的模型状态(内核应答;null=尚未拿到)。 */
     modelState: computed<ModelState | null>(() => activeBucket()?.modelState ?? null),
+    /** 活动会话的历史回放状态(未回放为 null)。 */
+    replay: computed<ReplayState | null>(() => activeBucket()?.replay ?? null),
     /** 全部活动会话(侧栏「任务会话」;不含 disconnected 兜底空桶)。 */
     sessionList: computed<SessionListItem[]>(() =>
       Object.values(buckets.value)

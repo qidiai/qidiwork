@@ -1,14 +1,25 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from "vue";
-import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, type ToolCallItem } from "../composables/useAgent";
+import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, loadEarlierMessages, replayNeedsConfirm, type ToolCallItem } from "../composables/useAgent";
 import { handleLinkClick } from "../services/render";
 import { fmtTokens, fmtCost } from "../services/usage";
 import MarkdownBlock from "./MarkdownBlock.vue";
 import ToolRaw from "./ToolRaw.vue";
 
-const { messages, connected, turnInProgress, permission, queued } = useAgentState();
+const { messages, connected, turnInProgress, permission, queued, replay } = useAgentState();
 const draft = ref("");
 const msgBox = ref<HTMLElement | null>(null);
+
+// 回放折叠横幅「加载全部」:大会话(>10MB)先确认再拉齐全部历史。
+async function onLoadAll(): Promise<void> {
+  if (
+    replayNeedsConfirm() &&
+    !window.confirm("该会话记录较大(超过 10MB),加载全部可能较慢,是否继续?")
+  ) {
+    return;
+  }
+  await loadEarlierMessages();
+}
 
 // 外链点击统一拦截(系统浏览器打开,webview 不导航)。
 function onMsgClick(e: MouseEvent): void {
@@ -132,6 +143,23 @@ void initAgent();
 <template>
   <div class="chat-view">
     <div ref="msgBox" class="chat-scroll" @click="onMsgClick" @scroll.passive>
+      <!-- 回放折叠横幅:更早消息未加载时显示(需要时一次拉齐) -->
+      <div
+        v-if="replay && !replay.fullyLoaded && replay.total > replay.loaded"
+        class="replay-banner"
+      >
+        <span class="replay-banner-text">
+          已加载最近 {{ replay.loaded }} 条 · 共 {{ replay.total }} 条
+        </span>
+        <button
+          class="replay-load-btn"
+          :disabled="replay.loading"
+          @click="onLoadAll"
+        >
+          {{ replay.loading ? "加载中…" : "加载全部" }}
+        </button>
+      </div>
+
       <div v-if="messages.length === 0" class="welcome">
         <div class="welcome-icon">Q</div>
         <h1 class="welcome-title">QIDI 办公工作台</h1>
@@ -142,10 +170,16 @@ void initAgent();
         </div>
       </div>
 
-      <div v-for="msg in messages" :key="msg.id" class="msg-row" :class="msg.role">
+      <div
+        v-for="msg in messages"
+        :key="msg.id"
+        class="msg-row"
+        :class="[msg.role, { replay: msg.replay }]"
+      >
         <span class="msg-badge">{{
           msg.role === "user" ? "我" : msg.role === "assistant" ? "QIDI" : "系统"
         }}</span>
+        <span v-if="msg.replay" class="replay-tag">回放</span>
         <div class="msg-body">
           <!-- 自动化流程清单:最新一份 todowrite 渲染为分步卡片(与编码助手
                的任务清单同源)。全量替换语义,只展示最后一份。 -->
@@ -410,6 +444,55 @@ void initAgent();
 
 .user-text {
   white-space: pre-wrap;
+}
+
+/* 历史回放消息(R5):浅色底 + 「回放」角标,与实时消息区分(克制,不加复杂结构) */
+.msg-row.replay .msg-content {
+  background: var(--bg-hover);
+}
+.msg-row.replay.assistant .msg-content {
+  border-style: dashed;
+}
+.replay-tag {
+  flex: none;
+  font-size: var(--font-size-sm);
+  color: var(--text-disabled);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin-top: 2px;
+}
+
+/* 回放折叠横幅:更早消息未加载时显示「已加载最近 N 条 · 共 M 条 [加载全部]」 */
+.replay-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 5px 14px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.replay-load-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: var(--font-size-sm);
+  padding: 2px 12px;
+  cursor: pointer;
+}
+.replay-load-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.replay-load-btn:disabled {
+  color: var(--text-disabled);
+  cursor: default;
 }
 
 /* 排队消息(运行中提交):徽标区分 + 行内操作 */

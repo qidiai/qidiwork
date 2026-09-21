@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "cf-tools"
-version = "0.1.220-alpha.5"
+version = "0.1.220-alpha.6"
 description = "Grok tools library"
 
 [dependencies]

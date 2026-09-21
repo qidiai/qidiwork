@@ -609,9 +609,20 @@ impl AcpBridge {
     /// 未绑定会话原文返回(与旧版逐字一致)。
     fn decorate_prompt(&self, session_id: &str, text: &str) -> String {
         match self.office_task_of(session_id) {
-            Some(task) => format!(
-                "[系统指令] 本次会话产物登记一律调用 card.py 时使用 --task \"{task}\" 参数。\n{text}"
-            ),
+            Some(task) => {
+                // Audit hardening: strip quotes/control chars so a workspace
+                // name cannot break the directive structure.
+                let clean: String = task
+                    .chars()
+                    .filter(|c| *c != '"' && !c.is_control())
+                    .collect();
+                if clean.is_empty() {
+                    return text.to_string();
+                }
+                format!(
+                "[系统指令] 本次会话产物登记一律调用 card.py 时使用 --task \"{clean}\" 参数。\n{text}"
+                            )
+            }
             None => text.to_string(),
         }
     }

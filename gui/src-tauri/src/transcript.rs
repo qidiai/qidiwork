@@ -100,11 +100,12 @@ fn session_dir(app: &AppHandle, session_id: &str, cwd: &str) -> Option<PathBuf> 
         return None;
     }
     let home = qidi_home(app)?;
-    Some(
-        home.join("sessions")
-            .join(percent_encode(cwd))
-            .join(session_id),
-    )
+    // Audit hardening: `.` and `..` survive percent-encoding verbatim.
+    let encoded = percent_encode(cwd);
+    if encoded == "." || encoded == ".." {
+        return None;
+    }
+    Some(home.join("sessions").join(encoded).join(session_id))
 }
 
 // --------------------------------------------------------------- 读取 --
@@ -167,16 +168,27 @@ fn tail_page(path: &Path, limit: usize, total_messages: u64) -> Result<Transcrip
         // 的全局行号 = 前缀换行数 + 1(与整文件 split('\n') 的行号空间一致)。
         let prefix_lines = count_newlines_prefix(path, size - TAIL_WINDOW_BYTES);
         let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        // Audit hardening: probe the byte right before the window. If it is a
+        // newline the window starts on a complete line and nothing is dropped.
+        f.seek(SeekFrom::Start(size - TAIL_WINDOW_BYTES - 1))
+            .map_err(|e| e.to_string())?;
+        let mut prev = [0u8; 1];
+        f.read_exact(&mut prev).map_err(|e| e.to_string())?;
+        let at_line_start = prev[0] == b'\n';
         f.seek(SeekFrom::End(-(TAIL_WINDOW_BYTES as i64)))
             .map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
         let s = String::from_utf8_lossy(&buf).into_owned();
-        let s = match s.find('\n') {
-            Some(i) => s[i + 1..].to_string(),
-            None => String::new(),
-        };
-        (s, prefix_lines + 1)
+        if at_line_start {
+            (s, prefix_lines)
+        } else {
+            let s = match s.find('\n') {
+                Some(i) => s[i + 1..].to_string(),
+                None => String::new(),
+            };
+            (s, prefix_lines + 1)
+        }
     } else {
         let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut buf = Vec::new();
@@ -331,6 +343,36 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn tail_seek_at_line_boundary_keeps_first_line() {
+        let path = tmp_file("tail-boundary");
+        // Exact 1024-byte lines: size - 2MB then always lands on a line start.
+        let line_len = 1024usize;
+        let n = 3000usize;
+        let mut s = String::new();
+        for i in 0..n {
+            let mut line = format!("{{\"type\":\"user\",\"content\":\"m{i:05}");
+            while line.len() + 3 < line_len {
+                line.push('x');
+            }
+            line.push_str("\"}\n");
+            assert_eq!(line.len(), line_len);
+            s.push_str(&line);
+        }
+        std::fs::write(&path, &s).unwrap();
+        let page = tail_page(&path, 3000, n as u64).unwrap();
+        assert!(page.truncated, "3MB file must be truncated");
+        // Window covers lines 952..=2999 (0-based); none may be dropped.
+        assert_eq!(page.messages.len(), 2048, "all window lines returned");
+        assert!(
+            page.messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("m00952"),
+            "boundary line m00952 must survive"
+        );
+        assert_eq!(page.loaded_upto, 952, "first window line index kept");
+    }
     fn percent_encode_matches_kernel_urlencoding() {
         // 内核样例:urlencoding::encode("G:\\qidicode") = "G%3A%5Cqidicode"
         assert_eq!(percent_encode("G:\\qidicode"), "G%3A%5Cqidicode");

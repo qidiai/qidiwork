@@ -4,6 +4,7 @@
 // 保存后内核需重启生效:「保存并重启内核」直接 agent_stop,
 // 下一条任务发送时 session_start 自动以新配置重启。
 import { computed, onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import {
   readSettings,
   saveSettings,
@@ -36,6 +37,13 @@ const selectedId = ref("");
 const apiKey = ref("");
 const saving = ref(false);
 const showKey = ref(false);
+
+// 更新提示条(R1-GUI):onMounted 拉取,有新版才显示;失败静默。
+const update = ref<{ version: string; url: string } | null>(null);
+// 诊断日志导出(R2)。
+const diagBusy = ref(false);
+const diagPath = ref("");
+const diagError = ref("");
 
 // 新建模型(首次运行引导):无任何 [model.*] 时自动展开表单,
 // 让用户能在 GUI 里从零配出第一个模型(发布链审计:此前必报错)
@@ -111,6 +119,41 @@ async function openLoginUri(): Promise<void> {
   }
 }
 
+// 检查 GUI 新版本(R1-GUI):失败静默,不打扰用户。
+async function checkUpdate(): Promise<void> {
+  try {
+    const res = await invoke<{ version: string; url: string } | null>("check_gui_update");
+    update.value = res ?? null;
+  } catch {
+    update.value = null;
+  }
+}
+
+// 用与登录链接一致的 opener 方式打开下载页。
+async function openUpdateUrl(): Promise<void> {
+  if (!update.value?.url) return;
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(update.value.url);
+  } catch {
+    /* opener 不可用时用户可手动复制 URL */
+  }
+}
+
+// 一键导出诊断日志(R2):成功内联显示路径,失败显示错误文本。
+async function exportDiag(): Promise<void> {
+  diagBusy.value = true;
+  diagError.value = "";
+  diagPath.value = "";
+  try {
+    diagPath.value = await invoke<string>("export_diag");
+  } catch (e) {
+    diagError.value = String(e);
+  } finally {
+    diagBusy.value = false;
+  }
+}
+
 // 下拉框选项 = config.toml 里定义的模型;当前默认若是内置模型(不在
 // 本文件定义),也作为一项列出供选回。
 const options = computed(() => {
@@ -165,6 +208,7 @@ async function save(restart: boolean): Promise<void> {
 onMounted(() => {
   void load();
   void refreshAuth();
+  void checkUpdate();
 });
 </script>
 
@@ -183,6 +227,21 @@ onMounted(() => {
       </div>
 
       <div v-else class="modal-body">
+        <!-- 更新提示条(R1-GUI):仅检测到新版时出现 -->
+        <div v-if="update" class="update-banner">
+          <span>📦 发现新版本 {{ update.version }}</span>
+          <button class="link-btn" @click.prevent="openUpdateUrl">去下载</button>
+        </div>
+
+        <!-- 诊断日志导出(R2) -->
+        <div class="diag-row">
+          <button class="btn ghost" :disabled="diagBusy" @click="exportDiag">
+            {{ diagBusy ? "导出中…" : "📋 导出诊断日志" }}
+          </button>
+          <span v-if="diagPath" class="field-hint diag-path">已导出：{{ diagPath }}</span>
+          <span v-else-if="diagError" class="err">{{ diagError }}</span>
+        </div>
+
         <!-- 账号(方案 P1-3):登录态 / 设备码登录 / 套餐与今日配额 -->
         <div class="account-box">
           <div class="account-head">
@@ -494,6 +553,32 @@ onMounted(() => {
 
 .self-start {
   align-self: flex-start;
+}
+
+/* 更新提示条(R1-GUI) */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft, var(--bg-panel));
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}
+
+/* 诊断日志导出(R2) */
+.diag-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.diag-path {
+  word-break: break-all;
 }
 
 /* 账号区块(方案 P1-3) */

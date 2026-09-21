@@ -7,6 +7,7 @@
 pub mod acp;
 pub mod auth;
 pub mod commands;
+pub mod diag;
 pub mod logging;
 #[cfg(any(test, debug_assertions))]
 pub mod mock_agent; // 生产 release 不暴露 --mock-agent 分支(缩小暴露面)
@@ -16,6 +17,7 @@ pub mod process;
 pub mod settings;
 pub mod skills;
 pub mod transport;
+pub mod updater;
 
 use tauri::{Manager, RunEvent};
 
@@ -64,7 +66,9 @@ pub fn run() -> i32 {
             commands::office_delete_workspace,
             auth::auth_status,
             auth::auth_login,
-            auth::auth_logout
+            auth::auth_logout,
+            updater::check_gui_update,
+            diag::export_diag
         ])
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());

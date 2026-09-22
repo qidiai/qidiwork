@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "cf-shell"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 edition.workspace = true
 
 [features]

@@ -1,6 +1,6 @@
 [package]
 name = "qidiwork-gui"
-version = "0.1.3"
+version = "0.1.4"
 description = "QidiWork 办公工作台 —— QIDI Code 的原生 GUI 办公界面"
 edition = "2024"
 rust-version = "1.85"

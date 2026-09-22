@@ -20,7 +20,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::acp::{AcpBridge, reconnect};
+use crate::acp::{AcpBridge, ImagePayload, reconnect};
 use crate::office::{self, ArtifactCard, WorkspaceInfo, watch::ManifestWatch};
 use crate::persist::{self, PersistedSession};
 use crate::process::{AgentProcess, SpawnConfig};
@@ -258,15 +258,24 @@ pub async fn session_start(
 }
 
 /// 发起回合:立即返回;流式更新与回合结束经 `acp-event` 推送。
+/// `images`:可选图片附件(base64 + mimeType,composer 附图);缺省/`null`/空数组
+/// 均视为无图,与文本一同下发多块 prompt。
+///
+/// 注:规格要求参数加 `#[serde(default)]`——Tauri v2 命令宏按参数逐个
+/// `CommandArg` 反序列化(非 serde 结构体),不支持参数级 serde 属性
+/// (实测报 `cannot find attribute serde`);故用 Tauri 惯用的
+/// `Option<Vec<_>>` 达成同一「缺省即空」的向后兼容语义。
 #[tauri::command]
 pub async fn session_prompt(
     bridge: State<'_, BridgeState>,
     session_id: String,
     text: String,
+    images: Option<Vec<ImagePayload>>,
 ) -> Result<(), String> {
+    let images = images.unwrap_or_default();
     let b = bridge.inner.lock().await.clone();
     match b {
-        Some(b) if b.is_running() => b.prompt(&session_id, &text),
+        Some(b) if b.is_running() => b.prompt(&session_id, &text, &images),
         _ => Err("桥未就绪(agent 未运行或已断开)".into()),
     }
 }
@@ -298,17 +307,21 @@ pub async fn session_models(
 }
 
 /// 会话内热切换模型(session/set_model):当前会话后续回合立即生效,
-/// 不重启内核。返回切换后的模型状态;内核拒绝(allowed_models 门禁/
+/// 不重启内核。`effort`:可选思考强度档位(经 `_meta.reasoningEffort` 透传,
+/// 仅 `Some` 时落键)。返回切换后的模型状态;内核拒绝(allowed_models 门禁/
 /// harness 不兼容等)时报错原文。
 #[tauri::command]
 pub async fn session_set_model(
     bridge: State<'_, BridgeState>,
     session_id: String,
     model_id: String,
+    effort: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let b = bridge.inner.lock().await.clone();
     match b {
-        Some(b) if b.is_running() => b.set_model(&session_id, &model_id).await,
+        Some(b) if b.is_running() => {
+            b.set_model(&session_id, &model_id, effort.as_deref()).await
+        }
         _ => Err("桥未就绪(agent 未运行或已断开)".into()),
     }
 }

@@ -96,6 +96,17 @@ pub enum BridgeEvent {
     },
 }
 
+/// `session/prompt` 图片块载荷(前端 composer 附件)。字段名走 camelCase,
+/// 与 ACP `ImageContent` 线上格式一致(`mimeType`);`data` 为去前缀的 base64。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePayload {
+    /// base64 编码(无 `data:<mime>;base64,` 前缀)。
+    pub data: String,
+    /// MIME 类型(image/png | image/jpeg | image/webp | image/gif)。
+    pub mime_type: String,
+}
+
 #[derive(Debug, Clone)]
 struct SessionRecord {
     id: String,
@@ -354,7 +365,9 @@ impl AcpBridge {
                         if let Some(mid) =
                             update.and_then(|u| u.get("model_id")).and_then(|m| m.as_str())
                         {
-                            self.patch_current_model(session_id, mid);
+                            // 回显通知不携带档位变更的权威值(发起方自身被内核门控),
+                            // 档位由本端 set_model 就地 patch,故此处 effort 传 None。
+                            self.patch_current_model(session_id, mid, None);
                         }
                     }
                 }
@@ -675,11 +688,17 @@ impl AcpBridge {
     /// (GUI 调用不应阻塞数分钟)。`self: &Arc<Self>` 以便等待任务克隆桥。
     /// 注意:30 分钟超时 ≠ 取消——超时只发错误事件,agent 仍在跑,
     /// 真正中断需 `cancel`(M4 编排)。
-    pub fn prompt(self: &Arc<Self>, session_id: &str, text: &str) -> Result<(), String> {
+    pub fn prompt(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        images: &[ImagePayload],
+    ) -> Result<(), String> {
         let text = self.decorate_prompt(session_id, text);
+        let blocks = build_prompt_blocks(&text, images)?;
         let params = serde_json::json!({
             "sessionId": session_id,
-            "prompt": [{"type": "text", "text": text}]
+            "prompt": blocks
         });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -775,8 +794,15 @@ impl AcpBridge {
     }
 
     /// 把 currentModelId 更新为 model_id 并广播;无缓存时以最小状态建一条
-    /// (availableModels 为空,前端仅展示 id)。返回更新后的快照。
-    fn patch_current_model(&self, session_id: &str, model_id: &str) -> serde_json::Value {
+    /// (availableModels 为空,前端仅展示 id)。`effort` 为 Some 时一并把档位
+    /// 写进该模型 meta(内核 set_model 应答只回 model id、不回档位,强度下拉
+    /// 据缓存刷新)。返回更新后的快照。
+    fn patch_current_model(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        effort: Option<&str>,
+    ) -> serde_json::Value {
         let state = {
             let mut guard = self
                 .model_states
@@ -790,6 +816,9 @@ impl AcpBridge {
                     "currentModelId".to_string(),
                     serde_json::Value::String(model_id.to_string()),
                 );
+                if let Some(effort) = effort {
+                    patch_model_effort(obj, model_id, effort);
+                }
             }
             entry.clone()
         };
@@ -809,10 +838,102 @@ impl AcpBridge {
     }
 
     /// 热切换会话模型(session/set_model,同会话立即生效,不重启内核)。
-    pub async fn set_model(&self, session_id: &str, model_id: &str) -> Result<serde_json::Value, String> {
-        let params = serde_json::json!({"sessionId": session_id, "modelId": model_id});
+    /// `effort`:可选思考强度档位,经官方扩展通道 `_meta.reasoningEffort` 下发
+    /// (键名与内核 `model_switch.rs` 读取一致);仅 `Some` 时落键,`None` 时
+    /// params 与旧版逐字一致(不落 `_meta`)。
+    pub async fn set_model(
+        &self,
+        session_id: &str,
+        model_id: &str,
+        effort: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut params = serde_json::json!({"sessionId": session_id, "modelId": model_id});
+        if let Some(effort) = effort {
+            params["_meta"] = serde_json::json!({ "reasoningEffort": effort });
+        }
         self.rpc("session/set_model", params, RPC_TIMEOUT).await?;
-        Ok(self.patch_current_model(session_id, model_id))
+        Ok(self.patch_current_model(session_id, model_id, effort))
+    }
+}
+
+/// session/prompt 图片 MIME 白名单(与内核图片处理面一致;其余一律拒绝)。
+const ALLOWED_IMAGE_MIMES: [&str; 4] =
+    ["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// 单张图片解码后字节上限(前端已按 10MB 校验,此处防御纵深)。
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// 组装 `session/prompt` 的 prompt 块数组(ACP ContentBlock 线上格式):
+/// 文本块在前(`text` 非空时),图片块随后(每图 `{"type":"image","data","mimeType"}`)。
+/// 文本为空且无图片 → Err(空 prompt 无意义);MIME 非白名单 / 单图超限 → Err。
+fn build_prompt_blocks(
+    text: &str,
+    images: &[ImagePayload],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if !text.is_empty() {
+        blocks.push(serde_json::json!({"type": "text", "text": text}));
+    }
+    for img in images {
+        if !ALLOWED_IMAGE_MIMES.contains(&img.mime_type.as_str()) {
+            return Err(format!(
+                "不支持的图片类型 {}:仅支持 png/jpeg/webp/gif",
+                img.mime_type
+            ));
+        }
+        // base64 长度 → 近似解码字节数(4 字符 ≈ 3 字节),超限拒绝。
+        if img.data.len().saturating_mul(3) / 4 > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "图片超过 {}MB 上限",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        blocks.push(serde_json::json!({
+            "type": "image",
+            "data": img.data,
+            "mimeType": img.mime_type
+        }));
+    }
+    if blocks.is_empty() {
+        return Err("prompt 为空:需提供文本或至少一张图片".to_string());
+    }
+    Ok(blocks)
+}
+
+/// 把档位写进缓存状态里 `model_id` 对应模型的 `_meta.reasoningEffort`(仅当该
+/// 模型已声明 `supportsReasoningEffort` 时;找不到模型 / 不支持则原样不改)。
+fn patch_model_effort(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    model_id: &str,
+    effort: &str,
+) {
+    let Some(models) = state.get_mut("availableModels").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for model in models.iter_mut() {
+        let Some(model) = model.as_object_mut() else {
+            continue;
+        };
+        if model.get("modelId").and_then(|v| v.as_str()) != Some(model_id) {
+            continue;
+        }
+        let supports = model
+            .get("_meta")
+            .and_then(|v| v.get("supportsReasoningEffort"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !supports {
+            return;
+        }
+        let meta = model
+            .entry("_meta")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(
+                "reasoningEffort".to_string(),
+                serde_json::Value::String(effort.to_string()),
+            );
+        }
+        return;
     }
 }
 
@@ -929,5 +1050,68 @@ mod tests {
     fn queue_lagged_serializes_to_type_tag() {
         let v = serde_json::to_value(BridgeEvent::QueueLagged { dropped: 7 }).unwrap();
         assert_eq!(v, serde_json::json!({"type": "queue_lagged", "dropped": 7}));
+    }
+
+    fn img(data: &str, mime: &str) -> ImagePayload {
+        ImagePayload {
+            data: data.to_string(),
+            mime_type: mime.to_string(),
+        }
+    }
+
+    /// 纯文本:单文本块(与旧版逐字一致)。
+    #[test]
+    fn prompt_blocks_text_only() {
+        let blocks = build_prompt_blocks("写周报", &[]).unwrap();
+        assert_eq!(blocks, vec![serde_json::json!({"type": "text", "text": "写周报"})]);
+    }
+
+    /// 纯图(空文本):仅图片块,camelCase `mimeType`。
+    #[test]
+    fn prompt_blocks_image_only() {
+        let images = vec![img("QUJD", "image/png")];
+        let blocks = build_prompt_blocks("", &images).unwrap();
+        assert_eq!(
+            blocks,
+            vec![serde_json::json!({"type": "image", "data": "QUJD", "mimeType": "image/png"})]
+        );
+    }
+
+    /// 图文混合:文本块在前,图片块随后(顺序即契约)。
+    #[test]
+    fn prompt_blocks_mixed_text_then_images() {
+        let images = vec![img("QUJD", "image/png"), img("REVG", "image/jpeg")];
+        let blocks = build_prompt_blocks("看图", &images).unwrap();
+        assert_eq!(
+            blocks,
+            vec![
+                serde_json::json!({"type": "text", "text": "看图"}),
+                serde_json::json!({"type": "image", "data": "QUJD", "mimeType": "image/png"}),
+                serde_json::json!({"type": "image", "data": "REVG", "mimeType": "image/jpeg"}),
+            ]
+        );
+    }
+
+    /// 超限拒绝:单图解码后 > 10MB → Err。
+    #[test]
+    fn prompt_blocks_reject_oversize_image() {
+        let big = "A".repeat(MAX_IMAGE_BYTES / 3 * 4 + 8);
+        let images = vec![img(&big, "image/png")];
+        let err = build_prompt_blocks("x", &images).expect_err("超限图片必须拒绝");
+        assert!(err.contains("10MB"), "err={err}");
+    }
+
+    /// MIME 白名单外拒绝(bmp 等)。
+    #[test]
+    fn prompt_blocks_reject_bad_mime() {
+        let images = vec![img("QUJD", "image/bmp")];
+        let err = build_prompt_blocks("x", &images).expect_err("非白名单 MIME 必须拒绝");
+        assert!(err.contains("image/bmp"), "err={err}");
+    }
+
+    /// 全空拒绝(空文本 + 无图片)。
+    #[test]
+    fn prompt_blocks_reject_empty() {
+        assert!(build_prompt_blocks("", &[]).is_err());
     }
 }

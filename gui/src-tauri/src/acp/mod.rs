@@ -8,4 +8,4 @@
 pub mod bridge;
 pub mod jsonrpc;
 
-pub use bridge::{AcpBridge, BridgeEvent, reconnect};
+pub use bridge::{AcpBridge, BridgeEvent, ImagePayload, reconnect};

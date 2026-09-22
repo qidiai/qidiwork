@@ -73,7 +73,7 @@ async fn initialize_new_session_and_prompt_roundtrip() {
     assert_eq!(session, "sess-1");
 
     let mut rx = bridge.subscribe();
-    bridge.prompt(&session, "你好").unwrap();
+    bridge.prompt(&session, "你好", &[]).unwrap();
     let events = collect_until_turn_completed(&mut rx, &session).await;
 
     let texts = update_texts(&events, &session);
@@ -107,7 +107,7 @@ async fn prompt_injects_office_task_directive_only_when_bound() {
         .await
         .unwrap();
     let mut rx = bridge.subscribe();
-    bridge.prompt(&bound, "登记这次产物").unwrap();
+    bridge.prompt(&bound, "登记这次产物", &[]).unwrap();
     let events = collect_until_turn_completed(&mut rx, &bound).await;
     let texts = update_texts(&events, &bound);
     assert!(
@@ -120,7 +120,7 @@ async fn prompt_injects_office_task_directive_only_when_bound() {
     // 未绑定会话:不注入,原文下发
     let unbound = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx2 = bridge.subscribe();
-    bridge.prompt(&unbound, "登记这次产物").unwrap();
+    bridge.prompt(&unbound, "登记这次产物", &[]).unwrap();
     let events2 = collect_until_turn_completed(&mut rx2, &unbound).await;
     let texts2 = update_texts(&events2, &unbound);
     assert!(
@@ -144,7 +144,7 @@ async fn permission_roundtrip_allow_and_deny() {
     let mut rx = bridge.subscribe();
 
     // allow 路径
-    bridge.prompt(&session, "需要权限:写文件").unwrap();
+    bridge.prompt(&session, "需要权限:写文件", &[]).unwrap();
     let ev = next_event(&mut rx).await;
     let BridgeEvent::PermissionRequest { request_id, .. } = ev else {
         panic!("应先收到权限请求,实际 {ev:?}");
@@ -160,7 +160,7 @@ async fn permission_roundtrip_allow_and_deny() {
     assert!(bridge.resolve_permission(request_id, "allow").is_err());
 
     // deny 路径
-    bridge.prompt(&session, "需要权限:删文件").unwrap();
+    bridge.prompt(&session, "需要权限:删文件", &[]).unwrap();
     let ev = next_event(&mut rx).await;
     let BridgeEvent::PermissionRequest { request_id, .. } = ev else {
         panic!("第二次权限请求缺失");
@@ -251,7 +251,7 @@ async fn model_state_flows_and_hot_switch() {
     assert_eq!(state["availableModels"].as_array().unwrap().len(), 2);
 
     // 热切换:set_model 返回新状态快照,缓存同步更新
-    let after = bridge.set_model(&session, "mock-model-b").await.unwrap();
+    let after = bridge.set_model(&session, "mock-model-b", None).await.unwrap();
     assert_eq!(after["currentModelId"], "mock-model-b");
     assert_eq!(
         bridge.model_state(&session).unwrap()["currentModelId"],
@@ -299,7 +299,7 @@ async fn resolve_rejects_unknown_option_but_keeps_entry() {
     let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx = bridge.subscribe();
 
-    bridge.prompt(&session, "需要权限:写文件").unwrap();
+    bridge.prompt(&session, "需要权限:写文件", &[]).unwrap();
     let ev = next_event(&mut rx).await;
     let BridgeEvent::PermissionRequest { request_id, .. } = ev else {
         panic!("应收到权限请求");
@@ -325,7 +325,7 @@ async fn cancel_permission_completes_roundtrip_once() {
     let session = bridge.new_session(PathBuf::from("."), None).await.unwrap();
     let mut rx = bridge.subscribe();
 
-    bridge.prompt(&session, "需要权限:操作").unwrap();
+    bridge.prompt(&session, "需要权限:操作", &[]).unwrap();
     let ev = next_event(&mut rx).await;
     let BridgeEvent::PermissionRequest { request_id, .. } = ev else {
         panic!("应收到权限请求");

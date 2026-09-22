@@ -40,10 +40,20 @@ export interface ChatMessage {
   replay?: boolean;
 }
 
+/** 随消息下发的图片附件(base64 无前缀 + MIME;与 bridge ImagePayload 对齐)。 */
+export interface PromptImage {
+  /** base64 编码(无 `data:<mime>;base64,` 前缀)。 */
+  data: string;
+  /** MIME 类型(image/png | image/jpeg | image/webp | image/gif)。 */
+  mimeType: string;
+}
+
 /** 排队中的用户消息(回合进行中提交,回合结束自动续跑)。 */
 export interface QueuedMessage {
   id: number;
   text: string;
+  /** 随消息排队的图片附件(有图时一并续跑,避免静默丢弃)。 */
+  images?: PromptImage[];
 }
 
 export interface PermissionState {
@@ -79,10 +89,75 @@ interface AcpEvent {
   dropped?: number;
 }
 
+/** 思考强度档位(内核 meta.reasoningEfforts 单元素;id=菜单键,value=线上规范值)。 */
+export interface ModelEffortOption {
+  id: string;
+  value: string;
+  label: string;
+  description?: string;
+  default?: boolean;
+}
+
+/** 可选模型(内核 SessionModelState.availableModels 单元素 + 扩展 meta)。 */
+export interface ModelInfo {
+  modelId: string;
+  name: string;
+  /** 内核 meta.supportsReasoningEffort(缺省 false)。 */
+  supportsReasoningEffort: boolean;
+  /** 内核 meta.reasoningEfforts(档位菜单;空数组=不支持/未提供)。 */
+  reasoningEfforts: ModelEffortOption[];
+  /** 内核 meta.reasoningEffort(当前档位;"" = 未设置)。 */
+  reasoningEffort: string;
+}
+
 /** 会话模型状态(session/new|load 应答的 models 字段,内核原样)。 */
 export interface ModelState {
   currentModelId: string;
-  availableModels: { modelId: string; name: string }[];
+  availableModels: ModelInfo[];
+}
+
+/** 解析单个档位选项(内核序列化为对象;兼容 bare canonical string 形态)。 */
+function parseEffortOption(raw: unknown): ModelEffortOption | null {
+  if (typeof raw === "string") {
+    return raw ? { id: raw, value: raw, label: raw } : null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as {
+    id?: unknown;
+    value?: unknown;
+    label?: unknown;
+    description?: unknown;
+    default?: unknown;
+  };
+  const value = typeof o.value === "string" ? o.value : "";
+  if (!value) return null;
+  const id = typeof o.id === "string" && o.id ? o.id : value;
+  const label = typeof o.label === "string" && o.label ? o.label : id;
+  const opt: ModelEffortOption = { id, value, label };
+  if (typeof o.description === "string") opt.description = o.description;
+  if (o.default === true) opt.default = true;
+  return opt;
+}
+
+/** 解析单个模型(含内核扩展 meta:ACP `ModelInfo.meta` 线上键为 `_meta`)。 */
+function parseModelInfo(raw: unknown): ModelInfo {
+  const mm = (raw ?? {}) as { modelId?: unknown; name?: unknown; _meta?: unknown };
+  const modelId = String(mm.modelId ?? "");
+  const name = typeof mm.name === "string" && mm.name ? mm.name : modelId;
+  const meta =
+    mm._meta && typeof mm._meta === "object" ? (mm._meta as Record<string, unknown>) : {};
+  const reasoningEfforts = Array.isArray(meta.reasoningEfforts)
+    ? meta.reasoningEfforts
+        .map(parseEffortOption)
+        .filter((o): o is ModelEffortOption => !!o)
+    : [];
+  return {
+    modelId,
+    name,
+    supportsReasoningEffort: meta.supportsReasoningEffort === true,
+    reasoningEfforts,
+    reasoningEffort: typeof meta.reasoningEffort === "string" ? meta.reasoningEffort : "",
+  };
 }
 
 /** 宽松解析内核模型状态(字段缺失/形态异常一律降级为 null,不抛错)。 */
@@ -91,15 +166,7 @@ export function parseModelState(v: unknown): ModelState | null {
   const o = v as { currentModelId?: unknown; availableModels?: unknown };
   const current = typeof o.currentModelId === "string" ? o.currentModelId : "";
   const available = Array.isArray(o.availableModels)
-    ? o.availableModels
-        .map((m) => {
-          const mm = (m ?? {}) as { modelId?: unknown; name?: unknown };
-          return {
-            modelId: String(mm.modelId ?? ""),
-            name: typeof mm.name === "string" && mm.name ? mm.name : String(mm.modelId ?? ""),
-          };
-        })
-        .filter((m) => m.modelId)
+    ? o.availableModels.map(parseModelInfo).filter((m) => m.modelId)
     : [];
   if (!current && !available.length) return null;
   return { currentModelId: current, availableModels: available };
@@ -660,26 +727,32 @@ function drain(bucket: SessionBucket): void {
   if (bucket.busy) return;
   const next = bucket.queue.shift();
   if (!next) return;
-  void doSend(bucket, next.text);
+  void doSend(bucket, next.text, next.images ?? []);
 }
 
 /** 实际下发一条 prompt(前置:该会话空闲)。失败时置闲并提示,队列
  * 不自动续跑(下发失败通常是连接问题,续跑会连环失败刷屏)。 */
-async function doSend(bucket: SessionBucket, text: string): Promise<void> {
+async function doSend(
+  bucket: SessionBucket,
+  text: string,
+  images: PromptImage[] = [],
+): Promise<void> {
+  // 无文本仅有图片时,转录区占位显示已发送图片数(避免空气泡)
+  const display = text || (images.length ? `📎 已发送 ${images.length} 张图片` : "");
   bucket.messages.push({
     id: ++messageId,
     role: "user",
-    content: text,
+    content: display,
     toolCalls: [],
     done: true,
   });
   bucket.busy = true;
   try {
-    await invoke("session_prompt", { sessionId: bucket.id, text });
+    await invoke("session_prompt", { sessionId: bucket.id, text, images });
     // 首条 prompt 截断记为会话标题(失败不影响任务下发)
     if (!bucket.titleRecorded) {
       bucket.titleRecorded = true;
-      bucket.title = Array.from(text).slice(0, 40).join("");
+      bucket.title = Array.from(text || display).slice(0, 40).join("");
       // 标题按字符截断,避免 emoji 代理对被切半(k3 审计次要项)
       void invoke("session_set_title", {
         sessionId: bucket.id,
@@ -776,11 +849,29 @@ export async function setModel(modelId: string): Promise<void> {
   }
 }
 
+/** 设置当前模型的思考强度档位(内核经 `_meta.reasoningEffort` 落库,后续回合生效)。
+ * 与切换模型同一 RPC(session/set_model),仅多带 effort;结果写回本桶并系统提示。 */
+export async function setEffort(effort: string): Promise<void> {
+  const bucket = activeBucket();
+  const modelId = bucket?.modelState?.currentModelId;
+  if (!bucket || !modelId) return;
+  try {
+    const st = parseModelState(
+      await invoke("session_set_model", { sessionId: bucket.id, modelId, effort }),
+    );
+    if (st) bucket.modelState = st;
+    pushBucketSystem(bucket, `思考强度已设为「${effort}」,本会话后续回合生效。`);
+  } catch (e) {
+    pushBucketSystem(bucket, `思考强度设置失败:${String(e)}`);
+  }
+}
+
 /** 发送一条任务;无会话或已断线时自动开启(断线重发=重连,原契约);
- * 回合进行中进队列(qidicode 语义)。 */
-export async function sendTask(text: string): Promise<void> {
+ * 回合进行中进队列(qidicode 语义)。`images` 为随消息下发的图片附件
+ * (无图传空数组);纯文本调用向后兼容(sendTask("…"))。 */
+export async function sendTask(text: string, images: PromptImage[] = []): Promise<void> {
   const trimmed = text.trim();
-  if (!trimmed) return;
+  if (!trimmed && !images.length) return;
   if (!connected.value || !activeBucket()) {
     try {
       await startSession();
@@ -792,10 +883,10 @@ export async function sendTask(text: string): Promise<void> {
   const bucket = activeBucket();
   if (!bucket) return;
   if (bucket.busy) {
-    bucket.queue.push({ id: ++messageId, text: trimmed });
+    bucket.queue.push({ id: ++messageId, text: trimmed, images });
     return;
   }
-  await doSend(bucket, trimmed);
+  await doSend(bucket, trimmed, images);
 }
 
 export async function cancelTurn(): Promise<void> {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, defineAsyncComponent } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { setModel, useAgentState, recoverAgent, startSession } from "../composables/useAgent";
+import { setModel, setEffort, useAgentState, recoverAgent, startSession, type ModelInfo } from "../composables/useAgent";
 import { useAuth } from "../composables/useAuth";
 import { fmtTokens, fmtCost } from "../services/usage";
 // 设置弹窗按需加载,不进首屏 chunk
@@ -10,6 +10,7 @@ const SettingsModal = defineAsyncComponent(() => import("./SettingsModal.vue"));
 // 底部状态栏:内核连接状态(由 acp-event 驱动)+ 版本号(IPC 冒烟)。
 const { connected, sessionId, sessionUsage, modelState } = useAgentState();
 const switchingModel = ref(false);
+const switchingEffort = ref(false);
 const { status: auth, refresh: refreshAuth } = useAuth();
 const guiVersion = ref("…");
 const ipcOk = ref(false);
@@ -50,6 +51,37 @@ const modelLabel = computed(() => {
 const canSwitchModel = computed(
   () => connected.value && (modelState.value?.availableModels.length ?? 0) > 0,
 );
+
+// 当前模型(带内核扩展 meta:思考强度支持标记 + 档位清单/当前值)。
+const currentModel = computed<ModelInfo | null>(() => {
+  const st = modelState.value;
+  if (!st) return null;
+  return st.availableModels.find((m) => m.modelId === st.currentModelId) ?? null;
+});
+
+// 思考强度下拉:仅当当前模型声明 supportsReasoningEffort 且有档位清单时显示;
+// 旧内核/不支持时隐藏(与模型下拉同一降级逻辑)。
+const canSwitchEffort = computed(
+  () =>
+    connected.value &&
+    !!currentModel.value?.supportsReasoningEffort &&
+    (currentModel.value?.reasoningEfforts.length ?? 0) > 0,
+);
+
+// 当前档位(内核 meta.reasoningEffort;与档位清单的 value 同为规范值,可精确匹配)。
+const currentEffort = computed(() => currentModel.value?.reasoningEffort ?? "");
+
+async function onEffortPick(e: Event): Promise<void> {
+  const sel = e.target as HTMLSelectElement;
+  const effort = sel.value;
+  if (!effort || effort === currentEffort.value) return;
+  switchingEffort.value = true;
+  try {
+    await setEffort(effort);
+  } finally {
+    switchingEffort.value = false;
+  }
+}
 
 async function onModelPick(e: Event): Promise<void> {
   const sel = e.target as HTMLSelectElement;
@@ -115,6 +147,19 @@ onMounted(async () => {
       </option>
     </select>
     <span v-else-if="modelLabel" class="status-item muted" title="当前模型(内核上报)">{{ modelLabel }}</span>
+    <select
+      v-if="canSwitchEffort && currentModel"
+      class="model-select"
+      :value="currentEffort"
+      :disabled="switchingEffort"
+      title="思考强度(点击切换,后续回合生效)"
+      @change="onEffortPick"
+    >
+      <option v-if="!currentEffort" value="" disabled>强度</option>
+      <option v-for="opt in currentModel.reasoningEfforts" :key="opt.id" :value="opt.value">
+        {{ opt.label }}
+      </option>
+    </select>
     <span class="spacer"></span>
     <button
       class="link-btn"

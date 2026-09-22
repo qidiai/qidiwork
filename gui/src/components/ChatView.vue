@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, computed } from "vue";
-import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, loadEarlierMessages, replayNeedsConfirm, type ToolCallItem } from "../composables/useAgent";
+import { useAgentState, sendTask, cancelTurn, flushQueueNow, removeQueued, initAgent, loadEarlierMessages, replayNeedsConfirm, type ToolCallItem, type PromptImage } from "../composables/useAgent";
 import { handleLinkClick } from "../services/render";
 import { fmtTokens, fmtCost } from "../services/usage";
 import MarkdownBlock from "./MarkdownBlock.vue";
@@ -9,6 +9,128 @@ import ToolRaw from "./ToolRaw.vue";
 const { messages, connected, turnInProgress, permission, queued, replay } = useAgentState();
 const draft = ref("");
 const msgBox = ref<HTMLElement | null>(null);
+
+// ---------------------------------------------------------- 图片附件(P1-2) --
+// 待发图片:📎 按钮 / 粘贴 / 拖拽三路汇入同一队列;base64(去前缀)+ 缩略图。
+// 单张 ≤ 10MB 与 MIME 白名单前端先校验(与 bridge 侧一致),不合规即时提示。
+interface PendingImage {
+  id: number;
+  name: string;
+  mimeType: string;
+  /** base64 无前缀(下发给内核) */
+  data: string;
+  /** data URL(仅用于缩略图预览) */
+  preview: string;
+}
+
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const ALLOWED_IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const pendingImages = ref<PendingImage[]>([]);
+const attachError = ref("");
+const fileInput = ref<HTMLInputElement | null>(null);
+const dragging = ref(false);
+let pendingImageId = 0;
+// 拖拽进入/离开的深度计数:子元素间移动也会触发 leave,计数归零才算真正离开
+let dragDepth = 0;
+
+function readAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function addFiles(files: FileList | File[]): Promise<void> {
+  attachError.value = "";
+  for (const file of Array.from(files)) {
+    if (!file.type.startsWith("image/")) continue;
+    if (!ALLOWED_IMAGE_MIMES.includes(file.type)) {
+      attachError.value = `不支持的图片类型 ${file.type || file.name}:仅支持 PNG/JPEG/WebP/GIF`;
+      continue;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      attachError.value = `图片「${file.name || "未命名"}」超过 10MB 上限,已跳过`;
+      continue;
+    }
+    try {
+      const dataUrl = await readAsDataURL(file);
+      const comma = dataUrl.indexOf(",");
+      if (comma < 0) continue;
+      const header = dataUrl.slice(0, comma); // data:image/png;base64
+      const data = dataUrl.slice(comma + 1);
+      const mimeType = /^data:([^;]+);base64$/.exec(header)?.[1] || file.type || "image/png";
+      pendingImages.value.push({
+        id: ++pendingImageId,
+        name: file.name || "image",
+        mimeType,
+        data,
+        preview: dataUrl,
+      });
+    } catch (e) {
+      attachError.value = `图片读取失败:${String(e)}`;
+    }
+  }
+}
+
+function removeImage(id: number): void {
+  pendingImages.value = pendingImages.value.filter((p) => p.id !== id);
+}
+
+function pickFiles(): void {
+  fileInput.value?.click();
+}
+
+function onFileChange(e: Event): void {
+  const input = e.target as HTMLInputElement;
+  if (input.files?.length) void addFiles(input.files);
+  input.value = ""; // 复位:允许重复选择同一文件
+}
+
+// 粘贴图片(clipboardData.items)
+function onPaste(e: ClipboardEvent): void {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files: File[] = [];
+  for (const item of items) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const f = item.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length) {
+    e.preventDefault();
+    void addFiles(files);
+  }
+}
+
+// 拖拽图片入聊天区
+function onDragEnter(e: DragEvent): void {
+  if (!e.dataTransfer?.types.includes("Files")) return;
+  e.preventDefault();
+  dragDepth += 1;
+  dragging.value = true;
+}
+
+function onDragOver(e: DragEvent): void {
+  if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+}
+
+function onDragLeave(): void {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) dragging.value = false;
+}
+
+function onDrop(e: DragEvent): void {
+  dragDepth = 0;
+  dragging.value = false;
+  const files = e.dataTransfer?.files;
+  if (files?.length) {
+    e.preventDefault();
+    void addFiles(files);
+  }
+}
 
 // 回放折叠横幅「加载全部」:大会话(>10MB)先确认再拉齐全部历史。
 async function onLoadAll(): Promise<void> {
@@ -105,15 +227,21 @@ function statusLabel(status: string): string {
 
 async function send() {
   const text = draft.value.trim();
-  if (!text) {
+  const images: PromptImage[] = pendingImages.value.map((p) => ({
+    data: p.data,
+    mimeType: p.mimeType,
+  }));
+  if (!text && !images.length) {
     // 两次 Enter 语义(qidicode):运行中空输入按 Enter = 取消当前回合,
     // 排队消息立即续跑
     if (queued.value.length) flushQueueNow();
     return;
   }
   draft.value = "";
+  pendingImages.value = [];
+  attachError.value = "";
   // 回合进行中 sendTask 自动排队(回合结束 FIFO 续跑),不再禁止输入
-  await sendTask(text);
+  await sendTask(text, images);
   await scrollToBottom();
 }
 
@@ -141,7 +269,15 @@ void initAgent();
 </script>
 
 <template>
-  <div class="chat-view">
+  <div
+    class="chat-view"
+    :class="{ dragging }"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
+    <div v-if="dragging" class="drop-hint">松开以添加图片</div>
     <div ref="msgBox" class="chat-scroll" @click="onMsgClick" @scroll.passive>
       <!-- 回放折叠横幅:更早消息未加载时显示(需要时一次拉齐) -->
       <div
@@ -293,7 +429,7 @@ void initAgent();
       <div v-for="q in queued" :key="q.id" class="msg-row user">
         <span class="msg-badge queued-badge">排队</span>
         <div class="msg-body">
-          <div class="msg-content user-text">{{ q.text }}</div>
+          <div class="msg-content user-text">{{ q.text || (q.images?.length ? `📎 ${q.images.length} 张图片` : "") }}</div>
           <div class="queued-actions">
             <button
               class="queued-btn"
@@ -306,13 +442,37 @@ void initAgent();
       </div>
     </div>
 
+    <div v-if="pendingImages.length || attachError" class="attach-tray">
+      <div v-if="pendingImages.length" class="attach-thumbs">
+        <div v-for="img in pendingImages" :key="img.id" class="attach-thumb">
+          <img :src="img.preview" :alt="img.name" :title="img.name" />
+          <button class="attach-remove" type="button" title="移除" @click="removeImage(img.id)">×</button>
+        </div>
+      </div>
+      <div v-if="attachError" class="attach-error">{{ attachError }}</div>
+    </div>
     <div class="composer">
+      <input
+        ref="fileInput"
+        type="file"
+        accept="image/*"
+        multiple
+        class="file-input"
+        @change="onFileChange"
+      />
+      <button
+        class="attach-btn"
+        type="button"
+        title="添加图片(PNG/JPEG/WebP/GIF,单张 ≤10MB;也可粘贴或拖拽)"
+        @click="pickFiles"
+      >📎</button>
       <textarea
         v-model="draft"
         class="composer-input"
         rows="2"
         :placeholder="placeholder"
         :disabled="!!permission"
+        @paste="onPaste"
         @keydown.enter.exact="onEnterKey"
         @keydown.ctrl.enter.prevent="send"
         @keydown.meta.enter.prevent="send"
@@ -327,7 +487,7 @@ void initAgent();
       </button>
       <button
         class="composer-send"
-        :disabled="!draft.trim() || !!permission"
+        :disabled="(!draft.trim() && !pendingImages.length) || !!permission"
         @click="send"
       >
         {{ turnInProgress ? "排队" : "发送" }}
@@ -342,6 +502,7 @@ void initAgent();
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .chat-scroll {
@@ -716,5 +877,98 @@ void initAgent();
 
 .composer-send.cancel {
   background: var(--danger);
+}
+
+/* 图片附件(P1-2):隐藏的原生 file input + 📎 触发按钮 */
+.file-input {
+  display: none;
+}
+
+.attach-btn {
+  align-self: flex-end;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  font-size: var(--font-size-base);
+  cursor: pointer;
+}
+
+.attach-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+/* 待发图片托盘:缩略图(≤96px 高)+ 移除按钮 + 校验提示 */
+.attach-tray {
+  padding: 8px 16px 0;
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attach-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attach-thumb {
+  position: relative;
+  height: 96px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+.attach-thumb img {
+  height: 100%;
+  max-width: 160px;
+  object-fit: contain;
+  display: block;
+}
+
+.attach-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.attach-remove:hover {
+  background: var(--danger);
+}
+
+.attach-error {
+  font-size: var(--font-size-sm);
+  color: var(--danger);
+}
+
+/* 拖拽图片时的整窗高亮提示 */
+.drop-hint {
+  position: absolute;
+  inset: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--font-size-base);
+  pointer-events: none;
 }
 </style>

@@ -2,8 +2,9 @@
 // 事件契约来自 commands.rs:acp-event(BridgeEvent,serde tag=type)/ agent-exit。
 // 可靠性分层(k3 审计 W3 厘清):传输层→桥入站为可靠 mpsc 单消费者,
 // 协议帧不丢;桥→前端是 broadcast 展示流,转发任务滞后超 EVENT_CAPACITY
-// 会 Lagged 丢帧(Rust 侧记日志)——丢 TurnUsage 仅缺用量 chip,丢
-// TurnCompleted 会 busy 卡住,用户可用「中止」恢复。
+// 会 Lagged 丢帧(Rust 侧记日志并回灌 queue_lagged)——丢 TurnUsage 仅缺
+// 用量 chip,丢 TurnCompleted 会 busy 卡住,收到 queue_lagged 时提示用户
+// 「状态可能不同步」,用户可用「中止」恢复。
 //
 // 多会话分桶(2026-09-12):每会话独立 messages/busy/queue,事件按
 // session_id 路由到桶,后台会话的流式更新不丢。回合进行中仍可输入:
@@ -74,6 +75,8 @@ interface AcpEvent {
   meta?: unknown;
   /** model_state 事件:内核 SessionModelState 原样透传(桥层) */
   state?: unknown;
+  /** queue_lagged 事件:展示流拥堵时丢弃的帧数(桥层回灌) */
+  dropped?: number;
 }
 
 /** 会话模型状态(session/new|load 应答的 models 字段,内核原样)。 */
@@ -626,6 +629,22 @@ async function onAcpEvent(ev: AcpEvent) {
       const text = `会话 ${ev.session_id} 恢复失败:${ev.error ?? "未知原因"}`;
       if (bucket) pushBucketSystem(bucket, text);
       else pushSystem(text);
+      break;
+    }
+    case "queue_lagged": {
+      // 展示流拥堵(桥转发任务滞后超容量丢帧,P0-2):丢 TurnUsage 仅缺用量
+      // chip,丢 TurnCompleted 会让 busy 卡住。对正在跑的会话给系统提示。
+      // 不做自动探活(ACP 无 status RPC,方案审计裁决);用户可用现有「中止」
+      // 恢复(按钮在 busy 时即显示,无需额外接线)。
+      const text = "⚠ 事件流拥堵，任务状态可能不同步";
+      const busyBuckets = Object.values(buckets.value).filter(
+        (b) => b.busy && b.id !== "",
+      );
+      if (busyBuckets.length) {
+        for (const b of busyBuckets) pushBucketSystem(b, text);
+      } else {
+        pushSystem(text);
+      }
       break;
     }
   }

@@ -29,7 +29,11 @@ use crate::transport::{AgentTransport, ExitInfo, TransportError};
 /// 单个 RPC 的默认超时。session/prompt 的回合可能跑很久,单独放宽。
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const EVENT_CAPACITY: usize = 256;
+/// 展示流(桥 → 前端转发任务)的 broadcast 容量。256 在长回合密集
+/// session/update 下易被追平 → Lagged 丢帧,最坏丢 TurnCompleted 使
+/// 前端 busy 永久卡住(见 useAgent.ts 头部注释)。提到 1024 降低触发
+/// 概率;残余丢帧仍由 QueueLagged 告警兜底。
+const EVENT_CAPACITY: usize = 1024;
 
 /// 桥事件(转发给前端 / 测试断言)。
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +86,13 @@ pub enum BridgeEvent {
     SessionRestoreFailed {
         session_id: String,
         error: String,
+    },
+    /// 展示流拥堵告警:桥 → 前端的转发任务订阅滞后超过 [`EVENT_CAPACITY`]
+    /// 而丢帧(`RecvError::Lagged`)。由转发任务回灌进 broadcast 再透传给
+    /// 前端;前端据此提示「任务状态可能不同步」,不做自动探活(ACP 无
+    /// status RPC,方案审计裁决)。无 session_id:拥堵是桥级现象。
+    QueueLagged {
+        dropped: u64,
     },
 }
 
@@ -150,6 +161,34 @@ fn with_office_task_meta(
         );
     }
     params
+}
+
+/// `initialize` 请求参数(握手 + 客户端能力 + 扩展 `_meta`)。
+///
+/// `_meta.bufferingSettings`:内核仅在客户端 initialize 传入此项时才启用
+/// chunk 合并——`acp_agent.rs` 读 `arguments.meta.bufferingSettings`(缺省即
+/// "Buffering disabled: always send immediately")。wire 键名**必须 `_meta`**:
+/// 第三方 schema crate 全局 `#[serde(rename = "_meta")]`,顶层未知字段会被
+/// 静默丢弃(`session/new` 的 office_task 探针已实证此坑)。字段 camelCase
+/// `maxItems`/`maxBytes`/`maxDurationMs`——对应
+/// `update_chunk_merge::BufferingSettings`(`#[serde(rename_all = "camelCase")]`,
+/// 默认 100/2048/10)。显式传值 = 与内核默认一致,激活合并同时固定行为。
+/// 与 `clientCapabilities` 平级;未声明 fs / terminal 能力:agent 的文件
+/// 操作走其自有工具(GUI 不经 ACP 提供客户端文件访问,缩小攻击面,方案 v2 §D4)。
+fn initialize_params() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": ACP_PROTOCOL_VERSION,
+        "clientCapabilities": {
+            // 未声明 fs / terminal 能力(见上)
+        },
+        "_meta": {
+            "bufferingSettings": {
+                "maxItems": 100,
+                "maxBytes": 2048,
+                "maxDurationMs": 10
+            }
+        }
+    })
 }
 
 impl AcpBridge {
@@ -491,13 +530,7 @@ impl AcpBridge {
 
     /// 协议握手 + 版本协商(k3 M3 审计 §4:agent 升级协议属静默错误源)。
     async fn initialize(&self) -> Result<serde_json::Value, String> {
-        let params = serde_json::json!({
-            "protocolVersion": ACP_PROTOCOL_VERSION,
-            "clientCapabilities": {
-                // 未声明 fs / terminal 能力:agent 的文件操作走其自有工具
-                // (GUI 不经 ACP 提供客户端文件访问,缩小攻击面,方案 v2 §D4)
-            }
-        });
+        let params = initialize_params();
         let result = self.rpc("initialize", params, RPC_TIMEOUT).await?;
         let version = result.get("protocolVersion").and_then(|v| v.as_u64());
         if version != Some(ACP_PROTOCOL_VERSION as u64) {
@@ -596,6 +629,14 @@ impl AcpBridge {
             session_id: session_id.to_string(),
             error: error.to_string(),
         });
+    }
+
+    /// 展示流拥堵告警回灌(转发任务遇 `RecvError::Lagged` 时调用):把
+    /// [`BridgeEvent::QueueLagged`] 发进同一 broadcast,下一轮被转发任务
+    /// 取出并透传给前端。`broadcast::Sender::send` 非阻塞(容量满只丢最旧
+    /// 帧、不阻塞、不借出 receiver),故无死锁风险。
+    pub fn notify_queue_lagged(&self, dropped: u64) {
+        let _ = self.event_tx.send(BridgeEvent::QueueLagged { dropped });
     }
 
     /// 会话绑定的办公任务工作区名(未登记/未绑定 → None)。
@@ -858,5 +899,35 @@ mod tests {
         );
         assert_eq!(params["_meta"]["keep"], serde_json::json!(1));
         assert_eq!(params["_meta"]["office_task"], serde_json::json!("周报"));
+    }
+
+    /// P0-1:initialize params 携带 `_meta.bufferingSettings`(激活内核 chunk
+    /// 合并;camelCase 三键齐全,平级于 clientCapabilities 而非顶层)。
+    #[test]
+    fn initialize_params_activate_buffering() {
+        let params = initialize_params();
+        // wire 键名必须是 `_meta`(顶层未知字段会被内核静默丢弃)
+        let bs = &params["_meta"]["bufferingSettings"];
+        assert_eq!(bs["maxItems"], serde_json::json!(100), "params={params}");
+        assert_eq!(bs["maxBytes"], serde_json::json!(2048), "params={params}");
+        assert_eq!(bs["maxDurationMs"], serde_json::json!(10), "params={params}");
+        // 与 clientCapabilities 平级,且 protocolVersion 仍在顶层
+        assert_eq!(
+            params["protocolVersion"],
+            serde_json::json!(ACP_PROTOCOL_VERSION)
+        );
+        assert!(params.get("clientCapabilities").is_some());
+        // bufferingSettings 不得落在顶层(内核只认 _meta 通道)
+        assert!(
+            params.get("bufferingSettings").is_none(),
+            "顶层不得出现 bufferingSettings: {params}"
+        );
+    }
+
+    /// P0-2:QueueLagged 的 serde 形状(前端按 `type` tag + `dropped` 解析)。
+    #[test]
+    fn queue_lagged_serializes_to_type_tag() {
+        let v = serde_json::to_value(BridgeEvent::QueueLagged { dropped: 7 }).unwrap();
+        assert_eq!(v, serde_json::json!({"type": "queue_lagged", "dropped": 7}));
     }
 }

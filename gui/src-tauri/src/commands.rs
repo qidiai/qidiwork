@@ -171,6 +171,10 @@ async fn ensure_bridge(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(dropped = n, "acp-event 订阅滞后");
+                    // 丢帧可能吞掉 TurnCompleted → 前端 busy 卡住(P0-2)。
+                    // 回灌 QueueLagged 进同一 broadcast,下一轮被本任务转发给
+                    // 前端提示「状态可能不同步」。broadcast::send 非阻塞,无死锁。
+                    event_bridge.notify_queue_lagged(n);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -413,6 +417,8 @@ pub async fn agent_recover(
                     // TurnUsage/TurnCompleted,后者会让 busy 卡住——记日志
                     // 便于与"任务卡住"类用户报告对账
                     tracing::warn!(dropped = n, "recover 桥 acp-event 订阅滞后");
+                    // 同 ensure_bridge:回灌 QueueLagged 提示前端状态可能不同步
+                    event_bridge.notify_queue_lagged(n);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

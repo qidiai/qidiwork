@@ -12,6 +12,7 @@ pub mod logging;
 #[cfg(any(test, debug_assertions))]
 pub mod mock_agent; // 生产 release 不暴露 --mock-agent 分支(缩小暴露面)
 pub mod office;
+pub mod onboarding;
 pub mod persist;
 pub mod process;
 pub mod settings;
@@ -73,6 +74,10 @@ pub fn run() -> i32 {
             auth::auth_status,
             auth::auth_login,
             auth::auth_logout,
+            onboarding::server_models,
+            onboarding::check_onboarding_auth,
+            onboarding::onboarding_marker_read,
+            onboarding::onboarding_marker_write,
             updater::check_gui_update,
             diag::export_diag
         ])

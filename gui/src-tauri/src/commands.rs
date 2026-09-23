@@ -14,13 +14,13 @@
 //! "跨 spawn 全程持锁但锁内不取另一把"。改动任何启动/恢复路径前先核对本约束。M2 的行级命令
 //! (`agent_send`/`agent-line`)已由 ACP 桥取代,移除。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::acp::{AcpBridge, ImagePayload, reconnect};
+use crate::acp::{AcpBridge, BridgeEvent, ImagePayload, reconnect};
 use crate::office::{self, ArtifactCard, WorkspaceInfo, watch::ManifestWatch};
 use crate::persist::{self, PersistedSession};
 use crate::process::{AgentProcess, SpawnConfig};
@@ -165,6 +165,17 @@ async fn ensure_bridge(
             }
             match rx.recv().await {
                 Ok(event) => {
+                    if let BridgeEvent::TurnCompleted { session_id, .. } = &event {
+                        // Turn-terminal linkage (permission fix 2, trigger B):
+                        // a permission request still pending when its turn ends
+                        // can never be answered. Drop it from the pending table
+                        // and report it as PermissionCancelled so the frontend
+                        // closes the dialog and clears a stuck busy flag.
+                        // The injected event is picked up by this very loop on a
+                        // later iteration, so it reaches the frontend after the
+                        // turn-terminal event (order preserved).
+                        event_bridge.expire_permissions_for_session(session_id, "turn_ended");
+                    }
                     if let Ok(payload) = serde_json::to_value(&event) {
                         let _ = event_app.emit("acp-event", payload);
                     }
@@ -220,8 +231,103 @@ pub async fn agent_status(state: State<'_, AgentState>) -> Result<AgentStatusInf
     Ok(status_of(guard.as_ref()))
 }
 
+/// 默认工作区目录名:cwd 未指定时,内核会话落到 `<home>/Documents/<此名>`。
+/// 前端 useAgent.ts 的 `DEFAULT_WORKSPACE_NAME` 与之对齐(默认会话的绑定工作区名)。
+const DEFAULT_WORKSPACE_DIR: &str = "QidiWork";
+
+/// 用户主目录兜底解析(无新增依赖):Windows 取 `USERPROFILE`,类 Unix 取 `HOME`,
+/// 少数环境仅有 `HOMEDRIVE`+`HOMEPATH`。
+/// 首选仍走 tauri 的 `app.path().home_dir()`(与本文件其余办公路径同一来源),
+/// 仅在其失败时回退到这里。
+fn home_dir_from_env() -> Option<PathBuf> {
+    for key in ["USERPROFILE", "HOME"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(PathBuf::from(v));
+            }
+        }
+    }
+    match (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        (Ok(d), Ok(p)) if !d.trim().is_empty() && !p.trim().is_empty() => {
+            Some(PathBuf::from(format!("{}{}", d.trim(), p.trim())))
+        }
+        _ => None,
+    }
+}
+
+/// 会话工作目录解析结果(见 [`resolve_session_cwd`])。
+struct ResolvedSessionCwd {
+    /// 实际下发给 session/new 的目录。
+    path: PathBuf,
+    /// cwd 未显式指定,走的是默认工作区。
+    default_workspace: bool,
+    /// 默认工作区创建失败,已回退 `%TEMP%\QidiWork`(需向用户报告)。
+    fallback_to_temp: bool,
+}
+
+/// 解析会话工作目录:显式 cwd(去空白后非空)原样使用;否则生成默认工作区
+/// `<home>/Documents/QidiWork` 并 `create_dir_all`。主目录缺失或创建失败时
+/// 回退 `%TEMP%\QidiWork`(`fallback_to_temp = true`)。
+///
+/// 内核契约(cf-shell `agent/mvp_agent/acp_agent.rs::new_session`):`session/new`
+/// 的 `cwd` 必填且**必须绝对**——`AbsPathBuf::new` 对相对/空路径报 `invalid_params`。
+/// 故这里绝不回退到 `"."`(旧代码在主目录解析失败时会这样做,会被内核拒绝)。
+fn resolve_session_cwd(explicit: Option<&str>, home: Option<&Path>) -> ResolvedSessionCwd {
+    if let Some(raw) = explicit {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return ResolvedSessionCwd {
+                path: PathBuf::from(trimmed),
+                default_workspace: false,
+                fallback_to_temp: false,
+            };
+        }
+    }
+    let temp_workspace = || std::env::temp_dir().join(DEFAULT_WORKSPACE_DIR);
+    let Some(home) = home else {
+        let path = temp_workspace();
+        let _ = std::fs::create_dir_all(&path);
+        return ResolvedSessionCwd {
+            path,
+            default_workspace: true,
+            fallback_to_temp: true,
+        };
+    };
+    let primary = home.join("Documents").join(DEFAULT_WORKSPACE_DIR);
+    if std::fs::create_dir_all(&primary).is_ok() {
+        return ResolvedSessionCwd {
+            path: primary,
+            default_workspace: true,
+            fallback_to_temp: false,
+        };
+    }
+    // 主路径创建失败(权限/盘符不可用等):回退 %TEMP%\QidiWork 并报告。
+    let path = temp_workspace();
+    let _ = std::fs::create_dir_all(&path);
+    ResolvedSessionCwd {
+        path,
+        default_workspace: true,
+        fallback_to_temp: true,
+    }
+}
+
+/// `session_start` 应答:实际工作目录 + 默认工作区标记(前端据此提示用户)。
+#[derive(Serialize)]
+pub struct SessionStartInfo {
+    pub session_id: String,
+    /// 实际用于本会话的 cwd(session/new 收到的绝对路径)。
+    pub cwd: String,
+    /// 是否使用了默认工作区(cwd 未显式指定)。
+    pub default_workspace: bool,
+    /// 默认工作区创建失败,已回退 `%TEMP%\QidiWork`。
+    pub fallback_to_temp: bool,
+}
+
 /// 开启(或恢复)一个 ACP 会话:确保 agent + 桥 + initialize,
-/// 然后 session/new。返回 sessionId。
+/// 然后 session/new。返回实际 sessionId 与工作目录。
+/// `cwd` 缺省/空白 → 默认工作区 `<home>/Documents/QidiWork`(零摩擦:无需
+/// 先选目录即可对话);显式 cwd 原样使用。
 /// `office_task`:绑定的办公任务工作区名(前端按当前工作区/cwd 目录名取值),
 /// 随 session/new 透传给内核并落入登记簿(续接/恢复时按它还原绑定)。
 #[tauri::command]
@@ -231,22 +337,28 @@ pub async fn session_start(
     bridge: State<'_, BridgeState>,
     cwd: Option<String>,
     office_task: Option<String>,
-) -> Result<String, String> {
+) -> Result<SessionStartInfo, String> {
     let process = ensure_agent(&app, &agent).await?;
     let bridge = ensure_bridge(&app, &process, &bridge).await?;
     bridge.ensure_initialized().await?;
-    let cwd = cwd
-        .map(PathBuf::from)
-        .or_else(|| app.path().home_dir().ok());
-    let cwd = cwd.unwrap_or_else(|| PathBuf::from("."));
+    let home = app.path().home_dir().ok().or_else(home_dir_from_env);
+    let resolved = resolve_session_cwd(cwd.as_deref(), home.as_deref());
+    if resolved.fallback_to_temp {
+        tracing::warn!(
+            dir = %resolved.path.display(),
+            "默认工作区创建失败,已回退 %TEMP%\\QidiWork"
+        );
+    }
+    let cwd = resolved.path;
     let session_id = bridge.new_session(cwd.clone(), office_task.clone()).await?;
+    let cwd_str = cwd.to_string_lossy().into_owned();
     // 会话登记落盘(k3 M3 审计登记项:GUI 重启后可续接)。
     if let Ok(dir) = app.path().app_data_dir() {
         if let Err(e) = persist::upsert_session(
             &dir,
             PersistedSession {
                 session_id: session_id.clone(),
-                cwd: cwd.to_string_lossy().into_owned(),
+                cwd: cwd_str.clone(),
                 title: None,
                 task: office_task,
             },
@@ -254,7 +366,12 @@ pub async fn session_start(
             tracing::warn!(%session_id, error = %e, "会话登记落盘失败");
         }
     }
-    Ok(session_id)
+    Ok(SessionStartInfo {
+        session_id,
+        cwd: cwd_str,
+        default_workspace: resolved.default_workspace,
+        fallback_to_temp: resolved.fallback_to_temp,
+    })
 }
 
 /// 发起回合:立即返回;流式更新与回合结束经 `acp-event` 推送。
@@ -421,6 +538,17 @@ pub async fn agent_recover(
             }
             match rx.recv().await {
                 Ok(event) => {
+                    if let BridgeEvent::TurnCompleted { session_id, .. } = &event {
+                        // Turn-terminal linkage (permission fix 2, trigger B):
+                        // a permission request still pending when its turn ends
+                        // can never be answered. Drop it from the pending table
+                        // and report it as PermissionCancelled so the frontend
+                        // closes the dialog and clears a stuck busy flag.
+                        // The injected event is picked up by this very loop on a
+                        // later iteration, so it reaches the frontend after the
+                        // turn-terminal event (order preserved).
+                        event_bridge.expire_permissions_for_session(session_id, "turn_ended");
+                    }
                     if let Ok(payload) = serde_json::to_value(&event) {
                         let _ = event_app.emit("acp-event", payload);
                     }
@@ -750,4 +878,79 @@ pub async fn office_read_file(
             _ => format!("预览读取任务失败: {e}"),
         }
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 独占的临时基目录(避免并发测试互踩);返回尚未创建的路径。
+    fn unique_temp(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("qidiwork-cmd-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// 规格核心:session_start 的 cwd=None 分支 → 创建 `<home>/Documents/QidiWork`
+    /// 并返回该路径(而非旧的 `"."` / 主目录本身)。
+    #[test]
+    fn default_cwd_creates_documents_workspace_and_returns_path() {
+        let home = unique_temp("home");
+        let resolved = resolve_session_cwd(None, Some(&home));
+        assert!(resolved.default_workspace, "cwd=None 应判定为默认工作区");
+        assert!(!resolved.fallback_to_temp, "正常主目录不应回退 TEMP");
+        assert_eq!(
+            resolved.path,
+            home.join("Documents").join(DEFAULT_WORKSPACE_DIR)
+        );
+        assert!(resolved.path.is_dir(), "默认工作区目录应被 create_dir_all 创建");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 空/纯空白 cwd 与 None 同义(前端可能传 "" 或 "  ")。
+    #[test]
+    fn blank_cwd_treated_as_default_workspace() {
+        let home = unique_temp("home-blank");
+        let resolved = resolve_session_cwd(Some("   "), Some(&home));
+        assert!(resolved.default_workspace);
+        assert!(!resolved.fallback_to_temp);
+        assert_eq!(
+            resolved.path,
+            home.join("Documents").join(DEFAULT_WORKSPACE_DIR)
+        );
+        assert!(resolved.path.is_dir());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// 显式 cwd(去首尾空白)原样使用,不创建、不标记默认。
+    #[test]
+    fn explicit_cwd_used_verbatim_and_not_marked_default() {
+        let home = unique_temp("home-explicit");
+        let resolved = resolve_session_cwd(Some("  C:\\proj\\x  "), Some(&home));
+        assert!(!resolved.default_workspace);
+        assert!(!resolved.fallback_to_temp);
+        assert_eq!(resolved.path, PathBuf::from("C:\\proj\\x"));
+    }
+
+    /// 无主目录 → 回退 `%TEMP%\QidiWork`,并置 fallback_to_temp 供前端报告。
+    #[test]
+    fn missing_home_falls_back_to_temp_workspace() {
+        let resolved = resolve_session_cwd(None, None);
+        assert!(resolved.default_workspace);
+        assert!(resolved.fallback_to_temp, "无主目录应回退 TEMP");
+        assert_eq!(
+            resolved.path,
+            std::env::temp_dir().join(DEFAULT_WORKSPACE_DIR)
+        );
+    }
+
+    /// 环境变量兜底契约:解析出的主目录(若有)必须是绝对路径——
+    /// 内核只接受绝对 cwd,相对主目录会让默认工作区被 session/new 拒绝。
+    #[test]
+    fn home_dir_from_env_is_absolute_when_present() {
+        if let Some(home) = home_dir_from_env() {
+            assert!(home.is_absolute(), "主目录应为绝对路径: {home:?}");
+        }
+    }
 }

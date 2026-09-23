@@ -54,6 +54,17 @@ pub enum BridgeEvent {
         tool_call: serde_json::Value,
         options: serde_json::Value,
     },
+    /// A pending permission request became void: either the bridge dropped its
+    /// pending table (bridge restart / agent exit) or the turn that asked for
+    /// it has ended. The frontend drops the matching permission queue entry and
+    /// clears a stuck `busy` flag, so no zombie dialog survives.
+    /// The old `request_id` is deliberately NOT re-sent: once the connection or
+    /// the turn is gone, the kernel side id is dead too (see the
+    /// pending-interaction semantics in the kernel).
+    PermissionCancelled {
+        session_id: String,
+        reason: String,
+    },
     /// agent 传输断开(崩溃/被杀)。恢复编排:`reconnect`。
     Disconnected {
         code: Option<i32>,
@@ -283,16 +294,25 @@ impl AcpBridge {
         }
         drop(pending);
         // 2) 挂起权限逐项回 cancelled(best-effort:写失败即放弃)
+        //    Trigger A (bridge restart): before the pending table is cleared,
+        //    report every entry to the frontend as PermissionCancelled. Without
+        //    it the frontend keeps stale queue entries whose ids no longer
+        //    exist in the table, so every click fails silently (zombie dialog).
+        //    The old request_id is NOT re-pushed (dead once disconnected).
         let mut permissions = self
             .permission_pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for id in permissions.keys() {
+        for (id, entry) in permissions.iter() {
             let resp = jsonrpc::success_response(
                 *id,
                 serde_json::json!({"outcome": {"outcome": "cancelled"}}),
             );
             let _ = self.transport.send(resp.to_string());
+            let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
+                session_id: entry.session_id.clone(),
+                reason: "bridge_restart".to_string(),
+            });
         }
         permissions.clear();
         drop(permissions);
@@ -480,6 +500,39 @@ impl AcpBridge {
             .remove(&request_id)
             .ok_or_else(|| format!("权限请求 {request_id} 不存在或已响应"))?;
         self.send_permission_outcome(request_id, &entry.session_id, "cancelled", None)
+    }
+
+    /// Trigger B (turn-terminal linkage), called by the event forwarding loops
+    /// in commands.rs when a turn-terminal event for `session_id` is forwarded:
+    /// drop every pending permission entry of that session and report each one
+    /// to the frontend as [`BridgeEvent::PermissionCancelled`]. Once the turn is
+    /// over the kernel cancels its own pending interactions, so those requests
+    /// can never be answered - the ids are deliberately NOT re-pushed.
+    /// No response is written back to the agent: the turn already ended.
+    /// Returns the number of dropped entries (0 = nothing to do).
+    pub fn expire_permissions_for_session(&self, session_id: &str, reason: &str) -> usize {
+        let dropped = {
+            let mut guard = self
+                .permission_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let ids: Vec<u64> = guard
+                .iter()
+                .filter(|(_, entry)| entry.session_id == session_id)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in &ids {
+                guard.remove(id);
+            }
+            ids.len()
+        };
+        for _ in 0..dropped {
+            let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
+                session_id: session_id.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+        dropped
     }
 
     fn send_permission_outcome(
@@ -1050,6 +1103,39 @@ mod tests {
     fn queue_lagged_serializes_to_type_tag() {
         let v = serde_json::to_value(BridgeEvent::QueueLagged { dropped: 7 }).unwrap();
         assert_eq!(v, serde_json::json!({"type": "queue_lagged", "dropped": 7}));
+    }
+
+    /// PermissionCancelled serde shape: the frontend parses the `type` tag plus
+    /// `session_id` / `reason`; the bridge_restart and turn_ended triggers share
+    /// this exact shape.
+    #[test]
+    fn permission_cancelled_serializes_to_type_tag() {
+        let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
+            session_id: "sess-1".to_string(),
+            reason: "bridge_restart".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "permission_cancelled",
+                "session_id": "sess-1",
+                "reason": "bridge_restart"
+            })
+        );
+    }
+
+    /// The turn_ended trigger uses the same shape with a different reason.
+    #[test]
+    fn permission_cancelled_turn_ended_reason() {
+        let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
+            session_id: "sess-2".to_string(),
+            reason: "turn_ended".to_string(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], serde_json::json!("permission_cancelled"));
+        assert_eq!(v["session_id"], serde_json::json!("sess-2"));
+        assert_eq!(v["reason"], serde_json::json!("turn_ended"));
     }
 
     fn img(data: &str, mime: &str) -> ImagePayload {

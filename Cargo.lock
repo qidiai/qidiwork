@@ -2314,7 +2314,7 @@ dependencies = [
 
 [[package]]
 name = "cf-pager"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "cf-pager-bin"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "anyhow",
  "cf-acp-lib",
@@ -2714,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "cf-shell"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3060,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "cf-tools"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "cf-update"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "anyhow",
  "cf-shell",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "cf-workspace"
-version = "0.1.220-alpha.6"
+version = "0.1.220-alpha.7"
 dependencies = [
  "agent-client-protocol",
  "anyhow",

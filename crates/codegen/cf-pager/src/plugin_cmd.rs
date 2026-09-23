@@ -10,6 +10,8 @@
 //! telemetry.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -233,6 +235,92 @@ fn trust_prompt(subject: &str, source_arg: &str) -> String {
     )
 }
 
+// ---- Marketplace network timeout ------------------------------------
+//
+// NOTE: every line added to this file must be pure ASCII. The Chinese
+// user-facing timeout text required by the spec is therefore written with
+// `\u{..}` escapes: ASCII source, UTF-8 runtime string. The unit tests below
+// pin that string byte-for-byte so the escapes cannot silently drift.
+//
+// Where the clone actually happens: `marketplace add` itself never touches the
+// network (it only appends a source to config.toml); the git clone/fetch/reset
+// lives in `cf_plugin_marketplace::git` (git2 fast path, `git` CLI fallback)
+// and is reached from this file through the marketplace source sync used by
+// `plugin list --available` and `marketplace update`. Those helpers are
+// blocking with no cancellation hook, so the timeout is applied by running
+// them on a worker thread and waiting with `recv_timeout`: on timeout the
+// worker keeps running detached, but the user gets an actionable error instead
+// of a CLI that hangs forever.
+
+/// Hard budget for one marketplace source network operation.
+const MARKETPLACE_NET_TIMEOUT_SECS: u64 = 30;
+
+/// Spec timeout text (see the ASCII note above).
+fn marketplace_timeout_message() -> String {
+    "\u{5e02}\u{573a}\u{6e90}\u{8fde}\u{63a5}\u{8d85}\u{65f6}(30s)\u{ff0c}\u{8bf7}\u{68c0}\u{67e5}\u{7f51}\u{7edc}\u{6216}\u{66f4}\u{6362}\u{56fd}\u{5185}\u{955c}\u{50cf}\u{6e90}".to_string()
+}
+
+/// How a `recv_timeout` wait failed.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    /// Budget elapsed; the worker is still running (detached).
+    TimedOut,
+    /// The worker dropped its sender without sending (panicked).
+    Aborted,
+}
+
+/// Pure mapping of a `recv_timeout` error onto [`WaitOutcome`]; free of I/O so
+/// the decision logic is unit-testable on its own.
+fn classify_wait_error(err: &RecvTimeoutError) -> WaitOutcome {
+    match err {
+        RecvTimeoutError::Timeout => WaitOutcome::TimedOut,
+        RecvTimeoutError::Disconnected => WaitOutcome::Aborted,
+    }
+}
+
+/// Run a blocking marketplace network operation on a worker thread, waiting at
+/// most `timeout`. `op` is only used to label log lines.
+fn run_marketplace_net_op_with_timeout<T, F>(
+    timeout: Duration,
+    op: &str,
+    f: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(e) => match classify_wait_error(&e) {
+            WaitOutcome::TimedOut => {
+                tracing::warn!(
+                    op,
+                    timeout_secs = timeout.as_secs(),
+                    "marketplace network op timed out"
+                );
+                Err(marketplace_timeout_message())
+            }
+            WaitOutcome::Aborted => {
+                tracing::warn!(op, "marketplace network op worker aborted");
+                Err(format!("{op}: marketplace worker aborted before returning"))
+            }
+        },
+    }
+}
+
+/// [`run_marketplace_net_op_with_timeout`] with the default budget.
+fn run_marketplace_net_op<T, F>(op: &str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    run_marketplace_net_op_with_timeout(Duration::from_secs(MARKETPLACE_NET_TIMEOUT_SECS), op, f)
+}
+
 // ── Top-level dispatch ──────────────────────────────────────────────
 
 pub async fn run(args: PluginArgs) -> Result<()> {
@@ -377,14 +465,22 @@ fn resolve_marketplace_root(
         SourceKind::Local { path } if path.is_dir() => Some((path.clone(), None)),
         SourceKind::Git { url, branch } => {
             let cache = cf_plugin_marketplace::git::default_cache_root();
-            cf_plugin_marketplace::git::sync_source_cache_with_mode(
-                url,
-                branch.as_deref(),
-                &cache,
-                cf_plugin_marketplace::git::SyncMode::UseTtl,
-            )
-            .map(|lease| (lease.path.clone(), Some(lease)))
-            .map_err(|e| tracing::warn!("failed to sync marketplace {url}: {e}"))
+            let url_owned = url.clone();
+            let branch_owned = branch.clone();
+            run_marketplace_net_op("plugin list --available source sync", move || {
+                cf_plugin_marketplace::git::sync_source_cache_with_mode(
+                    &url_owned,
+                    branch_owned.as_deref(),
+                    &cache,
+                    cf_plugin_marketplace::git::SyncMode::UseTtl,
+                )
+                .map(|lease| (lease.path.clone(), Some(lease)))
+                .map_err(|e| format!("failed to sync marketplace {url_owned}: {e}"))
+            })
+            .map_err(|e| {
+                eprintln!("marketplace source {url} sync failed: {e}");
+                tracing::warn!("failed to sync marketplace {url}: {e}");
+            })
             .ok()
         }
         _ => None,
@@ -1033,11 +1129,16 @@ fn marketplace_update_with_cache_root(
             name_matched = true;
         }
         if let SourceKind::Git { url, branch } = &source.kind {
-            match cf_plugin_marketplace::git::force_sync_source_cache(
-                url,
-                branch.as_deref(),
-                cache_root,
-            ) {
+            let url_owned = url.clone();
+            let branch_owned = branch.clone();
+            let cache_root_owned = cache_root.to_path_buf();
+            match run_marketplace_net_op("marketplace update source sync", move || {
+                cf_plugin_marketplace::git::force_sync_source_cache(
+                    &url_owned,
+                    branch_owned.as_deref(),
+                    &cache_root_owned,
+                )
+            }) {
                 Ok(_) => {
                     println!("  {}: synced", source.name);
                     refreshed += 1;
@@ -1074,6 +1175,87 @@ fn marketplace_update_with_cache_root(
 mod tests {
     use super::*;
     use cf_plugin_marketplace::MarketplaceSource;
+
+    /// Timeout text: ASCII-only source (`\u{..}` escapes) must still produce the
+    /// exact UTF-8 bytes required by the spec.
+    #[test]
+    fn marketplace_timeout_message_is_spec_text() {
+        let msg = marketplace_timeout_message();
+        let expected: Vec<u8> = vec![
+            0xE5, 0xB8, 0x82, 0xE5, 0x9C, 0xBA, 0xE6, 0xBA, 0x90, 0xE8, 0xBF, 0x9E, 0xE6, 0x8E,
+            0xA5, 0xE8, 0xB6, 0x85, 0xE6, 0x97, 0xB6, 0x28, 0x33, 0x30, 0x73, 0x29, 0xEF, 0xBC,
+            0x8C, 0xE8, 0xAF, 0xB7, 0xE6, 0xA3, 0x80, 0xE6, 0x9F, 0xA5, 0xE7, 0xBD, 0x91, 0xE7,
+            0xBB, 0x9C, 0xE6, 0x88, 0x96, 0xE6, 0x9B, 0xB4, 0xE6, 0x8D, 0xA2, 0xE5, 0x9B, 0xBD,
+            0xE5, 0x86, 0x85, 0xE9, 0x95, 0x9C, 0xE5, 0x83, 0x8F, 0xE6, 0xBA, 0x90,
+        ];
+        assert_eq!(msg.as_bytes(), expected.as_slice());
+        assert_eq!(msg.chars().count(), 26, "msg={msg}");
+        assert!(msg.contains("(30s)"), "msg={msg}");
+        assert!(
+            msg.chars().any(|c| !c.is_ascii()),
+            "runtime text must be the UTF-8 Chinese message"
+        );
+    }
+
+    /// Timeout budget matches the spec (30s).
+    #[test]
+    fn marketplace_timeout_budget_is_30_seconds() {
+        assert_eq!(MARKETPLACE_NET_TIMEOUT_SECS, 30);
+    }
+
+    /// Pure wait classification: Timeout -> TimedOut, Disconnected -> Aborted.
+    #[test]
+    fn wait_error_classification() {
+        assert_eq!(
+            classify_wait_error(&RecvTimeoutError::Timeout),
+            WaitOutcome::TimedOut
+        );
+        assert_eq!(
+            classify_wait_error(&RecvTimeoutError::Disconnected),
+            WaitOutcome::Aborted
+        );
+    }
+
+    /// Real behaviour: a worker that outlives the budget yields the spec text.
+    #[test]
+    fn marketplace_net_op_reports_timeout_message() {
+        let err = run_marketplace_net_op_with_timeout(
+            Duration::from_millis(30),
+            "unit-test-op",
+            || {
+                std::thread::sleep(Duration::from_millis(800));
+                Ok::<u8, String>(1)
+            },
+        )
+        .expect_err("worker must outlive the 30ms budget");
+        assert_eq!(err.as_bytes(), marketplace_timeout_message().as_bytes());
+    }
+
+    /// A worker that finishes in time passes its result through untouched.
+    #[test]
+    fn marketplace_net_op_passes_through_success() {
+        let out = run_marketplace_net_op_with_timeout(
+            Duration::from_secs(30),
+            "unit-test-op",
+            || Ok::<u8, String>(7),
+        )
+        .unwrap();
+        assert_eq!(out, 7);
+    }
+
+    /// A worker that dies without sending is reported as aborted, not as a
+    /// timeout (distinct user-facing outcome).
+    #[test]
+    fn marketplace_net_op_reports_abort() {
+        let err = run_marketplace_net_op_with_timeout(
+            Duration::from_secs(30),
+            "unit-test-op",
+            || -> Result<u8, String> { panic!("unit-test worker abort") },
+        )
+        .expect_err("worker must abort");
+        assert!(err.contains("aborted"), "err={err}");
+        assert_ne!(err.as_bytes(), marketplace_timeout_message().as_bytes());
+    }
 
     #[test]
     fn trust_prompt_marketplace_has_no_error_framing() {

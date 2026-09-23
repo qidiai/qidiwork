@@ -71,6 +71,16 @@ export interface SessionListItem {
   title: string;
 }
 
+/** session_start 应答(与 commands.rs `SessionStartInfo` 对齐):实际工作目录 +
+ * 是否走默认工作区(cwd 未指定 → `<home>/Documents/QidiWork`)。
+ * `fallback_to_temp` = 默认工作区创建失败已回退 %TEMP%(提示用户)。 */
+interface SessionStartInfo {
+  session_id: string;
+  cwd: string;
+  default_workspace: boolean;
+  fallback_to_temp: boolean;
+}
+
 interface AcpEvent {
   type: string;
   session_id?: string;
@@ -79,6 +89,8 @@ interface AcpEvent {
   tool_call?: { title?: string };
   options?: { id: string; name: string; kind?: string }[];
   stop_reason?: string;
+  /** permission_cancelled 事件:权限失效原因(bridge_restart | turn_ended)。 */
+  reason?: string;
   session_restored?: never;
   error?: string;
   /** turn_usage 事件:session/prompt 应答 _meta 原样透传(桥层) */
@@ -597,6 +609,22 @@ async function onAcpEvent(ev: AcpEvent) {
         );
       }
       break;
+    case "permission_cancelled": {
+      // 权限失效上行:桥重启(bridge_restart)清空桥侧挂起表,或回合终止
+      // (turn_ended)后内核取消其挂起交互——两路径下前端队列里的旧条目都已
+      // 无法应答(点击必 Err 被静默吞掉 → 僵尸对话框)。此处同步移除该会话
+      // 条目;若该会话仍标记 busy 则一并解除(回合终止事件可能已被
+      // queue_lagged 丢弃,不解除则 UI 永挂)。
+      const sid = ev.session_id ?? "";
+      permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== sid);
+      const bucket = bucketOf(sid);
+      if (bucket?.busy) {
+        bucket.busy = false;
+        bucket.flushing = false;
+      }
+      pushSystem(`权限已失效：${ev.reason ?? "unknown"}`);
+      break;
+    }
     case "turn_usage": {
       // 回合用量:先暂存桶上,turn_completed 时挂到刚完成的 assistant
       // 消息并累加进会话累计(桥层保证 usage 先于 completed 发出)
@@ -784,9 +812,14 @@ export async function initAgent(): Promise<void> {
 /** 用户最近一次显式选择的工作目录:新建/自动开会话都默认复用它。 */
 const LAST_CWD_KEY = "qidi.lastCwd";
 
+/** 默认工作区目录名(与 Rust commands.rs 的 `DEFAULT_WORKSPACE_DIR` 对齐):
+ * cwd 未指定时内核会话落到 `<home>/Documents/QidiWork`,故其绑定工作区名即此。 */
+const DEFAULT_WORKSPACE_NAME = "QidiWork";
+
 /** 会话绑定的办公工作区名取值策略:优先「当前工作区」(GUI 的工作区由
  * card.py 按 --task 创建,无独立创建入口,故以用户当前查看的工作区为首选);
- * 未选工作区时回退 cwd 目录名;两者皆无则不绑定。 */
+ * 未选工作区时回退 cwd 目录名;cwd 也未指定时落到默认工作区 QidiWork——
+ * 与内核 cwd 默认同源,默认会话因此同样完成 R6 绑定(task=QidiWork)。 */
 function resolveOfficeTask(cwd: string | undefined): string | undefined {
   const current = currentWorkspaceName();
   if (current) return current;
@@ -794,27 +827,37 @@ function resolveOfficeTask(cwd: string | undefined): string | undefined {
     const base = cwd.split(/[\\/]/).filter(Boolean).pop();
     if (base) return base;
   }
-  return undefined;
+  return DEFAULT_WORKSPACE_NAME;
 }
 
 /** 新建任务会话(用户点「+ 新建任务」或首次发送)。回合进行中也可开
  * 新会话:各会话桶独立,后台会话继续跑。未显式传 cwd 时复用上次选择的
- * 目录;都没选过则交给内核默认(用户主目录)。
+ * 目录;都没选过则由内核落到默认工作区 `<home>/Documents/QidiWork`
+ * (v0.1.5.1 零摩擦:无需先选目录,直接开箱即用)。
  * 新建即绑定:会话创建成功后把 task=工作区名落进登记簿(后端 upsert),
  * 并让产物面板切到该工作区。 */
 export async function startSession(cwd?: string): Promise<void> {
   const dir = cwd ?? localStorage.getItem(LAST_CWD_KEY) ?? undefined;
   const officeTask = resolveOfficeTask(dir);
-  const id = await invoke<string>("session_start", {
+  const info = await invoke<SessionStartInfo>("session_start", {
     cwd: dir ?? null,
     officeTask: officeTask ?? null,
   });
+  const id = info.session_id;
   if (dir) localStorage.setItem(LAST_CWD_KEY, dir);
   const bucket = ensureBucket(id);
   activeId.value = id;
   connected.value = true;
   if (officeTask) rememberSessionBinding(id, officeTask);
-  pushBucketSystem(bucket, `已开启任务会话(${id})${dir ? `，工作目录 ${dir}` : ""}。`);
+  pushBucketSystem(bucket, `已开启任务会话(${id})，工作目录 ${info.cwd}。`);
+  // 走了默认工作区(用户未选目录):明确告知可直接对话,消除
+  // 「必须先选工作区才能对话」的误解(小白反馈的根因)。
+  if (info.default_workspace) {
+    pushSystem(
+      `已创建默认工作区 ${info.cwd}，直接开始对话；需要特定目录时用 📁 按钮。` +
+        (info.fallback_to_temp ? "(主目录不可用,已回退到临时目录)" : ""),
+    );
+  }
   void refreshModelState(id);
   // 产物面板跟着新会话的绑定走(无绑定保持现状)
   if (officeTask) void syncWorkspaceForSession(id);
@@ -889,10 +932,27 @@ export async function sendTask(text: string, images: PromptImage[] = []): Promis
   await doSend(bucket, trimmed, images);
 }
 
+/** 逐个注销某会话的待批权限(主动通知内核/桥层清挂起表)。失败静默:注销是
+ * 尽力而为——条目可能本就已失效(桥重启/内核已取消),本地队列照清。 */
+async function cancelPendingPermissions(sessionId: string): Promise<void> {
+  const pending = permissionQueue.value.filter((p) => p.sessionId === sessionId);
+  for (const p of pending) {
+    try {
+      await invoke("permission_cancel", { requestId: p.requestId });
+    } catch {
+      /* 已失效/桥未就绪:忽略,继续注销其余条目 */
+    }
+  }
+}
+
 export async function cancelTurn(): Promise<void> {
   const bucket = activeBucket();
   if (!bucket) return;
   await invoke("session_cancel", { sessionId: bucket.id });
+  // 内核在会话取消时会把该会话挂起的 RPC 解析为 Cancelled(Owner-scoped
+  // clear,cancel_running_task_tests.rs:395),但桥层挂起表仍需同步:先逐个
+  // 主动注销(尽力而为),再清前端队列,避免两侧残留僵尸条目。
+  await cancelPendingPermissions(bucket.id);
   permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== bucket.id);
 }
 
@@ -927,16 +987,61 @@ export function switchSession(id: string): void {
   }
 }
 
+/** 权限应答在途标志:invoke 期间为 true。两个作用:
+ * (1) resolvePermission/cancelPermission 入口早退,防「提交后对话框关闭、
+ *     下一个队列条目顶上」时的远程双击竞态(第二次点击会误答下一个请求);
+ * (2) 经 useAgentState 暴露为 permissionSubmitting,对话框可据此把确认
+ *     按钮置 disabled。 */
+const permissionSubmitting = ref(false);
+
+/** 权限请求「彻底失效」的错误特征:桥侧挂起表已无此条目(重复响应,或桥重启
+ * 清空挂起表后内核侧旧 id 一并失效)。文案来源:bridge.rs
+ * `权限请求 {id} 不存在或已响应`;兼容「已应答」措辞变体。 */
+const PERMISSION_GONE_MARKERS = ["不存在或已响应", "不存在或已应答"];
+
+function isPermissionGone(err: unknown): boolean {
+  const text = String(err);
+  return PERMISSION_GONE_MARKERS.some((m) => text.includes(m));
+}
+
+/** 权限应答提交(两个入口共用):await 结果并按错误分类处置。
+ * - 请求已失效(不可重试):丢弃该条目并系统提示;
+ * - 其他错误(桥未就绪/发送失败,请求仍在桥侧挂起表):unshift 重插回队列
+ *   头部(保持原 FIFO 顺序)并系统提示可重试。 */
+async function submitPermission(
+  p: PermissionState,
+  send: () => Promise<unknown>,
+): Promise<void> {
+  if (permissionSubmitting.value) return;
+  permissionSubmitting.value = true;
+  try {
+    await send();
+  } catch (e) {
+    if (isPermissionGone(e)) {
+      pushSystem("该权限请求已失效");
+    } else {
+      permissionQueue.value.unshift(p);
+      pushSystem("权限响应发送失败，已恢复对话框，请重试");
+    }
+  } finally {
+    permissionSubmitting.value = false;
+  }
+}
+
 export function resolvePermission(optionId: string): void {
+  if (permissionSubmitting.value) return;
   const p = permissionQueue.value.shift();
   if (!p) return;
-  void invoke("permission_respond", { requestId: p.requestId, optionId });
+  void submitPermission(p, () =>
+    invoke("permission_respond", { requestId: p.requestId, optionId }),
+  );
 }
 
 export function cancelPermission(): void {
+  if (permissionSubmitting.value) return;
   const p = permissionQueue.value.shift();
   if (!p) return;
-  void invoke("permission_cancel", { requestId: p.requestId });
+  void submitPermission(p, () => invoke("permission_cancel", { requestId: p.requestId }));
 }
 
 /** 崩溃恢复(状态栏按钮)。返回恢复的会话数;-1 表示已在恢复中
@@ -971,6 +1076,8 @@ export function useAgentState() {
     sessionId: computed(() => activeId.value),
     turnInProgress: computed(() => activeBucket()?.busy ?? false),
     permission: computed(() => permissionQueue.value[0] ?? null),
+    /** 权限应答在途(对话框可据此禁用确认按钮,防双击竞态)。 */
+    permissionSubmitting: computed(() => permissionSubmitting.value),
     lastError,
     /** 活动会话的排队消息(回合进行中提交,待自动续跑)。 */
     queued: computed<QueuedMessage[]>(() => activeBucket()?.queue ?? []),

@@ -25,6 +25,7 @@ use crate::office::{self, ArtifactCard, WorkspaceInfo, watch::ManifestWatch};
 use crate::persist::{self, PersistedSession};
 use crate::process::{AgentProcess, SpawnConfig};
 use crate::skills;
+use crate::skills_package;
 use crate::settings;
 use crate::transport::AgentTransport;
 
@@ -631,6 +632,23 @@ pub async fn office_scan(app: AppHandle) -> Result<Vec<WorkspaceInfo>, String> {
 pub async fn skills_list(app: AppHandle) -> Result<Vec<skills::SkillInfo>, String> {
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
     Ok(skills::list_skills(&skills::skills_root(&home)))
+}
+
+/// 一键安装官方技能包(R8):下载官方 zip → 落 %TEMP% → 解压到
+/// `~/.qidi/skills/`,已存在的同名技能目录整组跳过(不覆盖用户数据)。
+/// 返回 `{installed: 新增技能目录数, path: 技能根目录}`。
+#[tauri::command]
+pub async fn install_skills_package(
+    app: AppHandle,
+) -> Result<skills_package::InstallReport, String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    let root = skills::skills_root(&home);
+    let added = skills_package::download_and_extract(&root).await?;
+    tracing::info!(installed = added.len(), path = %root.display(), "官方技能包安装完成");
+    Ok(skills_package::InstallReport {
+        installed: added.len(),
+        path: root.to_string_lossy().into_owned(),
+    })
 }
 
 /// 设置读取(设置面):当前默认模型 + [model.*] 可选项。

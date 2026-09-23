@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { pushSystem, rememberSessionBinding, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
-import { initSkills, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
+import { initSkills, installSkillsPackage, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
 import { open as pickDirectory } from "@tauri-apps/plugin-dialog";
 import { sidebarCollapsed } from "../composables/useUiLayout";
@@ -53,6 +53,27 @@ async function runSkill(skill: SkillInfo): Promise<void> {
     await sendTask(`请使用 ${skill.name} 技能,处理任务工作区「${currentTask.value}」`);
   } catch (e) {
     pushSystem(`技能任务下发失败:${String(e)}`);
+  }
+}
+
+// R8:技能目录为空时的一键安装(官方技能包)。Rust 侧下载 + 解压 +
+// 重拉列表;成功后 skill-grid 出现,空态自动消失。
+const installing = ref(false);
+const installError = ref("");
+
+async function installSkills(): Promise<void> {
+  if (installing.value) return;
+  installing.value = true;
+  installError.value = "";
+  try {
+    const report = await installSkillsPackage();
+    pushSystem(`官方技能包安装完成:新增 ${report.installed} 个技能(${report.path})`);
+    if (!report.installed) installError.value = "技能目录中已存在同名技能,未覆盖";
+  } catch (e) {
+    installError.value = String(e);
+    pushSystem(`技能包安装失败:${String(e)}`);
+  } finally {
+    installing.value = false;
   }
 }
 
@@ -279,7 +300,18 @@ function pick(name: string): void {
           {{ skill.display_name }}
         </button>
       </div>
-      <p v-else class="skill-empty">未发现技能(读取 ~/.qidi/skills)</p>
+      <div v-else class="skill-empty">
+        <p class="skill-empty-hint">未发现技能(读取 ~/.qidi/skills)</p>
+        <button
+          class="skill-install"
+          :disabled="installing"
+          title="从官网下载官方技能包并解压到 ~/.qidi/skills(已存在的同名技能不会被覆盖)"
+          @click="installSkills"
+        >
+          {{ installing ? "⏳ 正在安装..." : "📦 一键安装官方技能包（30 个）" }}
+        </button>
+        <p v-if="installError" class="skill-install-error">{{ installError }}</p>
+      </div>
     </div>
 
     <div v-if="history.length || confirmingClear" class="section">
@@ -564,7 +596,42 @@ function pick(name: string): void {
 
 .skill-empty {
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skill-empty-hint {
+  margin: 0;
   font-size: var(--font-size-sm);
   color: var(--text-disabled);
+}
+
+/* R8 一键安装:沿用 skill-chip / new-task 的描边按钮惯例 */
+.skill-install {
+  border: 1px solid var(--border);
+  background: var(--bg-base);
+  border-radius: var(--radius);
+  padding: 8px 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.skill-install:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.skill-install:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.skill-install-error {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--danger, #c0392b);
+  word-break: break-all;
 }
 </style>

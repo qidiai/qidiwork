@@ -16,6 +16,7 @@ pub mod persist;
 pub mod process;
 pub mod settings;
 pub mod skills;
+pub mod skills_package;
 pub mod transcript;
 pub mod transport;
 pub mod updater;
@@ -56,6 +57,7 @@ pub fn run() -> i32 {
             commands::office_read_file,
             commands::office_watch_start,
             commands::skills_list,
+            commands::install_skills_package,
             commands::settings_read,
             commands::settings_save,
             commands::settings_create_model,

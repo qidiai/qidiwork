@@ -9,6 +9,14 @@ export interface SkillInfo {
   description: string;
 }
 
+/** 官方技能包安装结果(commands.rs install_skills_package)。 */
+export interface InstallReport {
+  /** 本次新增的技能目录数。 */
+  installed: number;
+  /** 技能根目录绝对路径。 */
+  path: string;
+}
+
 const skills = ref<SkillInfo[]>([]);
 let loaded = false;
 
@@ -27,6 +35,15 @@ export async function initSkills(): Promise<void> {
     loaded = false;
     throw e; // 调用方决定如何提示
   }
+}
+
+/** 一键安装官方技能包(R8):Rust 侧下载 zip + 解压到 ~/.qidi/skills。
+ * 完成后重置 loaded 并重拉列表,新技能芯片立刻可见。 */
+export async function installSkillsPackage(): Promise<InstallReport> {
+  const report = await invoke<InstallReport>("install_skills_package");
+  loaded = false;
+  await initSkills();
+  return report;
 }
 
 export function useSkills() {

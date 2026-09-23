@@ -222,8 +222,8 @@ function pick(name: string): void {
   <!-- 折叠态图标条:展开 / 新建 / 选目录 -->
   <aside v-if="sidebarCollapsed" class="rail">
     <button class="rail-btn" title="展开侧栏" @click="sidebarCollapsed = false">☰</button>
-    <button class="rail-btn" title="新建任务" @click="newSession()">＋</button>
-    <button class="rail-btn" title="选择文件夹新建" @click="newSession(true)">📁</button>
+    <button class="rail-btn" title="新建任务：无需选目录，开箱即用" @click="newSession()">＋</button>
+    <button class="rail-btn" title="选择项目文件夹后新建（需要指定目录时用这个）" @click="newSession(true)">📁</button>
   </aside>
 
   <aside v-else class="sidebar">
@@ -233,10 +233,10 @@ function pick(name: string): void {
         <button class="rail-btn" title="折叠侧栏" @click="sidebarCollapsed = true">⇆</button>
       </div>
       <div class="new-task-row">
-        <button class="new-task" title="新建任务(复用上次工作目录)" @click="newSession()">
+        <button class="new-task" title="新建任务：无需选目录，开箱即用（已选过目录则复用上次）" @click="newSession()">
           + 新建任务
         </button>
-        <button class="new-task dir" title="选择项目文件夹后新建" @click="newSession(true)">
+        <button class="new-task dir" title="选择项目文件夹后新建（需要指定目录时用这个）" @click="newSession(true)">
           📁
         </button>
       </div>

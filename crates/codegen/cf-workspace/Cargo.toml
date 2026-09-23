@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "cf-workspace"
-version = "0.1.220-alpha.7"
+version = "0.1.220-alpha.8"
 edition.workspace = true
 description = "Core host-local workspace library (FS, VCS, execution, discovery) for cf-shell and remote sampler"
 

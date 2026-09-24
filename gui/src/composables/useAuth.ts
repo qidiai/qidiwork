@@ -80,6 +80,9 @@ function bindEvents(): void {
 
 /** 触发设备码登录:内核打开浏览器 + 轮询,进度经 auth-event 回流。 */
 async function startLogin(): Promise<void> {
+  // 单飞:重复点击/多次进入 Step 2 会再拉起一个 `login --device-auth` 子进程,
+  // 浏览器开出多个授权页且互相覆盖 auth.json(Rust 侧 auth_login 无去重)。
+  if (loginPending.value) return;
   bindEvents();
   loginError.value = "";
   loginUri.value = "";

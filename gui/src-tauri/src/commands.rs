@@ -671,6 +671,14 @@ pub async fn settings_save(
     settings::save_settings(&settings::config_path(&home), &model_id, api_key.as_deref())
 }
 
+/// 引导页专用:只设 [models].default,**不要求**该 id 已在本地 [model.*]
+/// 定义(服务端目录里的模型由内核向服务端 catalog 匹配)。
+#[tauri::command]
+pub async fn settings_set_default_model(app: AppHandle, model_id: String) -> Result<(), String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    settings::set_default_model(&settings::config_path(&home), &model_id)
+}
+
 /// 新建模型定义(首次运行引导):写入 [model.<id>](model/base_url/name
 /// +可选 api_key);无默认模型时自动指向它。内核下次启动生效。
 #[tauri::command]

@@ -66,16 +66,20 @@ export async function shouldShowOnboarding(): Promise<boolean> {
 
 /**
  * 完成引导:双写完成标记(localStorage + app_data_dir 文件)。
- * 文件写入失败不阻断(下一轮仍会再引导,不静默丢用户进度)。
+ * 返回 markerOk:文件写入失败时调用方需如实告知——门控要求两处都在,
+ * 否则下次启动会再次引导,静默重复会消耗用户耐心。
  */
-export async function completeOnboarding(): Promise<void> {
+export async function completeOnboarding(): Promise<{ markerOk: boolean }> {
   localStorage.setItem(LS_KEY, "true");
+  let markerOk = false;
   try {
     await invoke("onboarding_marker_write");
+    markerOk = true;
   } catch {
-    /* 标记文件写入失败:localStorage 已置位,不阻断本次完成 */
+    /* localStorage 已置位,本次仍可进入 */
   }
   finished.value = true;
+  return { markerOk };
 }
 
 export function useOnboarding() {

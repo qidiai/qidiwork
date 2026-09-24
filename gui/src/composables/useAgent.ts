@@ -151,6 +151,14 @@ function parseEffortOption(raw: unknown): ModelEffortOption | null {
   return opt;
 }
 
+/** 内核未下发档位清单时的内置菜单(与 cf-pager EFFORT_LEVELS 同源,顺序一致)。 */
+const BUILTIN_EFFORT_OPTIONS: ModelEffortOption[] = [
+  { id: "xhigh", value: "xhigh", label: "极高" },
+  { id: "high", value: "high", label: "高" },
+  { id: "medium", value: "medium", label: "中" },
+  { id: "low", value: "low", label: "低" },
+];
+
 /** 解析单个模型(含内核扩展 meta:ACP `ModelInfo.meta` 线上键为 `_meta`)。 */
 function parseModelInfo(raw: unknown): ModelInfo {
   const mm = (raw ?? {}) as { modelId?: unknown; name?: unknown; _meta?: unknown };
@@ -158,6 +166,7 @@ function parseModelInfo(raw: unknown): ModelInfo {
   const name = typeof mm.name === "string" && mm.name ? mm.name : modelId;
   const meta =
     mm._meta && typeof mm._meta === "object" ? (mm._meta as Record<string, unknown>) : {};
+  const supportsReasoningEffort = meta.supportsReasoningEffort === true;
   const reasoningEfforts = Array.isArray(meta.reasoningEfforts)
     ? meta.reasoningEfforts
         .map(parseEffortOption)
@@ -166,8 +175,13 @@ function parseModelInfo(raw: unknown): ModelInfo {
   return {
     modelId,
     name,
-    supportsReasoningEffort: meta.supportsReasoningEffort === true,
-    reasoningEfforts,
+    supportsReasoningEffort,
+    // 支持但服务端没给清单 → 用内置档位,与 TUI 的回落规则一致;
+    // 否则下拉因清单为空而隐藏,用户看不到任何入口。
+    reasoningEfforts:
+      supportsReasoningEffort && !reasoningEfforts.length
+        ? BUILTIN_EFFORT_OPTIONS
+        : reasoningEfforts,
     reasoningEffort: typeof meta.reasoningEffort === "string" ? meta.reasoningEffort : "",
   };
 }

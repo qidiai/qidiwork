@@ -9,7 +9,7 @@
 // 再 emit("done") 由 App.vue 打开内核门控(initAgent + autoConnect)。
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { useAuth } from "../composables/useAuth";
-import { readSettings, saveSettings, stopKernel } from "../composables/useSettings";
+import { readSettings, setDefaultModel, stopKernel } from "../composables/useSettings";
 import {
   checkOnboardingAuth,
   completeOnboarding,
@@ -78,7 +78,9 @@ function goWelcome(): void {
 
 function goLogin(): void {
   currentStep.value = 2;
-  void startLogin(); // 触发内核设备码登录
+  // 无条件触发:auth.json 里有 token ≠ token 还有效(内核会自行刷新,引导命令不会)。
+  // 已失效时若跳过登录,Step 3 只会拿到 401。重复点击由 useAuth 单飞守卫拦住。
+  void startLogin();
   startPolling();
 }
 
@@ -120,6 +122,10 @@ async function loadModels(): Promise<void> {
     } catch {
       currentDefault.value = "";
     }
+    // 预选当前默认:未改动即不写配置,「完成」语义 = 保持现状。
+    if (models.value.some((m) => m.id === currentDefault.value)) {
+      selectedId.value = currentDefault.value;
+    }
   } catch (e) {
     modelsError.value = String(e);
   } finally {
@@ -138,17 +144,23 @@ async function finish(): Promise<void> {
   finishHint.value = "";
   try {
     // 选了非当前默认的模型 → 写默认并停内核(下次启动以新配置重启)。
+    // 用 setDefaultModel 而非 saveSettings:Step 3 列的是服务端目录模型,
+    // 大多不在本地 [model.*] 中定义,后者会一律报"未在 config.toml 中定义"。
     if (selectedId.value && selectedId.value !== currentDefault.value) {
       try {
-        await saveSettings(selectedId.value, null);
+        await setDefaultModel(selectedId.value);
         await stopKernel();
       } catch (e) {
-        // 云端模型 id 可能未在本地 [model.*] 定义:提示但不强制阻断完成。
-        finishHint.value = `未能写入本地默认模型:${String(e)}`;
+        finishHint.value = `未能写入默认模型:${String(e)}`;
         return;
       }
     }
-    await completeOnboarding();
+    const { markerOk } = await completeOnboarding();
+    if (!markerOk) {
+      // 标记文件写不进:下次启动还会再引导。不阻断进入,但要如实告知。
+      finishHint.value = "已进入。完成标记写入失败,下次启动可能再次显示引导。";
+      return;
+    }
     emit("done");
   } finally {
     finishing.value = false;
@@ -240,7 +252,10 @@ onBeforeUnmount(stopPolling);
         <p v-if="modelsLoading" class="lead">正在获取可用模型…</p>
         <p v-else-if="modelsError" class="err">
           {{ modelsError }}
-          <button class="link-btn" @click="loadModels">重试</button>
+          <button v-if="modelsError.includes('登录')" class="link-btn" @click="goLogin">
+            重新登录
+          </button>
+          <button v-else class="link-btn" @click="loadModels">重试</button>
         </p>
         <p v-else-if="!models.length" class="lead">没有可用模型。</p>
         <div v-else class="model-list">
@@ -251,7 +266,10 @@ onBeforeUnmount(stopPolling);
             :class="{ selected: m.id === selectedId }"
             @click="selectedId = m.id"
           >
-            <span class="model-name">{{ m.name }}</span>
+            <span class="model-name">
+              {{ m.name }}
+              <span v-if="m.id === currentDefault" class="badge">当前默认</span>
+            </span>
             <span class="model-id">{{ m.id }}</span>
             <span v-if="m.description" class="model-desc">{{ m.description }}</span>
           </button>
@@ -262,7 +280,7 @@ onBeforeUnmount(stopPolling);
         <div class="nav">
           <button class="link-btn" @click="goLogin">上一步</button>
           <button v-if="finishHint" class="btn" @click="finishAnyway">仍然进入</button>
-          <button class="btn primary" :disabled="!selectedId || finishing" @click="finish">
+          <button class="btn primary" :disabled="finishing" @click="finish">
             {{ finishing ? "正在完成…" : "完成设置" }}
           </button>
         </div>
@@ -500,6 +518,16 @@ onBeforeUnmount(stopPolling);
 .model-name {
   grid-area: name;
   font-weight: 600;
+}
+
+.badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 500;
 }
 
 .model-id {

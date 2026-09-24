@@ -142,6 +142,18 @@ fn parse_models(body: &serde_json::Value) -> Vec<ModelInfo> {
     models
 }
 
+/// 模型列表 HTTP 错误 → 用户可行动的中文文案。
+///
+/// 401/403 单独成句:auth.json 里的 access token 可能已过期(内核自己会刷新,
+/// 但本命令直接用存量 key)。此时引导第三步必须把用户送回登录,而不是停在
+/// "服务器返回 401" 这种无从下手的报错上。
+fn models_error(status: u16) -> String {
+    match status {
+        401 | 403 => "登录已失效:请重新登录后再选择模型".to_string(),
+        other => format!("获取模型列表失败:服务器返回 {other}"),
+    }
+}
+
 /// 用已存 JWT 拉取服务端模型列表。未登录/请求失败 → 中文 Err。
 #[tauri::command]
 pub async fn server_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
@@ -162,7 +174,7 @@ pub async fn server_models(app: AppHandle) -> Result<Vec<ModelInfo>, String> {
         .await
         .map_err(|e| format!("获取模型列表失败: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("获取模型列表失败:服务器返回 {}", resp.status()));
+        return Err(models_error(resp.status().as_u16()));
     }
     let body: serde_json::Value = resp
         .json()
@@ -321,6 +333,14 @@ mod tests {
         marker_write(&dir).unwrap(); // 幂等
         assert!(marker_read(&dir));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 401/403 必须翻成「重新登录」,其他状态码保留服务器状态便于排查。
+    #[test]
+    fn models_error_maps_auth_failures_to_relogin() {
+        assert!(models_error(401).contains("重新登录"));
+        assert!(models_error(403).contains("重新登录"));
+        assert!(models_error(500).contains("500"));
     }
 
     /// scope key 形状:`{issuer}::{client_id}`(与 auth.rs 一致)。

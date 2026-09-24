@@ -61,6 +61,7 @@ pub fn run() -> i32 {
             commands::install_skills_package,
             commands::settings_read,
             commands::settings_save,
+            commands::settings_set_default_model,
             commands::settings_create_model,
             commands::sessions_history,
             commands::session_set_title,

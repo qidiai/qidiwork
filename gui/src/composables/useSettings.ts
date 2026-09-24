@@ -23,6 +23,11 @@ export function saveSettings(modelId: string, apiKey: string | null): Promise<vo
   return invoke("settings_save", { modelId, apiKey });
 }
 
+/** 仅设默认模型,不要求该 id 已在本地 [model.*] 定义(引导页选云端模型)。 */
+export function setDefaultModel(modelId: string): Promise<void> {
+  return invoke("settings_set_default_model", { modelId });
+}
+
 /** 新建模型定义(首次运行引导):写入 [model.<id>] 并在无默认时指向它。 */
 export function createModel(input: {
   id: string;

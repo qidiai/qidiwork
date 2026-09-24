@@ -119,17 +119,29 @@ pub fn save_settings(
         entry["api_key"] = toml_edit::value(key);
     }
 
+    write_default(path, &mut doc, model_id)
+}
+
+/// 写 `[models].default` 并原子落盘。`[models]` 已存在但不是标准表时拒绝
+/// 覆盖——静默改写用户配置违反"绝不覆盖"纪律(k3 审计 W2)。
+fn write_default(
+    path: &Path,
+    doc: &mut toml_edit::DocumentMut,
+    model_id: &str,
+) -> Result<(), String> {
     if doc.get("models").and_then(|i| i.as_table()).is_some() {
         // [models] 已是标准表,直接写入 default
     } else if doc.get("models").is_some() {
-        // 非表值(字符串/数组等):覆盖它会静默改写用户配置,违反
-        // "绝不覆盖"纪律——拒绝并让用户手工修复(k3 审计 W2)
         return Err("[models] 已存在但不是标准表,拒绝覆盖;请手工修复该段".to_string());
     } else {
         doc["models"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     doc["models"]["default"] = toml_edit::value(model_id);
 
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+    }
     // 原子写:同目录临时文件 + rename,防半截文件
     let tmp = path.with_extension("toml.tmp");
     if let Err(e) = std::fs::write(&tmp, doc.to_string()) {
@@ -141,6 +153,30 @@ pub fn save_settings(
         format!("原子替换失败: {e}")
     })?;
     Ok(())
+}
+
+/// 仅设 `[models].default`,**不要求**该 id 已定义于 `[model.*]`。
+///
+/// 与 [`save_settings`] 语义不同:后者面向"改一个本地已定义的模型(可顺带
+/// 写 api_key)",故校验本地存在性防手滑;本函数面向引导页——Step 3 列的是
+/// 服务端 `/v1/models` 目录里的模型,内核 `resolve_default_model` 拿
+/// `[models].default` 去**服务端 catalog** 匹配(先按条目 key,再按 `model`
+/// 字段),本地 `[model.*]` 只是可选覆盖。用 save_settings 写服务端 id 会
+/// 一律得到"模型 X 未在 config.toml 中定义",引导第三步因此全废。
+pub fn set_default_model(path: &Path, model_id: &str) -> Result<(), String> {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return Err("模型 id 不能为空".to_string());
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取 {} 失败: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| format!("{} 不是有效 TOML,拒绝覆盖: {e}", path.display()))?;
+    write_default(path, &mut doc, model_id)
 }
 
 /// TOML 表名安全校验:仅允许 `[A-Za-z0-9_-]`,拒绝点号/引号/空白等
@@ -236,6 +272,65 @@ mod tests {
         let p = std::env::temp_dir().join(format!("qidiwork-settings-{tag}-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&p);
         p
+    }
+
+    #[test]
+    fn set_default_model_accepts_id_absent_from_local_table() {
+        // 引导页 Step 3 的核心回归:服务端目录里的 id 不在 [model.*] 中,
+        // 也必须能写进 [models].default(save_settings 会在这里报错)。
+        let p = tmp_path("set-default");
+        std::fs::write(
+            &p,
+            "# 用户注释\n[models]\ndefault = \"m1\" # 旧默认\n\n[model.m1]\nmodel = \"a\"\n",
+        )
+        .unwrap();
+        assert!(save_settings(&p, "KIMI-K3", None).is_err(), "save_settings 仍拒绝未定义 id");
+        set_default_model(&p, "  KIMI-K3  ").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# 用户注释"), "注释必须保留");
+        assert!(text.contains("default = \"KIMI-K3\""), "trim 后写入: {text}");
+        assert!(text.contains("[model.m1]"), "不得代建本地模型块");
+        assert_eq!(read_settings(&p).unwrap().default_model.as_deref(), Some("KIMI-K3"));
+        assert!(!std::path::Path::new(&p.with_extension("toml.tmp")).exists());
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn set_default_model_creates_models_table_when_absent() {
+        let p = tmp_path("set-default-new");
+        std::fs::write(&p, "[model.m1]\nmodel = \"a\"\n").unwrap();
+        set_default_model(&p, "auto").unwrap();
+        assert_eq!(read_settings(&p).unwrap().default_model.as_deref(), Some("auto"));
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn set_default_model_rejects_blank_and_missing_file() {
+        let p = tmp_path("set-default-blank");
+        std::fs::write(&p, "[models]\ndefault = \"m1\"\n").unwrap();
+        assert!(set_default_model(&p, "   ").is_err());
+        assert_eq!(read_settings(&p).unwrap().default_model.as_deref(), Some("m1"), "空 id 不得改动文件");
+        // 文件不存在 → 新建(引导期用户还没跑过内核时就是这种状态)
+        let fresh = tmp_path("set-default-fresh");
+        set_default_model(&fresh, "GLM-5.3-FLASH").unwrap();
+        assert_eq!(
+            read_settings(&fresh).unwrap().default_model.as_deref(),
+            Some("GLM-5.3-FLASH")
+        );
+        std::fs::remove_file(&fresh).ok();
+    }
+
+    #[test]
+    fn set_default_model_refuses_non_table_models_section() {
+        let p = tmp_path("set-default-nontable");
+        std::fs::write(&p, "models = \"oops\"\n").unwrap();
+        let err = set_default_model(&p, "m9").unwrap_err();
+        assert!(err.contains("不是标准表"), "必须拒绝静默覆盖: {err}");
+        assert!(
+            std::fs::read_to_string(&p).unwrap().contains("models = \"oops\""),
+            "报错后文件原样不动"
+        );
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]

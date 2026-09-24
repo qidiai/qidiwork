@@ -9,6 +9,7 @@ import ToolRaw from "./ToolRaw.vue";
 const { messages, connected, turnInProgress, permission, queued, replay } = useAgentState();
 const draft = ref("");
 const msgBox = ref<HTMLElement | null>(null);
+const composerInput = ref<HTMLTextAreaElement | null>(null);
 
 // ---------------------------------------------------------- 图片附件(P1-2) --
 // 待发图片:📎 按钮 / 粘贴 / 拖拽三路汇入同一队列;base64(去前缀)+ 缩略图。
@@ -264,6 +265,19 @@ const placeholder = computed(() => {
   return "输入任务…(Enter 发送,Shift+Enter 换行)";
 });
 
+// 欢迎页示例任务:办公/标书人群第一眼就想点,点了必须有反应。
+const EXAMPLE_TASKS = [
+  "根据附件大纲生成立标函初稿",
+  "从招标文件里提取资质、工期和评分要求",
+  "把这周会议纪要整理成周报",
+  "把这份表格的数据整理成分析结论",
+];
+
+function fillExample(text: string): void {
+  draft.value = text;
+  void nextTick(() => composerInput.value?.focus());
+}
+
 // 首次进入即初始化事件监听(幂等)
 void initAgent();
 </script>
@@ -300,9 +314,17 @@ void initAgent();
         <div class="welcome-icon">Q</div>
         <h1 class="welcome-title">QIDI 办公工作台</h1>
         <p class="welcome-sub">用一句话下达办公任务:写标书、做周报、转换文档、生成图纸</p>
+        <p class="welcome-tips-label">不知道从哪开始?点一条试试,会填进下方输入框</p>
         <div class="welcome-tips">
-          <span class="tip">试试:「根据附件大纲生成立标函初稿」</span>
-          <span class="tip">试试:「把这周会议纪要整理成周报」</span>
+          <button
+            v-for="tip in EXAMPLE_TASKS"
+            :key="tip"
+            class="tip"
+            type="button"
+            @click="fillExample(tip)"
+          >
+            {{ tip }}
+          </button>
         </div>
       </div>
 
@@ -467,6 +489,7 @@ void initAgent();
         @click="pickFiles"
       >📎</button>
       <textarea
+        ref="composerInput"
         v-model="draft"
         class="composer-input"
         rows="2"
@@ -541,6 +564,12 @@ void initAgent();
   color: var(--text-secondary);
 }
 
+.welcome-tips-label {
+  margin: 0 0 8px;
+  font-size: var(--font-size-sm);
+  color: var(--text-disabled);
+}
+
 .welcome-tips {
   display: flex;
   flex-direction: column;
@@ -549,12 +578,21 @@ void initAgent();
 }
 
 .tip {
+  font: inherit;
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
   background: var(--bg-panel);
-  border: 1px solid var(--border);
+  border: 1px dashed var(--border);
   border-radius: 999px;
   padding: 4px 12px;
+  cursor: pointer;
+}
+
+.tip:hover {
+  color: var(--accent);
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--bg-hover);
 }
 
 .msg-row {

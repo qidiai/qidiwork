@@ -4,10 +4,10 @@
 // 暗色主题:在 .onboarding 作用域内覆盖全局设计令牌(变量名复用 global.css),
 // 不改全局 :root。
 //
-// 完成后动作(K3 修正 3):Step 3 选了非当前默认的模型 → settings_save +
+// 完成后动作(K3 修正 3):Step 3 选了非当前默认的模型 → setDefaultModel +
 // agent_stop(下次启动以新配置重启内核);随后 completeOnboarding 双写标记,
 // 再 emit("done") 由 App.vue 打开内核门控(initAgent + autoConnect)。
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useAuth } from "../composables/useAuth";
 import { readSettings, setDefaultModel, stopKernel } from "../composables/useSettings";
 import {
@@ -111,9 +111,28 @@ const modelsError = ref("");
 const selectedId = ref("");
 const currentDefault = ref("");
 
+// 办公人群面对十几个模型 id 只会懵。服务端把 auto 放在列表首位,它才是
+// 该默认露出的那一个;其余折起来,想看的人再展开。
+const AUTO_ID = "auto";
+const showAllModels = ref(false);
+// 折叠时也要露出 auto 与当前选中项,否则预选的默认模型会藏起来,
+// 用户看不到自己「选着谁」就点了完成。
+const visibleModels = computed(() =>
+  showAllModels.value
+    ? models.value
+    : models.value.filter((m) => m.id === AUTO_ID || m.id === selectedId.value),
+);
+const hiddenModelCount = computed(() => models.value.length - visibleModels.value.length);
+
+function modelHint(m: ServerModel): string {
+  if (m.description) return m.description;
+  return m.id === AUTO_ID ? "不确定就选它:每次按任务自动挑模型" : "";
+}
+
 async function loadModels(): Promise<void> {
   modelsLoading.value = true;
   modelsError.value = "";
+  showAllModels.value = false;
   try {
     models.value = await fetchServerModels();
     try {
@@ -248,6 +267,9 @@ onBeforeUnmount(stopPolling);
       <!-- Step 3 选择模型 -->
       <section v-else class="step">
         <h2 class="step-title">选择默认模型</h2>
+        <p v-if="models.length" class="lead">
+          选不来就点「Auto」,之后在设置里随时改;不点则保持现有默认。
+        </p>
 
         <p v-if="modelsLoading" class="lead">正在获取可用模型…</p>
         <p v-else-if="modelsError" class="err">
@@ -260,7 +282,7 @@ onBeforeUnmount(stopPolling);
         <p v-else-if="!models.length" class="lead">没有可用模型。</p>
         <div v-else class="model-list">
           <button
-            v-for="m in models"
+            v-for="m in visibleModels"
             :key="m.id"
             class="model-card"
             :class="{ selected: m.id === selectedId }"
@@ -268,10 +290,25 @@ onBeforeUnmount(stopPolling);
           >
             <span class="model-name">
               {{ m.name }}
+              <span v-if="m.id === AUTO_ID" class="badge">推荐</span>
               <span v-if="m.id === currentDefault" class="badge">当前默认</span>
             </span>
+            <span v-if="modelHint(m)" class="model-desc">{{ modelHint(m) }}</span>
             <span class="model-id">{{ m.id }}</span>
-            <span v-if="m.description" class="model-desc">{{ m.description }}</span>
+          </button>
+          <button
+            v-if="hiddenModelCount > 0"
+            class="link-btn expand-btn"
+            @click="showAllModels = true"
+          >
+            其他 {{ hiddenModelCount }} 个模型
+          </button>
+          <button
+            v-else-if="showAllModels && models.length > 1"
+            class="link-btn expand-btn"
+            @click="showAllModels = false"
+          >
+            收起,只看推荐的
           </button>
         </div>
 
@@ -542,6 +579,11 @@ onBeforeUnmount(stopPolling);
   grid-area: desc;
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
+}
+
+.expand-btn {
+  align-self: center;
+  padding: 2px 4px;
 }
 
 .hint {

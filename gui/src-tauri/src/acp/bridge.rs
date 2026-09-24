@@ -158,6 +158,25 @@ pub struct AcpBridge {
 /// 不放顶层:ACP 的 NewSessionRequest/LoadSessionRequest 为 camelCase +
 /// `#[non_exhaustive]` 且无 `deny_unknown_fields`(agent-client-protocol-schema
 /// 0.11.4 `agent.rs:905` / `:1078`),顶层未知键会被内核静默丢弃。
+/// 取权限请求的合法选项 id 列表,供 [`AcpBridge::resolve_permission`] 校验。
+///
+/// 键必须是 ACP 线上格式的 `optionId`(agent-client-protocol-schema 0.11.4
+/// `client.rs:584` 的 `PermissionOption` 为 `rename_all="camelCase"`,字段
+/// `option_id`)。写成 `id` 会让本列表恒空,于是每次「允许」都被判为非法选项
+/// ——错误只以中文提示一闪,界面上看像按钮失灵。
+fn option_ids_of(params: &serde_json::Value) -> Vec<String> {
+    params
+        .get("options")
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|o| o.get("optionId").and_then(|i| i.as_str()))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn with_office_task_meta(
     mut params: serde_json::Value,
     office_task: Option<&str>,
@@ -416,16 +435,7 @@ impl AcpBridge {
                 self.send_best_effort(jsonrpc::error_response(id, -32602, "未知会话"));
                 return;
             }
-            let option_ids: Vec<String> = params
-                .get("options")
-                .and_then(|o| o.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|o| o.get("id").and_then(|i| i.as_str()))
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let option_ids = option_ids_of(&params);
             self.permission_pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1033,6 +1043,34 @@ impl From<TransportError> for String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 线上形状(ACP camelCase `optionId`):两个合法选项都要取到。
+    #[test]
+    fn option_ids_read_the_camel_case_wire_key() {
+        let params = serde_json::json!({
+            "sessionId": "s",
+            "options": [
+                {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject-once", "name": "Reject once", "kind": "reject_once"}
+            ]
+        });
+        assert_eq!(
+            option_ids_of(&params),
+            vec!["allow-once".to_string(), "reject-once".to_string()]
+        );
+    }
+
+    /// 回归锁定:曾按 `id` 取值,列表恒空 → 每次点「允许」都判非法选项,
+    /// 界面表现为按钮失灵。缺 options / 空数组同样得空列表。
+    #[test]
+    fn option_ids_ignore_the_wrong_key() {
+        let wrong = serde_json::json!({
+            "options": [{"id": "allow", "name": "允许", "kind": "allow_once"}]
+        });
+        assert!(option_ids_of(&wrong).is_empty());
+        assert!(option_ids_of(&serde_json::json!({"sessionId": "s"})).is_empty());
+        assert!(option_ids_of(&serde_json::json!({"options": []})).is_empty());
+    }
 
     /// 绑定会话:office_task 落在 `_meta` 通道,顶层不落键(内核会丢弃顶层未知键)。
     #[test]

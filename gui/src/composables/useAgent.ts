@@ -60,7 +60,8 @@ export interface PermissionState {
   requestId: number;
   sessionId: string;
   title: string;
-  options: { id: string; name: string; kind?: string }[];
+  /** ACP `PermissionOption` 原样透传,键为 camelCase `optionId`。 */
+  options: { optionId: string; name: string; kind?: string }[];
 }
 
 /** 侧栏「任务会话」条目:活动会话的运行态快照。 */
@@ -87,7 +88,8 @@ interface AcpEvent {
   update?: { sessionUpdate?: string; content?: { text?: string }; toolCallId?: string; title?: string; status?: string; [k: string]: unknown };
   request_id?: number;
   tool_call?: { title?: string };
-  options?: { id: string; name: string; kind?: string }[];
+  /** 桥原样透传的 ACP `PermissionOption`,键为 camelCase `optionId`。 */
+  options?: { optionId: string; name: string; kind?: string }[];
   stop_reason?: string;
   /** permission_cancelled 事件:权限失效原因(bridge_restart | turn_ended)。 */
   reason?: string;
@@ -1056,6 +1058,11 @@ export function cancelPermission(): void {
   const p = permissionQueue.value.shift();
   if (!p) return;
   void submitPermission(p, () => invoke("permission_cancel", { requestId: p.requestId }));
+}
+
+/** 待确认的权限请求条数(对话框只显示队首;>1 时提示还剩几项)。 */
+export function pendingPermissionCount(): number {
+  return permissionQueue.value.length;
 }
 
 /** 崩溃恢复(状态栏按钮)。返回恢复的会话数;-1 表示已在恢复中

@@ -174,6 +174,9 @@ pub fn run(args: &[String]) -> i32 {
                 if text.contains("需要权限") {
                     permission_counter += 1;
                     let perm_id = permission_counter;
+                    // 选项键与内核逐字一致:ACP 的 PermissionOption 是 camelCase
+                    // `optionId`;`id` 是假形状,曾让桥的选项校验恒判非法。
+                    // 名称保留内核真实文案(英文),中文化归前端。
                     let req = json!({
                         "jsonrpc":"2.0","id":perm_id,
                         "method":"session/request_permission",
@@ -181,8 +184,8 @@ pub fn run(args: &[String]) -> i32 {
                             "sessionId": session_id,
                             "toolCall": {"title": "模拟写文件"},
                             "options": [
-                                {"id":"allow","name":"允许","kind":"allow_once"},
-                                {"id":"deny","name":"拒绝","kind":"reject_once"}
+                                {"optionId":"allow-once","name":"Allow once","kind":"allow_once"},
+                                {"optionId":"reject-once","name":"Reject once","kind":"reject_once"}
                             ]
                         }
                     });
@@ -209,7 +212,7 @@ pub fn run(args: &[String]) -> i32 {
                         }
                     };
                     match outcome.as_deref() {
-                        Some("deny")
+                        Some("reject-once")
                             if {
                                 denied = true;
                                 true

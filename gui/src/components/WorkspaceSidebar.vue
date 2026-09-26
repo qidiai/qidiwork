@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { pushSystem, rememberSessionBinding, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
+import { deleteSession, pushSystem, rememberSessionBinding, rememberSessionCwd, sendTask, startSession, switchSession, useAgentState, type SessionListItem } from "../composables/useAgent";
 import { deleteWorkspace, initOffice, switchTask, useOfficeState } from "../composables/useOffice";
 import { initSkills, installSkillsPackage, isOfficeSkill, useSkills, type SkillInfo } from "../composables/useSkills";
 import { closeAllPreviews } from "../composables/usePreview";
@@ -88,6 +88,22 @@ interface HistoryEntry {
 }
 const history = ref<HistoryEntry[]>([]);
 const resuming = ref(false);
+/** 恢复反馈:常驻错误条(点击任意历史条目或 × 可清)+ 正在恢复的条目 id。 */
+const resumeError = ref<string | null>(null);
+const resumingSessionId = ref("");
+/** 超时看门狗句柄与点击时捕获的标题(session_restored 负载不带 title)。 */
+let resumeWatchdog = 0;
+let resumePendingTitle = "";
+
+/** session_restored 事件收尾:清看门狗、解除恢复态并给成功确认提示。
+ * 非本次恢复目标的事件不收尾(多会话并发时不误清)。 */
+function finishResume(sid: string): void {
+  if (!resuming.value || sid !== resumingSessionId.value) return;
+  window.clearTimeout(resumeWatchdog);
+  resuming.value = false;
+  resumingSessionId.value = "";
+  pushSystem(`已恢复会话「${resumePendingTitle}」`);
+}
 const confirmingClear = ref(false);
 let clearTimer = 0;
 
@@ -164,6 +180,8 @@ async function clearHistory(): Promise<void> {
 }
 
 async function resumeSession(h: HistoryEntry): Promise<void> {
+  // 任意历史条目被点击即清除上一轮恢复失败的常驻错误条
+  resumeError.value = null;
   if (h.session_id === sessionId.value || resuming.value) return;
   // 活动会话(已有实时转录):直接切换视图,不重恢复、不丢流
   const live = liveOf(h.session_id);
@@ -172,16 +190,30 @@ async function resumeSession(h: HistoryEntry): Promise<void> {
     return;
   }
   resuming.value = true;
+  resumingSessionId.value = h.session_id;
+  // 点击时捕获标题:session_restored 事件负载不一定带 title
+  resumePendingTitle = h.title ?? historyLabel(h);
+  // 超时看门狗:15 秒未收到 session_restored 也未 reject 则兜底收尾
+  window.clearTimeout(resumeWatchdog);
+  resumeWatchdog = window.setTimeout(() => {
+    if (!resuming.value) return;
+    resuming.value = false;
+    resumingSessionId.value = "";
+    resumeError.value = "恢复超时，请重试";
+  }, 15000);
   try {
     // 先登记 cwd 与绑定:回放(session_restored 事件)定位内核转录文件、
     // 同步产物面板时复用,免去额外拉取
     rememberSessionCwd(h.session_id, h.cwd);
     rememberSessionBinding(h.session_id, h.task);
     await invoke("session_resume", { sessionId: h.session_id });
+    // resolve 不做任何状态变更:等 session_restored 事件统一收尾
   } catch (e) {
-    pushSystem(`恢复会话失败:${String(e)}`);
-  } finally {
+    // 失败收尾:错误条保留后端原始文案,直到下次点击或手动 ×
+    window.clearTimeout(resumeWatchdog);
     resuming.value = false;
+    resumingSessionId.value = "";
+    resumeError.value = String(e);
   }
 }
 
@@ -213,6 +245,36 @@ async function doDelete(name: string): Promise<void> {
   }
 }
 
+// 历史会话删除(两步确认;二次点击才执行,3 秒不点自动复位)。
+const deletingSessionId = ref("");
+let deleteSessionTimer = 0;
+
+function askDeleteSession(id: string): void {
+  if (deletingSessionId.value === id) {
+    deletingSessionId.value = "";
+    window.clearTimeout(deleteSessionTimer);
+    void doDeleteSession(id);
+    return;
+  }
+  deletingSessionId.value = id;
+  window.clearTimeout(deleteSessionTimer);
+  deleteSessionTimer = window.setTimeout(() => (deletingSessionId.value = ""), 3000);
+}
+
+async function doDeleteSession(id: string): Promise<void> {
+  if (id === sessionId.value) {
+    pushSystem("请先切换到其他会话，再删除当前会话");
+    return;
+  }
+  try {
+    // 后端返回文案(已删除会话「xxxxxxxx」)原样提示;随后刷新登记簿
+    pushSystem(await deleteSession(id));
+    await loadHistory();
+  } catch (e) {
+    pushSystem(`删除失败:${String(e)}`);
+  }
+}
+
 onMounted(async () => {
   await initOffice();
   try {
@@ -225,8 +287,14 @@ onMounted(async () => {
 
 // 回合结束/会话恢复后刷新历史(新标题、新条目可见;k3 审计)
 void listen("acp-event", (e) => {
-  const t = (e.payload as { type?: string }).type;
-  if (t === "turn_completed" || t === "session_restored") void loadHistory();
+  const t = (e.payload as { type?: string; session_id?: string }).type;
+  if (t === "turn_completed" || t === "session_restored") {
+    if (t === "session_restored") {
+      const sid = (e.payload as { session_id?: string }).session_id ?? "";
+      finishResume(sid);
+    }
+    void loadHistory();
+  }
 });
 
 // 左区:任务工作区列表(真实数据)+ 常用技能入口(真实技能,office-*/bid-*)。
@@ -326,12 +394,19 @@ function pick(name: string): void {
           {{ confirmingClear ? "确认清空?" : "清空" }}
         </button>
       </div>
+      <div v-if="resumeError" class="resume-error">
+        <span class="resume-error-text">{{ resumeError }}</span>
+        <button class="resume-error-close" title="关闭" @click="resumeError = null">×</button>
+      </div>
       <ul class="ws-list">
         <li
           v-for="h in history"
           :key="h.session_id"
           class="ws-item"
-          :class="{ active: h.session_id === sessionId }"
+          :class="{
+            active: h.session_id === sessionId,
+            resuming: resumingSessionId === h.session_id,
+          }"
           :title="
             h.session_id === sessionId
               ? '当前会话'
@@ -349,10 +424,22 @@ function pick(name: string): void {
           <span v-if="h.task" class="ws-task" :title="`绑定工作区:${h.task}`">{{
             h.task
           }}</span>
-          <span v-if="liveOf(h.session_id)?.busy" class="ws-run">运行中</span>
+          <span v-if="resumingSessionId === h.session_id" class="ws-run">恢复中…</span>
+          <span v-else-if="liveOf(h.session_id)?.busy" class="ws-run">运行中</span>
           <span v-else-if="liveOf(h.session_id)?.queued" class="ws-count">{{
             liveOf(h.session_id)!.queued
           }}</span>
+          <span
+            v-if="deletingSessionId === h.session_id"
+            class="ws-del confirm"
+            @click.stop="askDeleteSession(h.session_id)"
+          >确认删除?</span>
+          <button
+            v-else
+            class="ws-del"
+            title="删除本条历史会话(登记簿先归档备份)"
+            @click.stop="askDeleteSession(h.session_id)"
+          >✕</button>
         </li>
       </ul>
     </div>
@@ -563,6 +650,44 @@ function pick(name: string): void {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 1px 6px;
+}
+
+/* 恢复反馈:历史会话列表上方的常驻错误条(下次点击或 × 才消失) */
+.resume-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--danger, #c0392b);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: var(--font-size-sm);
+}
+
+.resume-error-text {
+  flex: 1;
+  color: var(--danger, #c0392b);
+  word-break: break-all;
+}
+
+.resume-error-close {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.resume-error-close:hover {
+  color: var(--danger, #c0392b);
+}
+
+/* 恢复进行中的历史条目:置灰禁点 + 呼吸点,替代一闪而过的临时消息 */
+.ws-item.resuming {
+  opacity: 0.6;
+  cursor: wait;
+  pointer-events: none;
 }
 
 .skill-grid {

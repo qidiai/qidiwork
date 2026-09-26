@@ -701,6 +701,14 @@ pub async fn settings_create_model(
     )
 }
 
+/// 设置授权程度档位(设置面「授权程度」):ask/smart/trust,未知档位报错且不落盘。
+/// 生效时机:规则块对之后启动的会话生效;permission_mode 对之后启动的内核进程生效。
+#[tauri::command]
+pub async fn settings_set_permission_level(app: AppHandle, level: String) -> Result<(), String> {
+    let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
+    settings::set_permission_level(&settings::config_path(&home), &level)
+}
+
 /// 历史会话清单(侧栏「历史会话」)。
 #[tauri::command]
 pub async fn sessions_history(app: AppHandle) -> Result<Vec<PersistedSession>, String> {
@@ -763,6 +771,50 @@ pub async fn session_resume(
     b.load_session(&session_id, cwd, s.task).await?;
     b.notify_session_restored(&session_id);
     Ok(())
+}
+
+/// 删除单条历史会话登记。archive=true 时把该条追加进
+/// `<data_dir>/sessions-archive-<时间戳>.json`(读现有数组→push→写回,
+/// 不存在则新建;时间戳照 clear_sessions 的毫秒格式);随后从登记簿移除。
+/// 该会话若在桥上有活桶,先 best-effort 取消其进行中的回合再删登记;
+/// 内核磁盘转录不删——与「清空历史」语义一致。
+#[tauri::command]
+pub async fn session_delete(
+    app: AppHandle,
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+    archive: bool,
+) -> Result<String, String> {
+    let dir = app.path().app_data_dir().ok().ok_or("无法解析数据目录")?;
+    let entry = persist::load_sessions(&dir)
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .ok_or("会话未登记")?;
+    if archive {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = dir.join(format!("sessions-archive-{stamp}.json"));
+        let mut list: Vec<PersistedSession> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        list.push(entry);
+        let json = serde_json::to_string_pretty(&list)
+            .map_err(|e| format!("归档序列化失败: {e}"))?;
+        std::fs::write(&path, json).map_err(|e| format!("归档写入失败: {e}"))?;
+    }
+    // 桥上有活桶:先 best-effort 取消进行中的回合(失败不阻断删除);
+    // 内核磁盘转录保留——与「清空历史」语义一致。
+    let b = bridge.inner.lock().await.clone();
+    if let Some(b) = b {
+        if b.is_running() && b.sessions().iter().any(|(id, _, _)| id == &session_id) {
+            let _ = b.cancel(&session_id);
+        }
+    }
+    persist::remove_session(&dir, &session_id).map_err(|e| format!("删除失败: {e}"))?;
+    Ok(format!("已删除会话「{}」", &session_id[..8.min(session_id.len())]))
 }
 
 /// 历史会话数量(启动自动连接的判断依据)。

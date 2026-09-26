@@ -995,12 +995,22 @@ export function removeQueued(id: number): void {
 }
 
 /** 切换到指定会话(仅限已在本进程建有桶的会话,即「任务会话」)。
- * 产物面板同步跟着切(按登记簿绑定;无绑定保持现状)。 */
-export function switchSession(id: string): void {
+ * 产物面板同步跟着切(按登记簿绑定;无绑定保持现状)。
+ * 返回是否完成切换:无活桶时不改任何状态并返回 false,调用方可据此给兜底反馈。 */
+export function switchSession(id: string): boolean {
   if (buckets.value[id]) {
     activeId.value = id;
     void syncWorkspaceForSession(id);
+    return true;
   }
+  return false;
+}
+
+/** 删除单条历史会话(侧栏历史条目的「删除」)。
+ * archive=true(默认)由后端先把该条追加进归档文件再删登记,误删可找回;
+ * 返回后端提示文案,调用方原样交给 pushSystem。 */
+export function deleteSession(sessionId: string, archive = true): Promise<string> {
+  return invoke<string>("session_delete", { sessionId, archive });
 }
 
 /** 权限应答在途标志:invoke 期间为 true。两个作用:

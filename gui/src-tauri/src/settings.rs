@@ -1,5 +1,6 @@
 //! 设置面(方案 v2 P2 发布阻塞项):读写 `~/.qidi/config.toml` 的模型
-//! 选择(`[models].default`)与模型 API key(`[model.<id>].api_key`)。
+//! 选择(`[models].default`)与模型 API key(`[model.<id>].api_key`),
+//! 并读写授权程度档位(`[ui].permission_mode` + 智能自动 allow 规则组)。
 //!
 //! 纪律(照 cf-pager config_toml_edit 先例):
 //! - toml_edit 保格式编辑,不碰文件里其他任何内容;
@@ -35,6 +36,10 @@ pub struct SettingsInfo {
     /// 当前 `[models].default`(可能指向内置模型,不在 models 列表中)。
     pub default_model: Option<String>,
     pub models: Vec<ModelOption>,
+    /// `[ui].permission_mode` 原样透传;缺省/无法解析时为 None(前端回退谨慎询问)。
+    pub permission_mode: Option<String>,
+    /// `[permission].allow` 是否恰为智能自动只读规则组(见 [`SMART_AUTO_RULES`])。
+    pub smart_auto_rules_active: bool,
 }
 
 /// 读取设置。文件不存在 → 空列表;解析失败 → Err(拒绝猜测)。
@@ -45,6 +50,8 @@ pub fn read_settings(path: &Path) -> Result<SettingsInfo, String> {
             return Ok(SettingsInfo {
                 default_model: None,
                 models: Vec::new(),
+                permission_mode: None,
+                smart_auto_rules_active: false,
             });
         }
         Err(e) => return Err(format!("读取 {} 失败: {e}", path.display())),
@@ -80,10 +87,33 @@ pub fn read_settings(path: &Path) -> Result<SettingsInfo, String> {
         }
     }
     models.sort_by(|a, b| a.id.cmp(&b.id));
+    let permission_mode = doc
+        .get("ui")
+        .and_then(|i| i.get("permission_mode"))
+        .and_then(|i| i.as_str())
+        .map(str::to_string);
+    let smart_auto_rules_active = read_smart_rules_active(&doc);
     Ok(SettingsInfo {
         default_model,
         models,
+        permission_mode,
+        smart_auto_rules_active,
     })
+}
+
+/// `[permission].allow` 是否恰为智能自动只读规则组(逐元素比对,顺序与
+/// 内容都要一致;用户手工改过的 allow 不算,回显不说谎)。
+fn read_smart_rules_active(doc: &toml_edit::DocumentMut) -> bool {
+    doc.get("permission")
+        .and_then(|i| i.get("allow"))
+        .and_then(|i| i.as_array())
+        .is_some_and(|items| {
+            items.len() == SMART_AUTO_RULES.len()
+                && items
+                    .iter()
+                    .zip(SMART_AUTO_RULES)
+                    .all(|(v, e)| v.as_str() == Some(e))
+        })
 }
 
 /// 保存:设 `[models].default`,可选写 `[model.<id>].api_key`。
@@ -177,6 +207,108 @@ pub fn set_default_model(path: &Path, model_id: &str) -> Result<(), String> {
         .parse()
         .map_err(|e| format!("{} 不是有效 TOML,拒绝覆盖: {e}", path.display()))?;
     write_default(path, &mut doc, model_id)
+}
+
+/// 智能自动档放行的只读规则组(写入 `[permission].allow`,每项为裸工具名
+/// = 该工具全通配;五项均在内核 cf-workspace `rules.rs::tool_name_to_filter`
+/// 白名单内,由 `resolution.rs::parse_toml_permission_section` 的紧凑数组
+/// 语法解析)。
+pub const SMART_AUTO_RULES: [&str; 5] = ["Read", "Grep", "Glob", "WebSearch", "WebFetch"];
+
+/// 设置授权程度档位(设置面「授权程度」,T3)。
+///
+/// - `ask`   → `permission_mode = "default"`,移除智能自动规则块;
+/// - `smart` → `permission_mode = "default"`,写入只读 allow 规则组;
+/// - `trust` → `permission_mode = "always-approve"`,移除智能自动规则块。
+///
+/// 未知档位在读文件/落盘前直接 Err,文件原样不动。生效时机(双层):
+/// allow 规则对之后启动的会话生效(cf-shell spawn.rs 逐会话解析),
+/// permission_mode 对之后启动的内核进程生效(permissions.rs 启动读取)。
+pub fn set_permission_level(path: &Path, level: &str) -> Result<(), String> {
+    let mode = permission_mode_for_level(level)?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("读取 {} 失败: {e}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = content
+        .parse()
+        .map_err(|e| format!("{} 不是有效 TOML,拒绝覆盖: {e}", path.display()))?;
+
+    // [ui].permission_mode:档位写值;[ui] 非标准表时拒绝静默改写
+    let ui = doc
+        .entry("ui")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(ui) = ui.as_table_like_mut() else {
+        return Err("[ui] 已存在但不是标准表,拒绝覆盖;请手工修复该段".to_string());
+    };
+    ui.insert("permission_mode", toml_edit::value(mode));
+
+    // [permission].allow:smart 写入只读规则组;ask/trust 移除规则块
+    if level == "smart" {
+        let permission = doc
+            .entry("permission")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(permission) = permission.as_table_like_mut() else {
+            return Err("[permission] 已存在但不是标准表,拒绝覆盖;请手工修复该段".to_string());
+        };
+        // 就地改造已存在的 allow 数组:保留键值 Item 及其 decor(键前注释),
+        // 整体 insert 会丢弃旧 Item 的 decor,导致用户注释丢失。
+        if let Some(existing) = permission.get_mut("allow") {
+            if let Some(arr) = existing.as_array_mut() {
+                arr.clear();
+                for rule in SMART_AUTO_RULES {
+                    arr.push(rule);
+                }
+            } else {
+                return Err(
+                    "[permission].allow 已存在但不是数组,拒绝覆盖;请手工修复该键".to_string(),
+                );
+            }
+        } else {
+            let mut arr = toml_edit::Array::new();
+            for rule in SMART_AUTO_RULES {
+                arr.push(rule);
+            }
+            permission.insert("allow", toml_edit::value(arr));
+        }
+    } else if let Some(permission) = doc.get_mut("permission") {
+        // 无 [permission] 段时无需清理
+        let Some(permission) = permission.as_table_like_mut() else {
+            return Err("[permission] 已存在但不是标准表,拒绝覆盖;请手工修复该段".to_string());
+        };
+        permission.remove("allow");
+    }
+
+    atomic_write(path, &doc.to_string())
+}
+
+/// 档位 → `[ui].permission_mode` 取值;未知档位在此拒绝(落盘前)。
+fn permission_mode_for_level(level: &str) -> Result<&'static str, String> {
+    match level {
+        "ask" | "smart" => Ok("default"),
+        "trust" => Ok("always-approve"),
+        other => Err(format!("未知授权档位: {other}")),
+    }
+}
+
+/// 原子落盘(与 [`write_default`]/[`create_model`] 同一模式):
+/// 同目录临时文件 + rename,失败时清理半截 tmp。
+fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 {} 失败: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入临时文件失败: {e}"));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("原子替换失败: {e}")
+    })?;
+    Ok(())
 }
 
 /// TOML 表名安全校验:仅允许 `[A-Za-z0-9_-]`,拒绝点号/引号/空白等
@@ -413,6 +545,115 @@ mod tests {
         assert_eq!(s.default_model, None);
         // 空配置下保存应明确拒绝(没有可选模型)
         assert!(save_settings(&p, "m1", None).is_err());
+    }
+
+    #[test]
+    fn set_permission_level_writes_three_levels() {
+        let p = tmp_path("level-three");
+        // ask:裸文件 → default,且无规则块
+        std::fs::write(&p, "[model.m1]\nmodel = \"a\"\n").unwrap();
+        set_permission_level(&p, "ask").unwrap();
+        let s = read_settings(&p).unwrap();
+        assert_eq!(s.permission_mode.as_deref(), Some("default"));
+        assert!(!s.smart_auto_rules_active);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("allow"), "ask 不留规则块: {text}");
+        assert!(text.contains("[ui]\npermission_mode = \"default\""), "{text}");
+
+        // smart:default + 只读规则组
+        set_permission_level(&p, "smart").unwrap();
+        let s = read_settings(&p).unwrap();
+        assert_eq!(s.permission_mode.as_deref(), Some("default"));
+        assert!(s.smart_auto_rules_active);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("allow = [\"Read\", \"Grep\", \"Glob\", \"WebSearch\", \"WebFetch\"]"),
+            "{text}"
+        );
+
+        // trust:always-approve,规则块移除
+        set_permission_level(&p, "trust").unwrap();
+        let s = read_settings(&p).unwrap();
+        assert_eq!(s.permission_mode.as_deref(), Some("always-approve"));
+        assert!(!s.smart_auto_rules_active);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("allow"), "trust 移除规则块: {text}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn set_permission_level_is_idempotent() {
+        let p = tmp_path("level-idem");
+        std::fs::write(&p, "[model.m1]\nmodel = \"a\"\n").unwrap();
+        set_permission_level(&p, "smart").unwrap();
+        let once = std::fs::read_to_string(&p).unwrap();
+        set_permission_level(&p, "smart").unwrap();
+        let twice = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(once, twice, "同档位重复写入必须逐字节一致");
+        set_permission_level(&p, "ask").unwrap();
+        set_permission_level(&p, "smart").unwrap();
+        let back = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(once, back, "切走再切回必须回到同一内容");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn set_permission_level_preserves_other_sections_and_comments() {
+        let p = tmp_path("level-keep");
+        std::fs::write(
+            &p,
+            "# 顶部注释\n[models]\ndefault = \"m1\" # 旧默认\n\n[ui]\nposition = \"center\"\n\n[permission]\n# 用户自己的注释\nallow = [\"Bash\"]\n\n[model.m1]\nmodel = \"a\"\n",
+        )
+        .unwrap();
+        set_permission_level(&p, "smart").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("# 顶部注释"), "顶部注释必须保留");
+        assert!(text.contains("default = \"m1\" # 旧默认"), "default 行原样: {text}");
+        assert!(text.contains("position = \"center\""), "[ui] 其他键原样: {text}");
+        assert!(text.contains("# 用户自己的注释"), "[permission] 注释保留: {text}");
+        assert!(
+            text.contains("allow = [\"Read\", \"Grep\", \"Glob\", \"WebSearch\", \"WebFetch\"]"),
+            "{text}"
+        );
+        assert!(!text.contains("\"Bash\""), "旧 allow 被替换为标准组: {text}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn set_permission_level_rejects_unknown_level_and_bad_sections() {
+        // 未知档位:错误信息可读,文件原样不动(校验在读文件之前)
+        let p = tmp_path("level-reject");
+        let original = "models = \"oops\"\n\n[ui]\nposition = \"c\"\n";
+        std::fs::write(&p, original).unwrap();
+        let err = set_permission_level(&p, "yolo").unwrap_err();
+        assert!(err.contains("未知授权档位"), "{err}");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), original);
+
+        // [permission] 非标准表:拒绝且文件原样
+        let p2 = tmp_path("level-nontable");
+        std::fs::write(&p2, "permission = \"oops\"\n").unwrap();
+        let err = set_permission_level(&p2, "smart").unwrap_err();
+        assert!(err.contains("不是标准表"), "{err}");
+        assert_eq!(std::fs::read_to_string(&p2).unwrap(), "permission = \"oops\"\n");
+
+        // [ui] 非标准表:拒绝
+        let p3 = tmp_path("level-uinontable");
+        std::fs::write(&p3, "ui = 3\n").unwrap();
+        let err = set_permission_level(&p3, "trust").unwrap_err();
+        assert!(err.contains("[ui]"), "{err}");
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(&p2).ok();
+        std::fs::remove_file(&p3).ok();
+    }
+
+    #[test]
+    fn permission_level_mapping_covers_three_levels() {
+        assert_eq!(permission_mode_for_level("ask").unwrap(), "default");
+        assert_eq!(permission_mode_for_level("smart").unwrap(), "default");
+        assert_eq!(permission_mode_for_level("trust").unwrap(), "always-approve");
+        assert!(permission_mode_for_level("").is_err());
+        assert!(permission_mode_for_level("Ask").is_err());
+        assert!(permission_mode_for_level("auto").is_err());
     }
 
     #[test]

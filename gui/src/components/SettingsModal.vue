@@ -38,6 +38,52 @@ const apiKey = ref("");
 const saving = ref(false);
 const showKey = ref(false);
 
+// 授权程度三档(T3):与 settings.rs::set_permission_level 落库语义一一对应;
+// 回显映射:always-approve=完全信任,default+智能只读规则组=智能自动,其余/读不到=谨慎询问。
+type PermLevel = "ask" | "smart" | "trust";
+type SettingsInfoEx = SettingsInfo & {
+  permission_mode?: string | null;
+  smart_auto_rules_active?: boolean;
+};
+const permLevels: { level: PermLevel; label: string; desc: string }[] = [
+  { level: "ask", label: "谨慎询问", desc: "每敏感操作都弹窗确认，最安全" },
+  { level: "smart", label: "智能自动", desc: "查看搜索读取自动放行，写入执行删除仍逐次确认" },
+  { level: "trust", label: "完全信任", desc: "全部自动执行不再询问，仅建议在可信项目中使用" },
+];
+const permLevel = ref<PermLevel>("ask");
+const permSaving = ref(false);
+
+function syncPermLevel(): void {
+  const cur = info.value as SettingsInfoEx | null;
+  if (!cur) {
+    permLevel.value = "ask"; // 读不到/异常:回退谨慎询问
+  } else if (cur.permission_mode === "always-approve") {
+    permLevel.value = "trust";
+  } else if (cur.smart_auto_rules_active === true) {
+    permLevel.value = "smart";
+  } else {
+    permLevel.value = "ask";
+  }
+}
+
+// 点击即保存:乐观更新,失败回滚并 pushSystem 提示。
+async function setPermLevel(level: PermLevel): Promise<void> {
+  if (permSaving.value || level === permLevel.value) return;
+  const prev = permLevel.value;
+  permLevel.value = level;
+  permSaving.value = true;
+  try {
+    await invoke("settings_set_permission_level", { level });
+    const label = permLevels.find((p) => p.level === level)?.label ?? level;
+    pushSystem(`授权程度已设为「${label}」,新档位对之后启动的会话生效。`);
+  } catch (e) {
+    permLevel.value = prev;
+    pushSystem(`授权程度保存失败:${String(e)}`);
+  } finally {
+    permSaving.value = false;
+  }
+}
+
 // 更新提示条(R1-GUI):onMounted 拉取,有新版才显示;失败静默。
 const update = ref<{ version: string; url: string } | null>(null);
 // 诊断日志导出(R2)。
@@ -170,6 +216,7 @@ async function load(): Promise<void> {
   loadError.value = "";
   try {
     info.value = await readSettings();
+    syncPermLevel();
     selectedId.value = info.value.default_model ?? info.value.models[0]?.id ?? "";
     // 无任何模型定义:自动展开新建表单(首次运行引导)
     if (!info.value.models.length && !info.value.default_model) {
@@ -296,6 +343,25 @@ onMounted(() => {
               <button class="btn primary" @click="startLogin">登录 QIDI 账号</button>
             </div>
           </template>
+        </div>
+
+        <!-- 授权程度(T3):三档,点击即保存,失败回滚并提示 -->
+        <div class="perm-box">
+          <div class="create-title">授权程度</div>
+          <label v-for="p in permLevels" :key="p.level" class="perm-row">
+            <input
+              type="radio"
+              name="perm-level"
+              :checked="permLevel === p.level"
+              :disabled="permSaving"
+              @change="setPermLevel(p.level)"
+            />
+            <span class="perm-texts">
+              <span class="perm-label">{{ p.label }}</span>
+              <span class="perm-desc">{{ p.desc }}</span>
+            </span>
+          </label>
+          <p class="field-hint">新档位对之后启动的会话生效</p>
         </div>
 
         <!-- 新建模型表单(首次运行引导) -->
@@ -662,5 +728,37 @@ onMounted(() => {
   font-family: monospace;
   font-weight: 700;
   letter-spacing: 1px;
+}
+
+.perm-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+
+.perm-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.perm-texts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.perm-label {
+  color: var(--text-primary);
+}
+
+.perm-desc {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
 }
 </style>

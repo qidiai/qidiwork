@@ -406,7 +406,7 @@ impl acp::Agent for MvpAgent {
                                 .cloned(),
                         )
                         .prompt_capabilities(
-                            acp::PromptCapabilities::new().embedded_context(true),
+                            acp::PromptCapabilities::new().embedded_context(true).image(true),
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),

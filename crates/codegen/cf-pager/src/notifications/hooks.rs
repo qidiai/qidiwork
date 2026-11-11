@@ -94,20 +94,22 @@ mod tests {
     fn test_event() -> NotificationEvent {
         NotificationEvent {
             kind: NotificationEventKind::TurnComplete,
-            title: "Grok".into(),
+            title: "QIDI Code".into(),
             body: "test body payload".into(),
             session_id: Some("test-session-123".into()),
         }
     }
 
+    // sh/printf/touch/env are POSIX tools; execute_hook itself is POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn sets_environment_variables() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let out_posix = out.display().to_string().replace('\\', "/");
         let command = format!(
             "printf 'QIDI_EVENT=%s\\nQIDI_MESSAGE=%s\\nQIDI_SESSION_ID=%s\\n' \
-             \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > \"{out_posix}\""
+             \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > {}",
+            out.display()
         );
 
         execute_hook(
@@ -133,12 +135,13 @@ mod tests {
         );
     }
 
+    // sh/printf/touch/env are POSIX tools; execute_hook itself is POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn omits_session_id_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let out_posix = out.display().to_string().replace('\\', "/");
-        let command = format!("env > \"{out_posix}\"");
+        let command = format!("env > {}", out.display());
 
         execute_hook(
             &command,
@@ -194,12 +197,13 @@ mod tests {
         );
     }
 
+    // sh/printf/touch/env are POSIX tools; execute_hook itself is POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn successful_command_completes_without_error() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
-        let marker_posix = marker.display().to_string().replace('\\', "/");
-        let command = format!("touch \"{marker_posix}\"");
+        let command = format!("touch {}", marker.display());
 
         execute_hook(
             &command,
@@ -228,9 +232,8 @@ mod tests {
     fn timeout_clamped_to_minimum_one_second() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
-        let marker_posix = marker.display().to_string().replace('\\', "/");
         let hook = NotificationHook {
-            command: format!("sleep 100; touch \"{marker_posix}\""),
+            command: format!("sleep 100; touch {}", marker.display()),
             events: vec![],
             only_unfocused: false,
             timeout_secs: 0, // exercises the .max(1) clamp inside run_hook
@@ -254,15 +257,17 @@ mod tests {
         );
     }
 
+    // sh/printf/touch/env are POSIX tools; execute_hook itself is POSIX semantics.
+    #[cfg(unix)]
     #[test]
     fn run_hook_passes_correct_env_via_thread() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let out_posix = out.display().to_string().replace('\\', "/");
         let hook = NotificationHook {
             command: format!(
                 "printf 'QIDI_EVENT=%s\\nQIDI_MESSAGE=%s\\nQIDI_SESSION_ID=%s\\n' \
-                 \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > \"{out_posix}\""
+                 \"$QIDI_EVENT\" \"$QIDI_MESSAGE\" \"$QIDI_SESSION_ID\" > {}",
+                out.display()
             ),
             events: vec![],
             only_unfocused: false,

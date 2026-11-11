@@ -254,6 +254,13 @@ pub fn preset_names() -> Vec<String> {
 /// Resolve a named toolset preset to its [`ToolServerConfig`], or `None` if unknown.
 pub fn toolset_for_preset(preset: &str) -> Option<ToolServerConfig> {
     let normalized = preset.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+    // Rebrand aliases: persisted configs and docs may still carry the
+    // pre-fork names; each maps onto its renamed native preset.
+    let normalized = match normalized.as_str() {
+        "qidi-build" | "grok-build" => "cf-tools".to_owned(),
+        "qidi-build-computer" | "grok-computer" => "cf-tools-computer".to_owned(),
+        other => other.to_owned(),
+    };
     native_toolset_presets()
         .into_iter()
         .find(|(name, _)| *name == normalized)
@@ -280,6 +287,20 @@ fn default_qidi_build_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&qidi_build::UpdateGoalTool).into(),
+            // Evolution Phase 1 (B2): the sanctioned channel for installing a
+            // user skill. `Edit`-class writes into `~/.qidi/skills/**` are
+            // gated to `Ask`, so this is the only supported deploy path.
+            (&cf_tools::implementations::skills::deploy::DeploySkillTool).into(),
+            // Skill *invocation*, distinct from `deploy_skill` above (which only
+            // installs a skill into the user skills dir). This is the tool that
+            // loads a skill's `SKILL.md` body into the conversation on demand.
+            // Canonical registry id `OpenCode:skill` (the `OpenCode` namespace
+            // token — registry ids use the namespace's Display form);
+            // `ToolKind::Skill` is always allowed by `capability.rs`, so
+            // restricted subagents can invoke skills too. F1: wires the
+            // activation-layer half of the subagent skill-surface gap (the tool
+            // previously lived only in `opencode_toolset()`).
+            (&opencode::OpenCodeSkillTool).into(),
         ],
         behavior_preset: None,
     }
@@ -391,29 +412,19 @@ fn plan_toolset() -> ToolServerConfig {
 /// `enter_plan_mode`, `exit_plan_mode`, and `ask_user_question`.
 /// This allows the agent to enter a structured planning phase before
 /// writing code, with user-approved plans.
+///
+/// **Derived, not hand-copied.** This preset is the main session's default
+/// agent (`qidi-build-plan`), so it must carry everything the default toolset
+/// carries. Copying the list by hand is what silently dropped the skill stack
+/// (`deploy_skill` + skill invocation) and `wait_tasks` here; deriving from
+/// [`default_qidi_build_toolset`] keeps every future default addition shared.
 fn qidi_build_plan_toolset() -> ToolServerConfig {
+    let mut tools = default_qidi_build_toolset().tools;
+    tools.push((&qidi_build::EnterPlanModeTool).into());
+    tools.push((&qidi_build::ExitPlanModeTool).into());
+    tools.push((&qidi_build::AskUserQuestionTool).into());
     ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&qidi_build::ReadFileTool).into(),
-            (&qidi_build::SearchReplaceTool).into(),
-            (&qidi_build::ListDirTool).into(),
-            (&qidi_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&qidi_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            task_tool_config(),
-            (&qidi_build::SchedulerCreateTool).into(),
-            (&qidi_build::SchedulerDeleteTool).into(),
-            (&qidi_build::SchedulerListTool).into(),
-            (&qidi_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&qidi_build::UpdateGoalTool).into(),
-            (&qidi_build::EnterPlanModeTool).into(),
-            (&qidi_build::ExitPlanModeTool).into(),
-            (&qidi_build::AskUserQuestionTool).into(),
-        ],
+        tools,
         behavior_preset: None,
     }
 }
@@ -424,65 +435,46 @@ fn qidi_build_plan_toolset() -> ToolServerConfig {
 /// grep, list_dir for research, plus the full subagent/skill/MCP/plan
 /// stack for orchestration.
 fn orchestrator_toolset() -> ToolServerConfig {
+    // Derived from the default toolset, like `qidi_build_plan_toolset`:
+    // hand-copying is what silently dropped the skill stack (`deploy_skill` +
+    // skill invocation) this preset's doc comment promises.
+    let mut tools = default_qidi_build_toolset().tools;
+    // Keep the "no file editing" invariant below honest: the orchestrator must
+    // delegate edits to subagents, not perform them itself.
+    let search_replace_id = ToolConfig::from(&qidi_build::SearchReplaceTool).id;
+    tools.retain(|t| t.id != search_replace_id);
+    tools.push((&qidi_build::EnterPlanModeTool).into());
+    tools.push((&qidi_build::ExitPlanModeTool).into());
+    tools.push((&qidi_build::AskUserQuestionTool).into());
+    tools.push((&qidi_build::WebSearchTool).into());
+    tools.push((&qidi_build::WebFetchTool).into());
+    tools.push((&qidi_build::ImageGenTool).into());
+    tools.push((&qidi_build::ImageToVideoTool).into());
+    tools.push((&qidi_build::ReferenceToVideoTool).into());
+    tools.push((&memory::MemorySearchImpl).into());
+    tools.push((&memory::MemoryGetImpl).into());
     ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&qidi_build::ReadFileTool).into(),
-            (&qidi_build::ListDirTool).into(),
-            (&qidi_build::GrepTool).into(),
-            task_tool_config(),
-            task_output_tool_config(),
-            wait_tasks_tool_config(),
-            kill_task_tool_config(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&qidi_build::TodoWriteTool).into(),
-            (&qidi_build::EnterPlanModeTool).into(),
-            (&qidi_build::ExitPlanModeTool).into(),
-            (&qidi_build::AskUserQuestionTool).into(),
-            (&qidi_build::UpdateGoalTool).into(),
-            (&qidi_build::SchedulerCreateTool).into(),
-            (&qidi_build::SchedulerDeleteTool).into(),
-            (&qidi_build::SchedulerListTool).into(),
-            (&qidi_build::MonitorTool).into(),
-            (&qidi_build::WebSearchTool).into(),
-            (&qidi_build::WebFetchTool).into(),
-            (&qidi_build::ImageGenTool).into(),
-            (&qidi_build::ImageToVideoTool).into(),
-            (&qidi_build::ReferenceToVideoTool).into(),
-            (&memory::MemorySearchImpl).into(),
-            (&memory::MemoryGetImpl).into(),
-        ],
+        tools,
         behavior_preset: None,
     }
 }
-/// QIDI Code + plan mode toolset WITHOUT subagent tools.
+/// QIDI Code + plan mode toolset WITHOUT subagent spawning.
 ///
-/// Same as `qidi_build_plan_toolset` but excludes `TaskTool`,
-/// `TaskOutputTool`, and `KillTaskTool`. Use this when the shell
-/// does not have subagent infrastructure wired up.
+/// Same as `qidi_build_plan_toolset` but excludes `TaskTool`
+/// (`spawn_subagent`) and `WaitTasksTool`. It keeps `TaskOutputTool` and
+/// `KillTaskTool`: those are the generic background-task handles, and the
+/// agent builder rejects `run_terminal_command`'s `enabled_background` unless
+/// both are present (background bash has to stay observable/cancellable).
+/// Use this when the shell does not have subagent infrastructure wired up.
 fn qidi_build_plan_no_subagents_toolset() -> ToolServerConfig {
+    // Derive from the plan preset (itself derived from the default toolset),
+    // then strip the subagent-spawn tools. Hand-copying is what let this
+    // preset drift away from the default toolset in the first place.
+    let subagent_spawn_tool_ids = [task_tool_config().id, wait_tasks_tool_config().id];
+    let mut tools = qidi_build_plan_toolset().tools;
+    tools.retain(|t| !subagent_spawn_tool_ids.contains(&t.id));
     ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&qidi_build::ReadFileTool).into(),
-            (&qidi_build::SearchReplaceTool).into(),
-            (&qidi_build::ListDirTool).into(),
-            (&qidi_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&qidi_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            (&qidi_build::SchedulerCreateTool).into(),
-            (&qidi_build::SchedulerDeleteTool).into(),
-            (&qidi_build::SchedulerListTool).into(),
-            (&qidi_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&qidi_build::UpdateGoalTool).into(),
-            (&qidi_build::EnterPlanModeTool).into(),
-            (&qidi_build::ExitPlanModeTool).into(),
-            (&qidi_build::AskUserQuestionTool).into(),
-        ],
+        tools,
         behavior_preset: None,
     }
 }
@@ -491,27 +483,12 @@ fn qidi_build_plan_no_subagents_toolset() -> ToolServerConfig {
 /// Same as `default_qidi_build_toolset` with the `AskUserQuestionTool` added,
 /// allowing the agent to ask structured questions without full plan mode.
 fn qidi_build_ask_user_toolset() -> ToolServerConfig {
+    // Derived from the default toolset; see `qidi_build_plan_toolset` for why
+    // these presets must not hand-copy the default list.
+    let mut tools = default_qidi_build_toolset().tools;
+    tools.push((&qidi_build::AskUserQuestionTool).into());
     ToolServerConfig {
-        tools: vec![
-            bash_tool_config(),
-            (&qidi_build::ReadFileTool).into(),
-            (&qidi_build::SearchReplaceTool).into(),
-            (&qidi_build::ListDirTool).into(),
-            (&qidi_build::GrepTool).into(),
-            kill_task_tool_config(),
-            (&qidi_build::TodoWriteTool).into(),
-            task_output_tool_config(),
-            wait_tasks_tool_config(),
-            task_tool_config(),
-            (&qidi_build::SchedulerCreateTool).into(),
-            (&qidi_build::SchedulerDeleteTool).into(),
-            (&qidi_build::SchedulerListTool).into(),
-            (&qidi_build::MonitorTool).into(),
-            (&search_tool::SearchTool).into(),
-            (&use_tool::UseTool).into(),
-            (&qidi_build::UpdateGoalTool).into(),
-            (&qidi_build::AskUserQuestionTool).into(),
-        ],
+        tools,
         behavior_preset: None,
     }
 }
@@ -655,10 +632,18 @@ where
 )]
 #[strum(serialize_all = "kebab-case")]
 pub enum BuiltinAgentName {
+    /// strum alias keeps the pre-fork wire name parseable: persisted configs,
+    /// plugin manifests, and docs may still say "cf-tools", and the round-trip
+    /// contract (from_str -> as_ref) pins that same string back out.
+    #[strum(serialize = "cf-tools")]
     QidiBuild,
+    #[strum(serialize = "cf-tools-concise")]
     QidiBuildConcise,
+    #[strum(serialize = "qidi-build-plan")]
     QidiBuildPlan,
+    #[strum(serialize = "qidi-build-plan-no-subagents")]
     QidiBuildPlanNoSubagents,
+    #[strum(serialize = "cf-tools-ask-user")]
     QidiBuildAskUser,
     Codex,
     Opencode,
@@ -1395,13 +1380,16 @@ impl AgentDefinition {
         &mut self,
         file_tools: Vec<cf_tools::registry::types::ToolConfig>,
     ) {
+        // Ids are the canonical `Namespace:tool` form produced by
+        // `ToolConfig::from(&T)`; the pre-migration `cf_tools::*` strings
+        // never matched live toolsets, silently disabling the swap.
         const FILE_TOOL_SLOTS: &[[&str; 2]] = &[
-            ["cf_tools::read_file", "cf_tools::hashline_read"],
+            ["QidiBuild:read_file", "QidiBuildHashline:hashline_read"],
             [
-                "cf_tools::search_replace",
-                "cf_tools::hashline_edit",
+                "QidiBuild:search_replace",
+                "QidiBuildHashline:hashline_edit",
             ],
-            ["cf_tools::grep", "cf_tools::hashline_grep"],
+            ["QidiBuild:grep", "QidiBuildHashline:hashline_grep"],
         ];
         for tool in self.tool_config.tools.iter_mut() {
             let Some(slot) = FILE_TOOL_SLOTS
@@ -2231,7 +2219,7 @@ description: Test default tool config
         let bundled = tmp
             .path()
             .join("nested")
-            .join(".grok")
+            .join(".qidi")
             .join("bundled")
             .join("agents")
             .join("bundled-agent.md");
@@ -2267,7 +2255,7 @@ description: Test default tool config
             "promptBody" : "You are a coding assistant." }
         );
         let def = AgentDefinition::from_json(&json).unwrap();
-        let task_tool_id = "cf_tools::task";
+        let task_tool_id = "QidiBuild:task";
         assert!(
             def.tool_config.tools.iter().any(|tc| tc.id == task_tool_id),
             "from_json() without toolConfig should include TaskTool in default toolset, \
@@ -2278,6 +2266,143 @@ description: Test default tool config
                 .map(|tc| &tc.id)
                 .collect::<Vec<_>>()
         );
+    }
+    /// F1: the default QIDI toolset must ship the skill *invocation* tool, not
+    /// only the `deploy_skill` install tool. Subagents inherit this toolset, so
+    /// its presence is what lets a subagent activate a skill (`ToolKind::Skill`
+    /// is always allowed by capability filtering).
+    #[test]
+    fn default_toolset_includes_skill_invocation_tool() {
+        let config = default_qidi_build_toolset();
+        let skill_id = ToolConfig::from(&opencode::OpenCodeSkillTool).id;
+        assert_eq!(skill_id, "OpenCode:skill", "sanity: skill tool id");
+
+        let entry = config.tools.iter().find(|tc| tc.id == skill_id).unwrap_or_else(|| {
+            panic!(
+                "default_qidi_build_toolset() must include the skill invocation tool \
+                 `{skill_id}`; got tool IDs: {:?}",
+                config.tools.iter().map(|tc| &tc.id).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            entry.kind,
+            Some(cf_tools::types::tool::ToolKind::Skill),
+            "skill invocation tool must carry ToolKind::Skill so capability \
+             filtering treats it as always-allowed"
+        );
+
+        // The install tool must remain, distinct from the invocation tool.
+        let deploy_id =
+            ToolConfig::from(&cf_tools::implementations::skills::deploy::DeploySkillTool).id;
+        assert!(
+            config.tools.iter().any(|tc| tc.id == deploy_id),
+            "deploy_skill (`{deploy_id}`) must still be present alongside the \
+             skill invocation tool"
+        );
+    }
+    /// FAIL-1: every main-session preset must ship the skill stack.
+    ///
+    /// `qidi-build-plan` is the default main-session agent (TUI *and* headless),
+    /// and its toolset used to be a hand-copied list that drifted away from
+    /// [`default_qidi_build_toolset`], so the F1 skill tools never reached the
+    /// main session. The presets now derive from the default toolset; this test
+    /// pins the whole class, not just the one preset that was reported.
+    #[test]
+    fn every_main_session_toolset_ships_skill_invocation() {
+        let skill_id = ToolConfig::from(&opencode::OpenCodeSkillTool).id;
+        assert_eq!(skill_id, "OpenCode:skill", "sanity: skill tool id");
+        let deploy_id =
+            ToolConfig::from(&cf_tools::implementations::skills::deploy::DeploySkillTool).id;
+
+        for name in [
+            BuiltinAgentName::QidiBuild,
+            BuiltinAgentName::QidiBuildPlan,
+            BuiltinAgentName::QidiBuildPlanNoSubagents,
+            BuiltinAgentName::QidiBuildAskUser,
+            BuiltinAgentName::QidiBuildOrchestrator,
+        ] {
+            let tools = name.definition().tool_config.tools;
+            let ids: Vec<&str> = tools.iter().map(|tc| tc.id.as_str()).collect();
+            assert!(
+                ids.contains(&skill_id.as_str()),
+                "{name:?} must ship skill invocation `{skill_id}`; got tool IDs: {ids:?}"
+            );
+            assert!(
+                ids.contains(&deploy_id.as_str()),
+                "{name:?} must ship `deploy_skill` (`{deploy_id}`); got tool IDs: {ids:?}"
+            );
+        }
+
+        // Only `spawn_subagent` and `wait_commands_or_subagents` separate the
+        // plan preset from its no-subagents sibling, so the derivation above is
+        // not silently changing which tools the sibling exposes.
+        // (`get_task_output`/`kill_task` must stay: the builder rejects
+        // `run_terminal_command`'s `enabled_background` without them.)
+        let plan_ids: Vec<String> = BuiltinAgentName::QidiBuildPlan
+            .definition()
+            .tool_config
+            .tools
+            .iter()
+            .map(|tc| tc.id.clone())
+            .collect();
+        let no_subagent_ids: Vec<String> = BuiltinAgentName::QidiBuildPlanNoSubagents
+            .definition()
+            .tool_config
+            .tools
+            .iter()
+            .map(|tc| tc.id.clone())
+            .collect();
+        assert_eq!(
+            plan_ids.len(),
+            no_subagent_ids.len() + 2,
+            "plan preset should only add `spawn_subagent` + `wait_commands_or_subagents`; \
+             plan={plan_ids:?} no-subagents={no_subagent_ids:?}"
+        );
+    }
+    /// F1: activating a skill through the default toolset's skill tool loads the
+    /// skill's `SKILL.md` body into the tool result.
+    #[tokio::test]
+    async fn skill_invocation_tool_loads_skill_body() {
+        use cf_tools::implementations::opencode::skill::{SkillInput, SkillTool};
+        use cf_tools::implementations::skills::types::SkillInfo;
+        use cf_tools::types::resources::{AvailableSkills, Resources};
+        use cf_tools::types::tool_metadata::test_ctx;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skill_path = tmp.path().join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: help\ndescription: Show help\n---\n# Help Skill\n\nDo the helpful thing.",
+        )
+        .unwrap();
+
+        let mut resources = Resources::new();
+        resources.insert(AvailableSkills(vec![SkillInfo {
+            name: "help".to_string(),
+            description: "Show help".to_string(),
+            path: skill_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        }]));
+
+        let output = cf_tool_runtime::Tool::run(
+            &SkillTool,
+            test_ctx(resources.into_shared()),
+            SkillInput {
+                name: "help".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(output.success, "skill load should succeed");
+        let message = output
+            .skill_message
+            .expect("skill_message must carry the SKILL.md body");
+        assert!(
+            message.contains("Do the helpful thing."),
+            "skill body must reach the tool result; got: {message}"
+        );
+        assert!(message.contains("<skill_content name=\"help\">"));
     }
     #[test]
     fn test_from_json_with_prompt_body() {

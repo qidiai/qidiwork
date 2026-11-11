@@ -95,7 +95,7 @@ You may also receive an existing memory document \u{2014} merge it with new sess
 rather than discarding prior knowledge. Your job:
 
 1. **Merge** related information into coherent topic summaries
-2. **Resolve** contradictions \u{2014} if a recent session disproves an older fact, keep only the current truth
+2. **Resolve** contradictions \u{2014} if a recent session disproves an older fact, KEEP the old fact but annotate it inline with a superseded marker such as `<!-- superseded: <YYYY-MM-DD> <brief reason> -->`; never silently drop it.
 3. **Convert** relative dates (\"yesterday\", \"last week\") to absolute dates
 4. **Discard** ephemeral details:
    - Greetings, meta-commentary, tool output noise
@@ -435,6 +435,36 @@ pub fn execute_dream(
         }
     };
 
+    // Hook 1 (A1′): snapshot *before* the consolidated response is written and,
+    // crucially, before `clean_processed_sessions` deletes the digested session
+    // logs — so the soon-to-be-deleted logs enter git history first.
+    //
+    // M2 safe-fail: this snapshot is the *only* recoverable copy of the logs we
+    // are about to delete, so its success gates deletion. When it fails (git
+    // missing/corrupt, or a foreign repo at the memory root) we keep the logs
+    // and skip `clean_processed_sessions` below. The cost is that the next dream
+    // pass re-merges this batch — acceptable, and far better than destroying
+    // memory with no backup. Ephemeral workspaces have no long-term value, so
+    // they skip the snapshot and still allow cleanup.
+    let pre_snapshot_ok = if storage.is_ephemeral() {
+        true
+    } else {
+        match super::git_backup::snapshot(
+            storage.global_dir(),
+            "pre-dream snapshot (session logs about to be consolidated)",
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    target: LOG,
+                    error = %e,
+                    "DREAM_EXECUTE: pre-dream git snapshot failed; session cleanup will be skipped"
+                );
+                false
+            }
+        }
+    };
+
     let chars_written = content.chars().count();
     if let Err(e) = storage.write_long_term(super::storage::MemoryScope::Workspace, &content) {
         let _ = lock.rollback(prior);
@@ -446,8 +476,30 @@ pub fn execute_dream(
         };
     }
 
-    // Consolidation succeeded — clean up the session files that were read.
-    let cleaned_stems = clean_processed_sessions(sessions_dir, processed_stems);
+    // Hook 2: snapshot the freshly consolidated MEMORY.md so the new state
+    // (and any hand edits) is captured. Best-effort: unlike hook 1 it gates
+    // nothing, so a failure only warns.
+    if !storage.is_ephemeral()
+        && let Err(e) = super::git_backup::snapshot(
+            storage.global_dir(),
+            "post-dream: consolidated MEMORY.md",
+        )
+    {
+        tracing::warn!(target: LOG, error = %e, "DREAM_EXECUTE: post-dream git snapshot failed");
+    }
+
+    // Consolidation succeeded — clean up the session files that were read, but
+    // only when the pre-dream safety net actually landed (M2).
+    let cleaned_stems = if pre_snapshot_ok {
+        clean_processed_sessions(sessions_dir, processed_stems)
+    } else {
+        tracing::warn!(
+            target: LOG,
+            sessions_eligible,
+            "DREAM_EXECUTE: pre-dream snapshot unavailable; keeping session logs (safe-fail)"
+        );
+        Vec::new()
+    };
 
     tracing::info!(
         target: LOG,
@@ -856,6 +908,23 @@ mod tests {
         p
     }
 
+    /// Prepare `storage`'s memory root so the pre-dream snapshot can succeed:
+    /// the root directory must exist and git must be usable. Returns `false`
+    /// (the caller should `return`, i.e. skip) when git is unavailable.
+    ///
+    /// Needed by the cleanup tests: since M2 the pre-dream snapshot gates
+    /// session deletion, so a storage whose memory root cannot be snapshotted
+    /// would (correctly) skip cleanup and break their expectations.
+    fn snapshot_ready(storage: &MemoryStorage, test: &str) -> bool {
+        crate::storage::ensure_hermetic_git_on_path();
+        if !crate::storage::git_cli_available() {
+            eprintln!("skipping {test}: git not available");
+            return false;
+        }
+        fs::create_dir_all(storage.global_dir()).unwrap();
+        true
+    }
+
     #[test]
     fn execute_dream_valid_response_writes_memory() {
         let dir = TempDir::new().unwrap();
@@ -875,6 +944,150 @@ mod tests {
         let memory = fs::read_to_string(ws.join("MEMORY.md")).unwrap();
         assert!(memory.contains("We chose Rust."));
         assert!(memory.contains("Event-driven."));
+    }
+
+    // ⑤ A successful dream run leaves at least two snapshots (pre + post) in
+    // the memory-root git repository, and the session log it deletes is still
+    // recoverable from history (A1′).
+    #[test]
+    fn execute_dream_snapshots_memory_repo() {
+        crate::storage::ensure_hermetic_git_on_path();
+        if !crate::storage::git_cli_available() {
+            eprintln!("skipping execute_dream_snapshots_memory_repo: git not available");
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let lock = DreamLock::new(dir.path());
+        let global = dir.path().join("memory");
+        let workspace = global.join("test-ws");
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
+        let sdir = workspace.join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+
+        // An aged session log so the cleanup recency guard lets it be deleted.
+        let stem = "2024-01-01-foo-abcd1234".to_string();
+        write_session(&sdir, &stem, 3600);
+
+        let response = "## Decisions\n\nWe chose Rust.";
+        let result = execute_dream(
+            &lock,
+            &storage,
+            response,
+            5,
+            300,
+            &sdir,
+            std::slice::from_ref(&stem),
+        );
+
+        assert!(
+            matches!(result.status, DreamStatus::Completed { .. }),
+            "status: {:?}",
+            result.status
+        );
+        assert_eq!(
+            result.cleaned_stems,
+            vec![stem.clone()],
+            "session log should have been deleted"
+        );
+
+        // Two hooks fired (pre + post) => at least two commits.
+        let count = git_count(&global);
+        assert!(count >= 2, "expected >=2 commits (pre + post), got {count}");
+
+        // A1′: the deleted session log is still recoverable from history.
+        let hash = git_stdout(&global, &["rev-list", "--max-parents=0", "HEAD"]);
+        let hash = hash.trim();
+        let shown = git_stdout(
+            &global,
+            &["show", &format!("{hash}:test-ws/sessions/{stem}.md")],
+        );
+        assert!(shown.contains("test"), "recovered session log:\n{shown}");
+    }
+
+    /// Run `git -C <root> <args>`, asserting success, returning stdout.
+    fn git_stdout(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Number of commits reachable from HEAD.
+    fn git_count(root: &Path) -> usize {
+        git_stdout(root, &["rev-list", "--count", "HEAD"])
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    // M2: when the pre-dream snapshot fails (here: a foreign git repo at the
+    // memory root, which `snapshot` refuses), the digested session logs must
+    // NOT be deleted — the A1′ safety net is absent, so we fail safe and keep
+    // them (the next dream pass will simply re-merge this batch).
+    #[test]
+    fn pre_snapshot_failure_skips_session_cleanup() {
+        crate::storage::ensure_hermetic_git_on_path();
+        if !crate::storage::git_cli_available() {
+            eprintln!("skipping pre_snapshot_failure_skips_session_cleanup: git not available");
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let lock = DreamLock::new(dir.path());
+        let global = dir.path().join("memory");
+        let workspace = global.join("test-ws");
+        fs::create_dir_all(&global).unwrap();
+
+        // Foreign repo: `git init` with no cf-memory managed marker, so the
+        // pre-dream `snapshot(global)` returns Err.
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&global)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init should succeed");
+
+        let storage = MemoryStorage::with_paths(global.clone(), workspace.clone());
+        let sdir = workspace.join("sessions");
+        fs::create_dir_all(&sdir).unwrap();
+        let stem = "2024-01-01-foo-abcd1234".to_string();
+        write_session(&sdir, &stem, 3600); // old enough to pass the recency guard
+
+        let response = "## Decisions\n\nWe chose Rust.";
+        let result = execute_dream(
+            &lock,
+            &storage,
+            response,
+            5,
+            300,
+            &sdir,
+            std::slice::from_ref(&stem),
+        );
+
+        // Dream still completes (consolidation itself succeeded)...
+        assert!(
+            matches!(result.status, DreamStatus::Completed { .. }),
+            "status: {:?}",
+            result.status
+        );
+        // ...but nothing was cleaned, because the pre-snapshot failed.
+        assert!(
+            result.cleaned_stems.is_empty(),
+            "cleanup must be skipped when the pre-snapshot fails, got {:?}",
+            result.cleaned_stems
+        );
+        assert!(
+            sdir.join(format!("{stem}.md")).exists(),
+            "session log must survive when the pre-dream snapshot is unavailable"
+        );
     }
 
     #[test]
@@ -1033,6 +1246,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
         let (storage, _ws) = test_storage(&dir);
+        if !snapshot_ready(&storage, "cleanup_deletes_processed_sessions_on_completed") {
+            return;
+        }
 
         // Create session files that will be "processed" (old mtime to
         // pass the recency guard).
@@ -1057,6 +1273,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
         let (storage, _ws) = test_storage(&dir);
+        if !snapshot_ready(&storage, "cleanup_preserves_unprocessed_sessions") {
+            return;
+        }
 
         // Create session files — only some will be "processed"
         let sessions = dir.path().join("sessions");
@@ -1085,6 +1304,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
         let (storage, _ws) = test_storage(&dir);
+        if !snapshot_ready(&storage, "cleanup_failure_does_not_affect_completed_status") {
+            return;
+        }
 
         let sessions = dir.path().join("sessions");
         fs::create_dir_all(&sessions).unwrap();
@@ -1120,6 +1342,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
         let (storage, _ws) = test_storage(&dir);
+        if !snapshot_ready(&storage, "cleanup_skips_recently_modified_files") {
+            return;
+        }
 
         let sessions = dir.path().join("sessions");
         // This file has the current mtime (within recency guard window)
@@ -1235,6 +1460,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let lock = DreamLock::new(dir.path());
         let (storage, _ws) = test_storage(&dir);
+        if !snapshot_ready(&storage, "end_to_end_cap_boundary_cleanup") {
+            return;
+        }
 
         let sessions = dir.path().join("sessions");
 

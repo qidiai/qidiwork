@@ -247,6 +247,13 @@ impl MemoryStorage {
             }
         };
 
+        // Rolling backup before the destructive overwrite: MEMORY.md is the
+        // only lossy write in the memory store, so keep the last 3 versions
+        // beside it. Best-effort — never blocks the primary write.
+        if path.exists() {
+            rotate_long_term_backups(&path);
+        }
+
         write_secure_file(&path, content)?;
         tracing::debug!(path = %path.display(), scope = ?scope, "wrote long-term memory");
 
@@ -498,9 +505,14 @@ impl MemoryStorage {
     /// Deletion criteria (tiered):
     /// 1. `tmp*` dirs: remove empty ones unconditionally; remove non-empty
     ///    ones older than 7 days.
-    /// 2. Other workspaces with no session files: remove if older than
-    ///    `max_age_days`.
+    /// 2. Other workspaces with no session files **and no `MEMORY.md`**: remove
+    ///    if older than `max_age_days`.
     /// 3. Non-empty non-tmp workspaces: never touched.
+    ///
+    /// Dot-directories (`.git`, `.qidi`, …) are **never** considered: the
+    /// memory root doubles as the git snapshot repository, and reaping `.git`
+    /// would destroy the entire A1′ history. This is a hard rule — a leading
+    /// `.` is not a workspace, whatever its age or contents.
     ///
     /// Returns the number of directories removed.
     pub fn gc(&self, max_age_days: u64) -> std::io::Result<usize> {
@@ -524,6 +536,13 @@ impl MemoryStorage {
                 Some(n) => n,
                 None => continue,
             };
+
+            // M1: never touch dot-directories. `.git` in particular is our own
+            // snapshot repository — it has no `sessions/`, so `is_empty_workspace`
+            // would call it empty and `remove_dir_all` would erase all history.
+            if name.starts_with('.') {
+                continue;
+            }
 
             let is_tmp = name.starts_with("tmp");
             let empty = is_empty_workspace(&path);
@@ -560,9 +579,20 @@ impl MemoryStorage {
     }
 }
 
-/// A workspace directory is "empty" if its `sessions/` subdirectory either
-/// does not exist or contains no entries.
+/// A workspace directory is "empty" if it holds no long-term value.
+///
+/// M8: a workspace that still contains `MEMORY.md` is **never** empty.
+/// `MEMORY.md` *is* the consolidated project memory, so reaping it would
+/// destroy exactly what this system exists to preserve. This matters because
+/// dream leaves `sessions/` empty right after consolidating — without this
+/// rule a live project would look orphaned and be erased after `max_age_days`.
+///
+/// Otherwise it is empty when its `sessions/` subdirectory either does not
+/// exist or contains no entries.
 fn is_empty_workspace(dir: &Path) -> bool {
+    if dir.join("MEMORY.md").is_file() {
+        return false;
+    }
     let sessions = dir.join("sessions");
     if !sessions.is_dir() {
         return true;
@@ -583,6 +613,69 @@ fn is_older_than(dir: &Path, days: u64) -> bool {
     };
     let age = modified.elapsed().unwrap_or(std::time::Duration::ZERO);
     age > std::time::Duration::from_secs(days * 24 * 60 * 60)
+}
+
+/// Build the path of the `n`-th backup generation beside `path`.
+///
+/// For `MEMORY.md` this yields `MEMORY.md.bak-1` … `MEMORY.md.bak-3`.
+/// The `.bak-N` suffix is deliberately **not** `.md`, so the memory file
+/// watcher (which gates on `extension() == "md"`) and
+/// [`MemoryStorage::list_memory_files`] (same gate) both ignore backups.
+fn backup_path(path: &Path, n: u32) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".bak-{n}"));
+    path.with_file_name(name)
+}
+
+/// Best-effort rolling backup of a long-term `MEMORY.md` before an overwrite.
+///
+/// Rotates up to three generations, oldest first, so a slot is always
+/// emptied before it is filled:
+/// `MEMORY.md.bak-2` → `.bak-3`, `MEMORY.md.bak-1` → `.bak-2`,
+/// `MEMORY.md` → `.bak-1`. Backups live beside the target.
+///
+/// Any failure is logged with `tracing::warn!` and ignored — this must never
+/// prevent the caller from performing the primary write.
+///
+/// # Why remove-before-rename (Windows)
+/// On Windows `std::fs::rename` fails with `AlreadyExists` when the
+/// destination exists, unlike POSIX `rename(2)` which silently replaces it.
+/// We therefore delete the destination slot before renaming into it. The two
+/// steps are not atomic, but the whole operation is best-effort and runs only
+/// before the authoritative write, so a torn rotation can at worst leave a
+/// stale/missing *backup* — it can never corrupt `MEMORY.md` itself.
+fn rotate_long_term_backups(path: &Path) {
+    // (source, destination) ordered oldest generation first.
+    let steps = [
+        (backup_path(path, 2), backup_path(path, 3)),
+        (backup_path(path, 1), backup_path(path, 2)),
+        (path.to_path_buf(), backup_path(path, 1)),
+    ];
+
+    for (from, to) in steps {
+        if !from.exists() {
+            continue;
+        }
+        // Windows: clear the destination before renaming into it.
+        if to.exists() {
+            if let Err(e) = std::fs::remove_file(&to) {
+                tracing::warn!(
+                    path = %to.display(),
+                    error = %e,
+                    "MEMORY_BACKUP: failed to clear backup slot; skipping rotation step"
+                );
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            tracing::warn!(
+                from = %from.display(),
+                to = %to.display(),
+                error = %e,
+                "MEMORY_BACKUP: failed to rotate backup; continuing"
+            );
+        }
+    }
 }
 
 /// Ensure content has proper Markdown heading structure for the memory chunker.
@@ -775,6 +868,49 @@ pub fn slugify(input: &str, max_len: usize) -> String {
     truncated.trim_matches('-').to_string()
 }
 
+/// Test-only: prepend the hermetic git binary (via `GIT_BIN_PATH`) to `PATH` so
+/// that `Command::new("git")` (and `git2`'s discovery) resolves to the hermetic
+/// static binary instead of system-installed git.
+///
+/// Exposed at module scope so the `dream` and `git_backup` test modules can
+/// share it (their tests shell out to git too). Safe to call multiple times —
+/// only the first call mutates `PATH`.
+#[cfg(test)]
+pub(crate) fn ensure_hermetic_git_on_path() {
+    use std::path::PathBuf;
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        if let Ok(git_bin) = std::env::var("GIT_BIN_PATH") {
+            let p = PathBuf::from(&git_bin);
+            let p = if p.is_relative() {
+                std::env::current_dir().unwrap().join(&p)
+            } else {
+                p
+            };
+            if let Some(dir) = p.parent() {
+                let cur = std::env::var("PATH").unwrap_or_default();
+                unsafe {
+                    std::env::set_var("PATH", format!("{}:{}", dir.display(), cur));
+                }
+            }
+        }
+    });
+}
+
+/// Test-only: report whether a usable `git` binary is on `PATH`. Tests that
+/// shell out to git call [`ensure_hermetic_git_on_path`] and then this; when it
+/// returns `false` they `return` early, so a machine without git *skips* them
+/// instead of failing.
+#[cfg(test)]
+pub(crate) fn git_cli_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,25 +922,8 @@ mod tests {
     ///
     /// Safe to call multiple times 鈥?only the first call mutates `PATH`.
     fn ensure_hermetic_git_on_path() {
-        use std::path::PathBuf;
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            if let Ok(git_bin) = std::env::var("GIT_BIN_PATH") {
-                let p = PathBuf::from(&git_bin);
-                let p = if p.is_relative() {
-                    std::env::current_dir().unwrap().join(&p)
-                } else {
-                    p
-                };
-                if let Some(dir) = p.parent() {
-                    let cur = std::env::var("PATH").unwrap_or_default();
-                    unsafe {
-                        std::env::set_var("PATH", format!("{}:{}", dir.display(), cur));
-                    }
-                }
-            }
-        });
+        // Thin delegator to the shared, crate-visible helper at module scope.
+        super::ensure_hermetic_git_on_path()
     }
 
     #[test]
@@ -961,6 +1080,87 @@ mod tests {
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "# Project\n\nProject info.");
+    }
+
+    #[test]
+    fn test_write_long_term_rotates_backups_global() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir);
+
+        // First write: nothing to back up yet.
+        storage.write_long_term(MemoryScope::Global, "v1").unwrap();
+        assert!(!global_dir.join("MEMORY.md.bak-1").exists());
+
+        // Each later write rotates the previous content into `.bak-1`.
+        for v in ["v2", "v3", "v4", "v5"] {
+            storage.write_long_term(MemoryScope::Global, v).unwrap();
+        }
+
+        let read = |n: u32| {
+            std::fs::read_to_string(global_dir.join(format!("MEMORY.md.bak-{n}"))).unwrap()
+        };
+        assert_eq!(
+            std::fs::read_to_string(global_dir.join("MEMORY.md")).unwrap(),
+            "v5"
+        );
+        assert_eq!(read(1), "v4");
+        assert_eq!(read(2), "v3");
+        assert_eq!(read(3), "v2");
+        // Only three generations are retained; the oldest is dropped.
+        assert!(!global_dir.join("MEMORY.md.bak-4").exists());
+    }
+
+    #[test]
+    fn test_write_long_term_rotates_backups_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir, workspace_dir.clone());
+
+        storage
+            .write_long_term(MemoryScope::Workspace, "w1")
+            .unwrap();
+        storage
+            .write_long_term(MemoryScope::Workspace, "w2")
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(workspace_dir.join("MEMORY.md")).unwrap(),
+            "w2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_dir.join("MEMORY.md.bak-1")).unwrap(),
+            "w1"
+        );
+    }
+
+    #[test]
+    fn test_backup_files_not_listed_as_memory() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("abc123");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir.clone());
+
+        storage.write_long_term(MemoryScope::Global, "g1").unwrap();
+        storage.write_long_term(MemoryScope::Global, "g2").unwrap();
+        storage
+            .write_long_term(MemoryScope::Workspace, "w1")
+            .unwrap();
+        storage
+            .write_long_term(MemoryScope::Workspace, "w2")
+            .unwrap();
+
+        // Backups exist on disk ...
+        assert!(global_dir.join("MEMORY.md.bak-1").exists());
+        assert!(workspace_dir.join("MEMORY.md.bak-1").exists());
+
+        // ... but the `.bak-N` (non-`.md`) suffix keeps them out of
+        // `list_memory_files`, which gates on the `.md` extension.
+        let files = storage.list_memory_files().unwrap();
+        assert_eq!(files.len(), 2, "only the two MEMORY.md files: {files:?}");
+        assert!(files.iter().all(|p| p.ends_with("MEMORY.md")));
     }
 
     #[test]
@@ -1796,8 +1996,11 @@ mod tests {
         assert_eq!(removed, 3);
     }
 
+    // M8: a workspace holding `MEMORY.md` (but no sessions) is NOT an orphan —
+    // `MEMORY.md` is the project memory, and dream leaves `sessions/` empty
+    // right after consolidating. It must survive GC.
     #[test]
-    fn test_gc_workspace_with_memory_md_but_no_sessions_is_empty() {
+    fn test_gc_workspace_with_memory_md_but_no_sessions_is_kept() {
         let tmp = TempDir::new().unwrap();
         let global_dir = tmp.path().join("memory");
         let workspace_dir = global_dir.join("current-ws");
@@ -1812,10 +2015,86 @@ mod tests {
 
         let removed = storage.gc(30).unwrap();
         assert_eq!(
-            removed, 1,
-            "workspace with MEMORY.md but no sessions is empty"
+            removed, 0,
+            "a workspace holding MEMORY.md is not empty and must be kept"
         );
+        assert!(ws.exists(), "MEMORY.md workspace must survive GC");
+        assert!(ws.join("MEMORY.md").exists());
+    }
+
+    // M8 contrast: a *truly* empty workspace (no MEMORY.md, no sessions) is
+    // still reaped once it ages past `max_age_days`.
+    #[test]
+    fn test_gc_truly_empty_workspace_old_is_reaped() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-ws");
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir);
+
+        let ws = global_dir.join("genuinely-empty-ab123456");
+        std::fs::create_dir_all(&ws).unwrap();
+        set_dir_mtime_days_ago(&ws, 31);
+
+        let removed = storage.gc(30).unwrap();
+        assert_eq!(removed, 1, "a truly empty old workspace must be reaped");
         assert!(!ws.exists());
+    }
+
+    // M1: GC must never touch dot-directories. `.git` is our own snapshot
+    // repository (no `sessions/`, so `is_empty_workspace` would call it empty);
+    // reaping it would destroy the whole A1′ history.
+    #[test]
+    fn test_gc_never_deletes_dot_directories() {
+        ensure_hermetic_git_on_path();
+        if !git_cli_available() {
+            eprintln!("skipping test_gc_never_deletes_dot_directories: git not available");
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("current-ws");
+        std::fs::create_dir_all(&global_dir).unwrap();
+
+        // Make the memory root a real repository so `.git` is genuine+populated.
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&global_dir)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init should succeed");
+        assert!(global_dir.join(".git").join("HEAD").is_file());
+
+        // Back-date `.git` far past max_age so GC *would* reap it if it weren't
+        // skipped as a dot-directory.
+        set_dir_mtime_days_ago(&global_dir.join(".git"), 365);
+
+        // An old empty workspace (no MEMORY.md) that should still be reaped.
+        let old_ws = global_dir.join("old-project-ab123456");
+        std::fs::create_dir_all(&old_ws).unwrap();
+        set_dir_mtime_days_ago(&old_ws, 31);
+
+        let storage = MemoryStorage::with_paths(global_dir.clone(), workspace_dir);
+        let removed = storage.gc(30).unwrap();
+
+        assert_eq!(removed, 1, "only the empty workspace should be reaped");
+        assert!(global_dir.join(".git").is_dir(), ".git must survive GC");
+        assert!(
+            global_dir.join(".git").join("HEAD").is_file(),
+            ".git/HEAD must survive GC"
+        );
+        // git still usable afterwards.
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&global_dir)
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git rev-parse must still work after GC: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
@@ -1860,6 +2139,16 @@ mod tests {
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(ws.join("sessions")).unwrap();
         assert!(is_empty_workspace(&ws));
+    }
+
+    // M8: `MEMORY.md` alone makes a workspace non-empty, even with no sessions.
+    #[test]
+    fn test_is_empty_workspace_with_memory_md_is_not_empty() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("MEMORY.md"), "# Project memory").unwrap();
+        assert!(!is_empty_workspace(&ws));
     }
 
     #[test]

@@ -85,37 +85,6 @@ impl AgentView {
         {
             return InputOutcome::Action(Action::KillBgTask(bt.task_id.clone()));
         }
-        // QidiWork artifact cards: 'o' opens the focused card with the OS
-        // handler, '[' / ']' cycle the focused card. These preempt the
-        // registry ('o' is otherwise OpenNextLink) only while an artifact
-        // block is selected; anything else falls through unchanged.
-        if key.code == KeyCode::Char('o')
-            && key.modifiers.is_empty()
-            && !self.scrollback.is_selected_group_header()
-            && let Some(idx) = self.scrollback.selected()
-            && let Some(entry) = self.scrollback.entry(idx)
-            && let crate::scrollback::block::RenderBlock::Artifact(ref ab) = entry.block
-            && let Some(card) = ab.cards.get(ab.focused_idx).or_else(|| ab.cards.last())
-        {
-            crate::app::office_watch::open_in_system(&card.path);
-            return InputOutcome::Changed;
-        }
-        if matches!(key.code, KeyCode::Char('[') | KeyCode::Char(']'))
-            && key.modifiers.is_empty()
-            && !self.scrollback.is_selected_group_header()
-            && let Some(idx) = self.scrollback.selected()
-            && let Some(entry) = self.scrollback.entry_mut(idx)
-            && let crate::scrollback::block::RenderBlock::Artifact(ref mut ab) = entry.block
-            && !ab.cards.is_empty()
-        {
-            let n = ab.cards.len();
-            ab.focused_idx = if key.code == KeyCode::Char(']') {
-                (ab.focused_idx + 1) % n
-            } else {
-                (ab.focused_idx + n - 1) % n
-            };
-            return InputOutcome::Changed;
-        }
         if key.code == KeyCode::Esc
             && key.modifiers.is_empty()
             && self.persistent_text_selection.take().is_some()

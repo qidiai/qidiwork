@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 const EXCLUDED_DIR_NAMES: &[&str] = &[
-    ".grok", ".cache", ".daemon", ".config", ".npm", ".cargo", ".rustup", ".vscode", ".gemini",
+    ".qidi", ".cache", ".daemon", ".config", ".npm", ".cargo", ".rustup", ".vscode", ".gemini",
     ".hermes", ".claude",
 ];
 
@@ -118,7 +118,7 @@ fn is_platform_home_excluded(cwd: &Path, home: &Path) -> bool {
     false
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn is_platform_home_excluded(cwd: &Path, home: &Path) -> bool {
     let Ok(relative) = cwd.strip_prefix(home) else {
         return false;
@@ -155,7 +155,7 @@ fn has_excluded_component(path: &Path) -> bool {
                 return true;
             }
 
-            if name_lower.starts_with(".grok-") {
+            if name_lower.starts_with(".qidi-") {
                 return true;
             }
         }
@@ -254,7 +254,7 @@ mod tests {
         #[test]
         fn grok_dirs_are_unsafe() {
             if let Some(home) = dirs::home_dir() {
-                assert!(!is_project_dir(&home.join(".grok")));
+                assert!(!is_project_dir(&home.join(".qidi")));
                 assert!(!is_project_dir(&home.join(".qidi/bin")));
             }
         }
@@ -262,7 +262,7 @@ mod tests {
         #[test]
         fn grok_prefixed_dirs_are_unsafe() {
             if let Some(home) = dirs::home_dir() {
-                assert!(!is_project_dir(&home.join(".grok-proxy-work")));
+                assert!(!is_project_dir(&home.join(".qidi-proxy-work")));
             }
         }
 

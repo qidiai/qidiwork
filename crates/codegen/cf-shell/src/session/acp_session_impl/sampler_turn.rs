@@ -49,7 +49,7 @@ impl SessionTokenAuthGate {
             is_session_based: auth_method_id
                 .is_some_and(crate::agent::auth_method::is_session_based_method),
             model_byok,
-            endpoint_is_first_party: crate::util::is_first_party_qidi_url(base_url),
+            endpoint_is_first_party: crate::util::is_first_party_xai_url(base_url),
         }
     }
     fn active(self) -> bool {
@@ -107,6 +107,51 @@ where
         result
     }
 }
+/// The `web_search` exclusion applied when backend-hosted search is
+/// the active search path: the server-side `HostedTool::WebSearch`
+/// replaces the local tool, so the local definition must not also
+/// ship on the request. Single source of truth shared by the
+/// per-turn tool list ([`SessionActor::turn_base_tool_specs`]), the
+/// `/context` tool-definition accounting (`build_session_info`) and
+/// the compaction request, so the three can never drift apart.
+///
+/// **Phase B (rework 1)**: the same predicate now also gates the
+/// **input** to the flag=true resident/imported partition (see
+/// [`backend_search_drops_tool`] call in
+/// `prepare_tool_definitions_inner`), so the three surfaces derived
+/// from that partition — the `search_tool` surface, the per-turn defs
+/// snapshot (B-12 gate view) and the projected defs — drop `web_search`
+/// together. Applying the drop only *after* the partition (as the
+/// pre-rework code did, at the `ToolSpec` mapping) left `web_search` in
+/// the snapshot and projection: the gate then saw it as visible, so a
+/// model that had unlocked it got the "call it directly" corrective and
+/// its direct call 400'd at the provider, while the never-sent tool kept
+/// burning imported-segment tokens.
+///
+/// Known exception: the recap/btw side-question path
+/// (`acp_session_impl/recap.rs`) intentionally does NOT route through
+/// this filter — its prompt declares "NO tools available", so the
+/// tool list it ships is irrelevant and left untouched (pre-existing
+/// outlier, deliberately not converged).
+pub(crate) fn drop_web_search_for_backend_search(
+    defs: impl IntoIterator<Item = ToolDefinition>,
+    use_backend_search: bool,
+) -> Vec<ToolDefinition> {
+    defs.into_iter()
+        .filter(|td| !backend_search_drops_tool(&td.function.name, use_backend_search))
+        .collect()
+}
+
+/// The single *decision* for the backend-search `web_search` drop — the
+/// predicate every site shares so they cannot diverge, whether they filter
+/// `ToolDefinition`s ([`drop_web_search_for_backend_search`]) or the
+/// partition's `(name, kind, definition)` segmentation entries
+/// (`prepare_tool_definitions_inner`, Phase B).
+#[inline]
+pub(crate) fn backend_search_drops_tool(name: &str, use_backend_search: bool) -> bool {
+    use_backend_search && name == "web_search"
+}
+
 impl SessionActor {
     pub(super) async fn prepare_tool_definitions_timed(&self) -> (Vec<ToolDefinition>, u64) {
         let mcp_wait_start = std::time::Instant::now();
@@ -138,17 +183,114 @@ impl SessionActor {
     pub(crate) fn turn_base_tool_specs(&self, defs: &[ToolDefinition]) -> Vec<ToolSpec> {
         let use_backend_search =
             self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
-        defs.iter()
-            .filter(|td| !use_backend_search || td.function.name != "web_search")
-            .cloned()
+        drop_web_search_for_backend_search(defs.iter().cloned(), use_backend_search)
+            .into_iter()
             .map(ToolSpec::from)
             .collect()
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
+        // Dynamic tool pipeline (P0-2 第二步, design doc §6).
+        //
+        // The switch is read from the session-startup snapshot
+        // (`self.dynamic_tools` — resolved once from
+        // `Config::resolve_dynamic_tools`, never re-read, so a
+        // mid-session config edit cannot alter this session's
+        // defs; design doc A-4).
+        //
+        // **Phase A (flag=false, default)**: the single pass-through
+        // path — byte-identical to the pre-pipeline behavior (A-3).
+        //
+        // **Phase B (flag=true)**: the resident/imported three-segment
+        // projection — the built-in `defs` are partitioned by kind into a
+        // resident head (常驻段 + plan tail-slot pair + meta pair) and an
+        // import pool; the pool is projected onto the head in append-only
+        // unlock order (design doc Q2.5). The per-turn defs snapshot and the
+        // built-in search surface are (re)published as resources for the
+        // B-12 corrective gate / `search_tool` (Phase B).
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let defs = bridge.tool_definitions_builtins_only().await;
         let plan_active = self.plan_mode.lock().is_active();
-        filter_cursor_tools_by_plan_mode(defs, plan_active)
+        if !self.dynamic_tools {
+            let defs = bridge.tool_definitions_builtins_only().await;
+            return filter_cursor_tools_by_plan_mode(defs, plan_active);
+        }
+
+        use cf_tools::registry::dynamic_tools::{
+            builtin_search_surface, partition_builtin_defs, SegEntry,
+        };
+        use cf_tools::types::resources::{
+            BuiltinToolSearchSurface, DefsSnapshot, DynamicToolState,
+        };
+
+        // Rework 1 (GLM audit P1): the backend-search `web_search` drop is
+        // applied at the partition **input**, so the three flag=true surfaces
+        // that derive from it — the `search_tool` surface, the per-turn defs
+        // snapshot (B-12 gate view) and the projected defs — are filtered
+        // together (three mouths, one filter). Applying it only *after* the
+        // partition (at the `ToolSpec` mapping in `turn_base_tool_specs`) left
+        // `web_search` in the snapshot/projection: an unlocked `web_search`
+        // then looked visible to the gate, a model `use_tool(web_search)` got
+        // the "call it directly" corrective, and its direct call 400'd at the
+        // provider — while the never-sent tool kept burning imported-segment
+        // tokens. `use_backend_search` reads the same two sources as
+        // `turn_base_tool_specs`; the predicate is the shared decision point.
+        let use_backend_search =
+            self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
+        let seg_entries = bridge.builtin_seg_entries();
+        let partitioned = partition_builtin_defs(
+            seg_entries
+                .iter()
+                .filter(|(name, _, _)| !backend_search_drops_tool(name, use_backend_search))
+                .map(|(name, kind, definition)| SegEntry {
+                    client_name: name.as_str(),
+                    kind: *kind,
+                    definition,
+                }),
+        );
+
+        // Unlock state (append-only, C-11). Created lazily on the first
+        // flag=true assembly and reused thereafter, so unlocks survive every
+        // subsequent turn (resume/fork/compact lifecycle, design doc Q2.4).
+        let unlock_state = match bridge.read_resource::<DynamicToolState>().await {
+            Some(state) => state,
+            None => {
+                let state = DynamicToolState::default();
+                bridge.update_resource(state.clone()).await;
+                state
+            }
+        };
+        let unlocked = unlock_state.unlocked();
+
+        // Widen the search surface (B-0/B-1): every hidden built-in tool
+        // with its full schema, so `search_tool` hands the model the relay
+        // target + schema in the same turn. Static per session.
+        bridge
+            .update_resource(BuiltinToolSearchSurface(builtin_search_surface(
+                &partitioned,
+            )))
+            .await;
+
+        let projected =
+            filter_cursor_tools_by_plan_mode(partitioned.assemble(&unlocked), plan_active);
+
+        // Publish this turn's defs snapshot for the B-12 corrective gate
+        // (C-8a). Written **only** under flag=true — when the snapshot is
+        // absent the gate keeps the corrective default (fail-safe, v3.3).
+        let client_names: std::collections::HashSet<String> = projected
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        let registry_ids: std::collections::HashSet<String> = projected
+            .iter()
+            .filter_map(|d| bridge.registry_id_of(&d.function.name))
+            .collect();
+        bridge
+            .update_resource(DefsSnapshot {
+                client_names,
+                registry_ids,
+            })
+            .await;
+
+        projected
     }
     /// Memoized per-model [`ModelAuthFacts`](crate::agent::config::ModelAuthFacts),
     /// keyed by `model_id`.
@@ -790,10 +932,10 @@ impl SessionActor {
         if auth_mode == crate::auth::AuthMode::WebLogin {
             let msg = format!(
                 "{detailed_message}\n\n\
-                 你正在使用已弃用的登录方式（WebLogin）。\n\
-                 该方式已不再受支持，会导致错误。\n\n\
-                 解决方法：运行 `qidiwork logout` 后再运行 `qidiwork login`，以通过 OAuth2 重新登录。\n\n\
-                 版本：{client_version}"
+                 You are using a deprecated authentication method (WebLogin).\n\
+                 This auth method is no longer supported and will cause errors.\n\n\
+                 To fix: run `qidi logout` then `qidi login` to re-authenticate with OAuth2.\n\n\
+                 Version: {client_version}"
             );
             self.log_terminal_failure("legacy_auth", error.status_code, &msg);
             self.send_xai_notification(XaiSessionUpdate::RetryState(
@@ -1084,5 +1226,43 @@ impl SessionActor {
         }
         self.chat_state_handle
             .push_assistant_response(assistant_item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_def(name: &str) -> ToolDefinition {
+        ToolDefinition::function(name, Some("fixture"), serde_json::json!({ "type": "object" }))
+    }
+
+    #[test]
+    fn drop_web_search_only_under_backend_search() {
+        let defs = vec![
+            tool_def("read_file"),
+            tool_def("web_search"),
+            tool_def("run_terminal_cmd"),
+        ];
+        // Backend search off: the local web_search tool ships.
+        let kept = drop_web_search_for_backend_search(defs.clone(), false);
+        assert_eq!(
+            kept.len(),
+            3,
+            "kept tool defs with backend search OFF (web_search must ship): {} vs 3",
+            kept.len()
+        );
+        // Backend search on: only web_search is dropped.
+        let dropped = drop_web_search_for_backend_search(defs, true);
+        assert_eq!(
+            dropped.len(),
+            2,
+            "kept tool defs with backend search ON (only web_search dropped): {} vs 2",
+            dropped.len()
+        );
+        assert!(
+            dropped.iter().all(|td| td.function.name != "web_search"),
+            "web_search must be absent from the dropped set (backend search ON): {dropped:?}"
+        );
     }
 }

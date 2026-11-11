@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::auth::ForceLoginTeam;
+use cf_token_estimation::estimate_tokens_aware;
 use cf_tools::types::config_source::ConfigSource;
-use cf_tools::util::truncate::estimate_tokens;
 
 const TREE: &str = "\u{2514}";
 
@@ -446,7 +446,7 @@ fn instruction_file_type(
     extra_rule_prefixes: &[PathBuf],
 ) -> &'static str {
     let path = Path::new(file_path);
-    if has_rules_directory(file_path, ".grok")
+    if has_rules_directory(file_path, ".qidi")
         || has_rules_directory(file_path, ".cursor")
         || (!claude_imported && has_rules_directory(file_path, ".claude"))
         || extra_rule_prefixes
@@ -507,7 +507,11 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
             let vendor = derive_vendor(&c.file_path).map(String::from);
             InstructionFile {
                 size_bytes: size,
-                approx_tokens: estimate_tokens(&c.content),
+                // P0-1 口径统一：指令文件（含中文密集的 AGENTS.md）的
+                // approx_tokens 与 /context、system_prompt 同走字符感知
+                // 估算：ASCII 为 3.4 字符/token，CJK 为 4/5 token/字；
+                // 两者均不再与旧 bytes/4 口径恒等。display-only，无决策影响。
+                approx_tokens: estimate_tokens_aware(&c.content) as usize,
                 path: c.file_path,
                 scope,
                 file_type: file_type.to_string(),
@@ -958,7 +962,7 @@ fn list_lsp_servers(
     // Folder-trust gate (display-only): inspect never spawns servers, but mark the
     // repo-local (project-scoped) entries a session would skip in an untrusted
     // clone so the listing matches the live gate. `remote = None` mirrors
-    // `grok mcp doctor` (no loaded RemoteSettings in a standalone command).
+    // `qidi mcp doctor` (no loaded RemoteSettings in a standalone command).
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let project_allowed = crate::agent::folder_trust::project_scope_allowed(cwd);
 
@@ -1424,7 +1428,7 @@ fn print_human(r: &InspectReport) {
     if r.mcp_servers.is_empty() {
         println!();
         println!("  MCP Servers (0)");
-        println!("  {TREE} (none) \u{2014} 参见 `qidiwork mcp add --help`");
+        println!("  {TREE} (none) \u{2014} see `qidi mcp add --help`");
     } else {
         print_columns(
             "MCP Servers",
@@ -1795,7 +1799,7 @@ mod tests {
 
     #[test]
     fn skill_entry_source_maps_scopes() {
-        let home = Path::new("/home/u/.grok");
+        let home = Path::new("/home/u/.qidi");
 
         let s = skill_fixture("a", "/repo/.qidi/skills/a/SKILL.md", SkillScope::Local);
         assert!(matches!(
@@ -1837,7 +1841,7 @@ mod tests {
     /// else keeps its real source.
     #[test]
     fn skill_entry_source_relabels_extracted_bundled_skills() {
-        let home = Path::new("/home/u/.grok");
+        let home = Path::new("/home/u/.qidi");
 
         let s = skill_fixture(
             "help",
@@ -1895,7 +1899,7 @@ mod tests {
     /// over the scope fallback.
     #[test]
     fn skill_entry_source_prefers_stamped_config_source() {
-        let home = Path::new("/home/u/.grok");
+        let home = Path::new("/home/u/.qidi");
         let mut s = skill_fixture("cfg", "/team/skills/cfg/SKILL.md", SkillScope::User);
         s.config_source = Some(ConfigSource::ConfigToml {
             path: PathBuf::from("/team/skills/cfg/SKILL.md"),
@@ -1960,6 +1964,47 @@ mod tests {
         assert!(
             !entries.iter().any(|e| e.name == "inspect-cfg-ignored"),
             "[skills].ignore must hide the skill"
+        );
+    }
+
+    /// `list_instructions` must size instruction files with the
+    /// character-aware estimator (P0-1 口径统一): Chinese-heavy
+    /// AGENTS.md gets the CJK 4/5 ratio (0.8 token per 字) instead of
+    /// bytes/4, which reports only 3 bytes x 1/4 = 0.75 token per 字 for
+    /// the 3-byte UTF-8 encoding and therefore under-counts it. ASCII is
+    /// **not** identical under the two formulas either: the aware
+    /// estimator runs at ~3.4 chars/token while bytes/4 stays at 4.0, so
+    /// ASCII display values move up with the new rate (see
+    /// `estimate_tokens_aware`'s "diverges" note). Display-only surface —
+    /// no decision reads it.
+    #[tokio::test]
+    async fn list_instructions_approx_tokens_is_cjk_aware() {
+        // 200 CJK chars -> 600 UTF-8 bytes; aware = ceil(200*4/5)
+        // = 160 tokens, bytes/4 still reports 600/4 = 150.
+        let zh = "你好世界".repeat(50);
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), &zh).unwrap();
+
+        let entries = list_instructions(cwd.path()).await;
+        let entry = entries
+            .iter()
+            .find(|e| e.file_type == "agents_md")
+            .expect("AGENTS.md should be discovered");
+
+        assert_eq!(
+            entry.size_bytes,
+            zh.len(),
+            "size_bytes must be the raw UTF-8 byte length of the zh fixture"
+        );
+        assert_eq!(
+            entry.approx_tokens,
+            cf_token_estimation::estimate_tokens_aware(&zh) as usize,
+            "approx_tokens must use the CJK-aware estimator, not bytes/4"
+        );
+        assert!(
+            entry.approx_tokens > cf_token_estimation::estimate_tokens(&zh) as usize,
+            "at the calibrated CJK rate (4/5 token per 字) the aware estimate is \
+             above the bytes/4 figure, which under-counts CJK"
         );
     }
 }

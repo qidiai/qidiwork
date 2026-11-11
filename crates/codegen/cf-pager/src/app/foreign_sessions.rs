@@ -447,6 +447,7 @@ pub(crate) fn map_summary(summary: ForeignSessionSummary) -> SessionPickerEntry 
         branch: summary.branch,
         repo_name: crate::views::session_picker::repo_name_from_cwd(&cwd),
         worktree_label: None,
+        is_subagent: false,
         card_detail: None,
     }
 }
@@ -556,6 +557,7 @@ mod tests {
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,
+            is_subagent: false,
             card_detail: None,
         }
     }
@@ -611,11 +613,14 @@ mod tests {
     #[tokio::test]
     async fn async_gate_supports_bundled_and_user_skill_locations() {
         let enabled = gated_sources_async_with(compat_all(), Path::new("/grok"), |path| {
-            let path = path.to_string_lossy();
+            // Separator-agnostic: Path::ends_with compares components, so
+            // the same pattern matches native backslashes and forward
+            // slashes alike.
+            let ends = |tail: &str| path.ends_with(Path::new(tail));
             std::future::ready(
-                path.contains("bundled/skills/resume-claude")
-                    || path.contains("skills/resume-codex")
-                    || path.contains("bundled/skills/resume-cursor"),
+                ends("bundled/skills/resume-claude/SKILL.md")
+                    || ends("skills/resume-codex/SKILL.md")
+                    || ends("bundled/skills/resume-cursor/SKILL.md"),
             )
         })
         .await;

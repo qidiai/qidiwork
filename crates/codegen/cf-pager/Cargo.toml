@@ -1,6 +1,6 @@
 [package]
 name = "cf-pager"
-version = "0.1.220-alpha.8"
+version = "0.1.220-alpha.4"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -17,8 +17,6 @@ cf-prompt-queue = { workspace = true }
 
 # Presentation-primitives layer (extracted)
 cf-pager-render = { path = "../cf-pager-render" }
-cf-office-preview = { path = "../cf-office-preview" }
-cf-fsnotify = { path = "../cf-fsnotify" }
 
 # Rendering
 ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
@@ -176,6 +174,7 @@ serial_test = { workspace = true }
 cf-agent= { workspace = true }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # cf-test-support depends on neither the pager nor the shell).
+cf-test-support = { workspace = true }
 # Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
 # spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
 # aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
@@ -227,22 +226,18 @@ name = "pty_auto_mode"
 path = "tests/pty_auto_mode.rs"
 
 [[bin]]
-test = false
 name = "mouse-events-playground"
 path = "src/bin/mouse_events_playground.rs"
 
 [[bin]]
-test = false
 name = "scrollback-selection-playground"
 path = "src/bin/scrollback_selection_playground.rs"
 
 [[bin]]
-test = false
 name = "question-view-playground"
 path = "src/bin/question_view_playground.rs"
 
 [[bin]]
-test = false
 name = "todo-pane-playground"
 path = "src/bin/todo_pane_playground.rs"
 
@@ -266,15 +261,3 @@ release-dist = []
 # `cf-pager-minimal` enables this from its dev-dependencies only; production
 # builds never turn it on.
 test-helpers = ["cf-pager-render/test-helpers"]
-[[bin]]
-test = false
-name = "mermaid_playground"
-path = "src/bin/mermaid_playground.rs"
-
-[[bin]]
-test = false
-name = "scrollback_search_playground"
-path = "src/bin/scrollback_search_playground.rs"
-
-[lints]
-workspace = true

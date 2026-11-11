@@ -130,6 +130,101 @@ fn split_by_headers<'a>(lines: &[&'a str]) -> Vec<Section<'a>> {
     sections
 }
 
+/// Flush the accumulated paragraph text as a chunk and reset the
+/// accumulation state, carrying the last `overlap_chars` of the
+/// flushed text into the next chunk for embedding continuity.
+///
+/// `flush_end_line` is the 0-based line index (in the source file)
+/// of the first line NOT included in the flushed chunk.
+fn flush_accumulated(
+    chunks: &mut Vec<Chunk>,
+    header_context: &str,
+    current_text: &mut String,
+    current_start: &mut usize,
+    line_offset: &mut usize,
+    section_start_line: usize,
+    flush_end_line: usize,
+    overlap_chars: usize,
+) {
+    let flushed = current_text.trim().to_string();
+    chunks.push(Chunk {
+        text: add_header_context(header_context, &flushed),
+        start_line: *current_start,
+        end_line: flush_end_line,
+    });
+    let overlap_tail = if overlap_chars > 0 {
+        let tail: String = flushed
+            .chars()
+            .rev()
+            .take(overlap_chars)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        Some(tail)
+    } else {
+        None
+    };
+    // The overlap tail physically belongs to the just-flushed lines (its
+    // last char is on line `flush_end_line - 1` at the latest), so the
+    // next chunk's first character is NOT on the first new line
+    // (`flush_end_line + 1`) as a naive `current_start` advance would
+    // claim. Back-annotate: with k newlines inside the tail it spans
+    // k+1 source lines, so it starts on line `flush_end_line - 1 - k`.
+    // The next chunk's `start_line` becomes that line — truthful for its
+    // first character (the overlap lead-in), and that chunk's `end_line`
+    // then correctly brackets the full overlapped span. (Approximation:
+    // trailing blank lines trimmed off `flushed` can only make the true
+    // start earlier; every flush site fires on a blank line directly
+    // after content, so the flushed text ends on a content line and the
+    // computation is exact in practice.)
+    *current_start = match &overlap_tail {
+        Some(tail) => {
+            let tail_newlines = tail.chars().filter(|&c| c == '\n').count();
+            flush_end_line.saturating_sub(tail_newlines + 1)
+        }
+        None => flush_end_line + 1,
+    };
+    *current_text = overlap_tail.unwrap_or_default();
+    *line_offset = flush_end_line - section_start_line + 1;
+}
+
+/// Hard-split a single line that exceeds `max_chars` into
+/// `max_chars`-sized pieces (char-boundary safe). A line longer
+/// than `max_chars` can never be flushed at a newline boundary —
+/// there is none inside it — so without this it would land in a
+/// chunk larger than the limit (e.g. minified JSON files).
+fn split_oversized_line(line: &str, max_chars: usize) -> Vec<String> {
+    let limit = max_chars.max(1);
+    let mut pieces = Vec::new();
+    let mut rest = line;
+    while rest.len() > limit {
+        let mut cut = limit;
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+            // Pathological-config guard (audit F-A1/O-1): with a
+            // limit below the lead character's UTF-8 width the
+            // boundary walk would otherwise decrement to 0 and push
+            // an empty piece forever. Advance by one full char
+            // instead — the only safe lower bound.
+            if cut == 0 {
+                cut = rest
+                    .chars()
+                    .next()
+                    .map_or(1, |c| c.len_utf8())
+                    .max(1);
+                break;
+            }
+        }
+        pieces.push(rest[..cut.max(1)].to_string());
+        rest = &rest[cut.max(1)..];
+    }
+    if !rest.is_empty() {
+        pieces.push(rest.to_string());
+    }
+    pieces
+}
+
 /// Split a large section into sub-chunks by paragraph boundaries (`\n\n`).
 /// Continuation chunks are prefixed with the last `overlap_chars` of the
 /// previous chunk for embedding continuity.
@@ -146,31 +241,52 @@ fn split_section_by_paragraphs(
     for (i, &line) in section.lines.iter().enumerate() {
         let is_blank = line.trim().is_empty();
 
-        // Paragraph boundary: blank line AND accumulated text is non-empty
-        if is_blank && !current_text.is_empty() && current_text.len() + line.len() > max_chars {
-            // Flush current chunk
-            let flushed = current_text.trim().to_string();
-            chunks.push(Chunk {
-                text: add_header_context(&section.header_context, &flushed),
-                start_line: current_start,
-                end_line: section.start_line + i,
-            });
-            // Apply overlap: start next chunk with tail of previous
-            current_text = if overlap_chars > 0 {
-                let tail: String = flushed
-                    .chars()
-                    .rev()
-                    .take(overlap_chars)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                tail
-            } else {
-                String::new()
-            };
+        // Oversized single line: hard-split it before accumulation so
+        // no chunk ever exceeds `max_chars`. (Flushing any text
+        // accumulated so far first keeps the split pieces standalone.)
+        if line.len() > max_chars {
+            tracing::warn!(
+                line_no = section.start_line + i,
+                line_len = line.len(),
+                max = max_chars,
+                "memory chunker: hard-splitting oversized single line"
+            );
+            if !current_text.is_empty() {
+                flush_accumulated(
+                    &mut chunks,
+                    &section.header_context,
+                    &mut current_text,
+                    &mut current_start,
+                    &mut line_offset,
+                    section.start_line,
+                    section.start_line + i,
+                    overlap_chars,
+                );
+            }
+            for piece in split_oversized_line(line, max_chars) {
+                chunks.push(Chunk {
+                    text: add_header_context(&section.header_context, &piece),
+                    start_line: section.start_line + i,
+                    end_line: section.start_line + i + 1,
+                });
+            }
             current_start = section.start_line + i + 1;
             line_offset = i + 1;
+            continue;
+        }
+
+        // Paragraph boundary: blank line AND accumulated text is non-empty
+        if is_blank && !current_text.is_empty() && current_text.len() + line.len() > max_chars {
+            flush_accumulated(
+                &mut chunks,
+                &section.header_context,
+                &mut current_text,
+                &mut current_start,
+                &mut line_offset,
+                section.start_line,
+                section.start_line + i,
+                overlap_chars,
+            );
             continue;
         }
 
@@ -253,6 +369,30 @@ mod tests {
         MemoryIndexConfig::default()
     }
 
+    /// Regression for the dead-loop guard added after the 2026-10-06 audit
+    /// (F-A1/O-1): with `limit < lead-char UTF-8 width` the boundary walk
+    /// must terminate by advancing one full character, never spin forever,
+    /// and the pieces must reconstruct the input losslessly. Exercises the
+    /// guard branch directly — pre-fix this input hung until timeout.
+    #[test]
+    fn split_oversized_line_multibyte_lead_never_spins() {
+        for limit in [0usize, 1, 2, 3, 4] {
+            for line in ["你好世界", "ééé", "😀😀😀", "aé你😀b"] {
+                let pieces = split_oversized_line(line, limit);
+                let joined: String = pieces.concat();
+                assert_eq!(
+                    joined, line,
+                    "limit={limit} line={line:?}: pieces must reconstruct the input"
+                );
+                assert!(
+                    pieces.iter().all(|p| !p.is_empty()),
+                    "limit={limit} line={line:?}: no empty pieces allowed"
+                );
+            }
+        }
+    }
+
+
     #[test]
     fn test_chunk_hash_deterministic() {
         let h1 = chunk_hash("hello world");
@@ -332,6 +472,67 @@ mod tests {
             chunks.len() >= 2,
             "should split large section, got {} chunks",
             chunks.len()
+        );
+    }
+
+    #[test]
+    fn test_chunk_oversized_single_line_hard_split() {
+        // A single line longer than max_chunk_chars (e.g.
+        // minified JSON) must be hard-split so no chunk
+        // exceeds the limit — previously it landed in one
+        // oversized chunk that embedding APIs may reject.
+        let long_line = format!("{{\"minified\":true,\"pad\":\"{}\"}}", "x".repeat(200));
+        assert!(long_line.len() > 80);
+        let content = format!("## Section\n\n{long_line}\n\nafter.");
+        let config = MemoryIndexConfig {
+            max_chunk_chars: 80,
+            chunk_overlap_chars: 0,
+        };
+        let chunks = chunk_markdown(&content, &config);
+        let lengths: Vec<usize> = chunks.iter().map(|c| c.text.len()).collect();
+        assert!(
+            chunks.iter().all(|c| c.text.len() <= 80),
+            "no chunk may exceed max_chunk_chars, got lengths: {lengths:?}"
+        );
+        // The 226-ish char line splits into ceil(len/80) pieces;
+        // pieces concatenate back to the original line.
+        let pieces: Vec<&str> = chunks
+            .iter()
+            .filter(|c| c.text.contains("\"minified\"") || c.text.starts_with("xxxx"))
+            .map(|c| c.text.as_str())
+            .collect();
+        let joined = pieces.concat();
+        assert!(
+            joined.contains(&long_line),
+            "hard-split pieces must reconstruct the original line"
+        );
+        assert!(
+            pieces.len() >= 3,
+            "a >200-char line at max_chunk_chars=80 yields >=3 pieces, got {}",
+            pieces.len()
+        );
+    }
+
+    #[test]
+    fn test_chunk_oversized_line_mid_paragraph() {
+        // An oversized line after accumulated short lines must
+        // also hard-split (the flush-at-previous-newline path
+        // cannot shrink a line with no newline inside it).
+        let long_line = "y".repeat(120);
+        let content = format!("## S\n\nshort\n{long_line}\n\ntail.");
+        let config = MemoryIndexConfig {
+            max_chunk_chars: 80,
+            chunk_overlap_chars: 0,
+        };
+        let chunks = chunk_markdown(&content, &config);
+        let lengths: Vec<usize> = chunks.iter().map(|c| c.text.len()).collect();
+        assert!(
+            chunks.iter().all(|c| c.text.len() <= 80),
+            "no chunk may exceed max_chunk_chars, got lengths: {lengths:?}"
+        );
+        assert!(
+            chunks.iter().any(|c| c.text.ends_with("short")),
+            "accumulated short line flushed before the oversized line"
         );
     }
 

@@ -406,7 +406,7 @@ impl acp::Agent for MvpAgent {
                                 .cloned(),
                         )
                         .prompt_capabilities(
-                            acp::PromptCapabilities::new().embedded_context(true).image(true),
+                            acp::PromptCapabilities::new().embedded_context(true),
                         )
                         .mcp_capabilities(
                             acp::McpCapabilities::new().http(true).sse(true),
@@ -845,6 +845,22 @@ impl acp::Agent for MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
+        // Dispatch/task sessions are hidden from history browsing. Explicit
+        // `_meta.sessionKind` wins; non-interactive (headless) clients default
+        // to `subagent_headless`.
+        let session_kind = super::resolve_created_session_kind(
+            arguments
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("sessionKind"))
+                .and_then(|v| v.as_str()),
+            init.meta.as_ref(),
+        );
+        // F8: per-session agent type from `_meta.agentName` (dashboard
+        // `/agent <name>` dispatch). Unknown names fail here — never a
+        // silent fallback to the default chain.
+        let custom_agent_name =
+            parse_custom_agent_name(arguments.meta.as_ref(), cwd.as_path())?;
         #[allow(unused_variables)]
         let session_computer_sessions = parse_session_computer_sessions(
             arguments.meta.as_ref(),
@@ -1015,6 +1031,7 @@ impl acp::Agent for MvpAgent {
                     Some(self.gateway.clone()),
                     summary_model,
                     registry_title_sync,
+                    session_kind.as_deref(),
                 )
                 .await
                 .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
@@ -1040,6 +1057,7 @@ impl acp::Agent for MvpAgent {
                     cwd.clone(),
                     arguments.meta.as_ref(),
                     model_agent_type.as_deref(),
+                    custom_agent_name.as_deref(),
                     session_model_id,
                     session_yolo_mode,
                 )
@@ -1067,6 +1085,7 @@ impl acp::Agent for MvpAgent {
                         session_meta: arguments.meta.as_ref(),
                         managed_mcp_expires_at,
                         model_agent_type: model_agent_type.as_deref(),
+                        custom_agent_name: custom_agent_name.as_deref(),
                         session_model_id,
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
@@ -1615,6 +1634,10 @@ impl acp::Agent for MvpAgent {
                         session_meta: request_meta.as_ref(),
                         managed_mcp_expires_at,
                         model_agent_type: persisted_agent_name.as_deref(),
+                        // F8: `_meta.agentName` is a create-time dispatch
+                        // channel; resume rebinds via the persisted agent
+                        // name above.
+                        custom_agent_name: None,
                         session_model_id: summary.current_model_id.clone(),
                         session_yolo_mode,
                         session_auto_mode: session_auto_mode && !session_yolo_mode,
@@ -3224,8 +3247,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/cloud/terminate" => {
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "需要登录",
-                    "请运行 `qidiwork login` 完成登录。",
+                    "Authentication required",
+                    "Run `qidi login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -3256,8 +3279,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/cloud/env/list" => {
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "需要登录",
-                    "请运行 `qidiwork login` 完成登录。",
+                    "Authentication required",
+                    "Run `qidi login` to authenticate.",
                 )?;
                 let sandbox_client = crate::remote::SandboxClient::new(
                     self.cli_chat_proxy_base_url(),
@@ -3279,8 +3302,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/cloud/env/create" => {
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "需要登录",
-                    "请运行 `qidiwork login` 完成登录。",
+                    "Authentication required",
+                    "Run `qidi login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -3334,8 +3357,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/cloud/env/update" => {
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "需要登录",
-                    "请运行 `qidiwork login` 完成登录。",
+                    "Authentication required",
+                    "Run `qidi login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
@@ -3392,8 +3415,8 @@ impl acp::Agent for MvpAgent {
             "x.ai/cloud/env/delete" => {
                 crate::extensions::auth_gate::require_xai_auth(
                     &self.auth_manager,
-                    "需要登录",
-                    "请运行 `qidiwork login` 完成登录。",
+                    "Authentication required",
+                    "Run `qidi login` to authenticate.",
                 )?;
                 let params: serde_json::Value = serde_json::from_str(args.params.get())
                     .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;

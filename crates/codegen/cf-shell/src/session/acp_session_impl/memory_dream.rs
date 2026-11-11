@@ -14,9 +14,11 @@ pub(super) struct MemoryFlushSnapshot {
 ///
 /// This clones the session-wide backend params so tool-search and
 /// compaction-recovery backends keep their original `search_source` and search
-/// thresholds. The returned effective min score preserves the historical
-/// first-turn default of `0.0` unless the injection config explicitly
-/// overrides it.
+/// thresholds. `min_score` semantics: `Some(s)` overrides the params' own
+/// threshold and is returned as the effective score; `None` leaves the params'
+/// threshold untouched and falls back to the historical `0.0`. Since d81a137
+/// the *default* config is `Some(0.35)` (aligned with the `memory_search` tool
+/// path), so `None` only occurs via explicit config.
 pub(super) fn build_initial_injection_backend_params(
     params: &crate::session::memory::MemoryBackendParams,
     initial_injection_config: &crate::config::MemoryInitialInjectionConfig,
@@ -123,7 +125,7 @@ impl SessionActor {
     ///
     /// Called at session end after the session summary is written.
     /// Uses the same sampling client infrastructure as flush but sends
-    /// the dream prompt instead. The model call has a 60s timeout.
+    /// the dream prompt instead. The model call has a 180s timeout.
     pub(super) async fn maybe_run_dream(&self) {
         if self.startup_hints.is_subagent {
             tracing::debug!(
@@ -158,7 +160,7 @@ impl SessionActor {
             "MEMORY_DREAM: gates passed, starting consolidation"
         );
 
-        self.run_dream_inner(&storage, &lock, &sessions_dir, &sessions, "MEMORY_DREAM")
+        self.run_dream_inner(&storage, lock, &sessions_dir, &sessions, "MEMORY_DREAM")
             .await;
     }
 
@@ -201,7 +203,7 @@ impl SessionActor {
 
         self.run_dream_inner(
             &storage,
-            &lock,
+            lock,
             &sessions_dir,
             &sessions,
             "MEMORY_DREAM_SLASH",
@@ -213,7 +215,7 @@ impl SessionActor {
     async fn run_dream_inner(
         &self,
         storage: &crate::session::memory::MemoryStorage,
-        lock: &crate::session::memory::dream_lock::DreamLock,
+        lock: crate::session::memory::dream_lock::DreamLock,
         sessions_dir: &std::path::Path,
         sessions: &[String],
         log_prefix: &str,
@@ -235,7 +237,7 @@ impl SessionActor {
             };
 
         let model_response = match tokio::time::timeout(
-            std::time::Duration::from_secs(30 * 60),
+            std::time::Duration::from_secs(180),
             self.run_dream_model_call(&dream_msg.content),
         )
         .await
@@ -253,22 +255,44 @@ impl SessionActor {
             Err(_) => {
                 tracing::warn!(
                     target: cf_telemetry::memory_log::TARGET,
-                    "{log_prefix}: model call timed out (30m)"
+                    "{log_prefix}: model call timed out (180s)"
                 );
                 self.memory.record_dream_result(false);
                 return;
             }
         };
 
-        let result = execute_dream(
-            lock,
-            storage,
-            &model_response,
-            sessions.len(),
-            self.memory.dream_config.stale_lock_secs,
-            sessions_dir,
-            &dream_msg.processed_stems,
-        );
+        // M7: `execute_dream` is synchronous — it does blocking file I/O and
+        // spawns git subprocesses (the two best-effort snapshots, ~9×2 git
+        // invocations), which can stall the SessionActor's LocalSet thread for
+        // hundreds of ms in steady state and seconds on a cold Windows run
+        // under Defender. Run it on the blocking pool instead of blocking the
+        // async runtime.
+        //
+        // Ownership transfer into the closure: `lock` is moved in by value
+        // (same instance — lock acquire/release and its coverage of the whole
+        // dream are unchanged), `storage` is cheaply cloned (`MemoryStorage` is
+        // `Clone`), and the model response plus processed stems are moved.
+        // `sessions_dir`/`sessions` stay borrowed for the post-dream steps.
+        let storage_for_dream: crate::session::memory::MemoryStorage = storage.clone();
+        let sessions_dir_for_dream = sessions_dir.to_path_buf();
+        let sessions_eligible = sessions.len();
+        let stale_lock_secs = self.memory.dream_config.stale_lock_secs;
+        let response_for_dream = model_response;
+        let processed_stems_for_dream = dream_msg.processed_stems;
+        let result = tokio::task::spawn_blocking(move || {
+            execute_dream(
+                &lock,
+                &storage_for_dream,
+                &response_for_dream,
+                sessions_eligible,
+                stale_lock_secs,
+                &sessions_dir_for_dream,
+                &processed_stems_for_dream,
+            )
+        })
+        .await
+        .expect("dream: execute_dream blocking task panicked");
 
         match &result.status {
             DreamStatus::Completed { .. } => self.memory.record_dream_result(true),

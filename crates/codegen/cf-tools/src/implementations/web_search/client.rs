@@ -15,15 +15,23 @@ pub struct WebSearchClient {
     /// from the Responses API emits an `auth_401_attribution` event
     /// with `consumer == "WebSearch"`.
     attribution_callback: Option<SharedAttributionCallback>,
+    /// Native scraping engine (no API key). When `Some`, `search*` methods
+    /// scrape public engines instead of calling the Responses API.
+    native: Option<super::engine::NativeEngine>,
 }
 impl WebSearchClient {
-    /// Create a new web search client from `WebSearchConfig::Enabled`.
+    /// Create a a web search client from a [`WebSearchConfig`].
     ///
-    /// Returns `Err` if the config is `Disabled` or if header values are invalid.
+    /// `Enabled` builds the Responses-API client; `Native` builds the
+    /// built-in scraping engine (API key provider ignored). Returns `Err`
+    /// for `Disabled` or invalid header values.
     pub fn new(
         config: &WebSearchConfig,
         api_key_provider: Option<SharedApiKeyProvider>,
     ) -> Result<Self, cf_tool_runtime::ToolError> {
+        if matches!(config, WebSearchConfig::Native) {
+            return Self::new_native();
+        }
         let WebSearchConfig::Enabled {
             api_key,
             base_url,
@@ -79,6 +87,27 @@ impl WebSearchClient {
             model: model.clone(),
             api_key_provider,
             attribution_callback: None,
+            native: None,
+        })
+    }
+
+    /// Build a client backed by the built-in scraping engine (no API key,
+    /// no Responses API). `search`/`search_with_titles` return the scraped
+    /// result list directly; the session model synthesizes the answer.
+    pub fn new_native() -> Result<Self, cf_tool_runtime::ToolError> {
+        let http = super::engine::http_client().map_err(|e| {
+            cf_tool_runtime::ToolError::execution(
+                cf_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Failed to build HTTP client: {e}"),
+            )
+        })?;
+        Ok(Self {
+            http,
+            base_url: String::new(),
+            model: super::types::NATIVE_MODEL_ID.to_string(),
+            api_key_provider: None,
+            attribution_callback: None,
+            native: Some(super::engine::NativeEngine),
         })
     }
     /// Wire a 401-attribution callback into this client. Idempotent;
@@ -109,6 +138,11 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), cf_tool_runtime::ToolError> {
+        if let Some(engine) = &self.native {
+            let results = engine.run(&self.http, query, allowed_domains.as_deref()).await;
+            let citations = results.iter().map(|r| r.url.clone()).collect();
+            return Ok((super::engine::format_results(query, &results), citations));
+        }
         let web_search = rs::WebSearchToolArgs::default()
             .filters(rs::WebSearchToolFilters { allowed_domains })
             .build()
@@ -123,8 +157,8 @@ impl WebSearchClient {
             .input(query.to_string())
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
+            .temperature(0.1_f32)
+            .top_p(0.95_f32)
             .max_output_tokens(8192u32)
             .build()
             .map_err(|e| {
@@ -197,6 +231,14 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), cf_tool_runtime::ToolError> {
+        if let Some(engine) = &self.native {
+            let results = engine.run(&self.http, query, allowed_domains.as_deref()).await;
+            let pairs = results
+                .iter()
+                .map(|r| (r.title.clone(), r.url.clone()))
+                .collect();
+            return Ok((super::engine::format_results(query, &results), pairs));
+        }
         let web_search = rs::WebSearchToolArgs::default()
             .filters(rs::WebSearchToolFilters { allowed_domains })
             .build()
@@ -211,8 +253,8 @@ impl WebSearchClient {
             .input(query.to_string())
             .tools(vec![rs::Tool::WebSearch(web_search)])
             .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
+            .temperature(0.1_f32)
+            .top_p(0.95_f32)
             .max_output_tokens(8192u32)
             .build()
             .map_err(|e| {
@@ -360,18 +402,18 @@ mod tests {
         invocations: std::sync::Mutex<Vec<(ToolConsumer, Option<String>)>>,
     }
     impl crate::attribution::Auth401AttributionCallback for CountingCallback {
-        fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
+        fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
             self.invocations
                 .lock()
                 .unwrap()
-                .push((consumer, sent_bearer_prefix.map(|s| s.to_string())));
+                .push((consumer, sent_bearer_suffix.map(|s| s.to_string())));
         }
     }
     /// `record_401_attribution` invokes the wired callback with
-    /// `ToolConsumer::WebSearch` and the truncated bearer prefix.
-    /// The full bearer never crosses the trait boundary.
+    /// `ToolConsumer::WebSearch` and the bearer's 12-char tail
+    /// fragment. The full bearer never crosses the trait boundary.
     #[test]
-    fn record_401_attribution_passes_truncated_prefix_to_callback() {
+    fn record_401_attribution_passes_bearer_tail_to_callback() {
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let config = WebSearchConfig::Enabled {
@@ -388,10 +430,10 @@ mod tests {
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ToolConsumer::WebSearch);
-        assert_eq!(calls[0].1.as_deref(), Some("bearer-with-"));
+        assert_eq!(calls[0].1.as_deref(), Some("l-aaaaaaaaaa"));
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
     /// `record_401_attribution` is a no-op when no callback is wired

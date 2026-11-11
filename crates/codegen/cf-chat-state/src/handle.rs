@@ -147,6 +147,16 @@ impl ChatStateHandle {
             .send(ChatStateCommand::UpdateSamplingConfig { config });
     }
 
+    /// Phase C Reasoning-summary pre-generation write (C-1): merge (extend)
+    /// the session layer's freshly generated batch into the existing
+    /// block-fingerprint → summary table (R2: earlier entries survive).
+    /// Fire-and-forget, like the other mutation writes.
+    pub fn set_reasoning_summaries(&self, summaries: crate::types::ReasoningSummaries) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::SetReasoningSummaries { summaries });
+    }
+
     /// Track that the agent edited a file path.
     pub fn record_agent_edited_path(&self, path: String) {
         let _ = self
@@ -368,6 +378,65 @@ impl ChatStateHandle {
         .unwrap_or(0)
     }
 
+    /// Context-window utilization as a floored percentage (0–100+), computed
+    /// by the state layer so the pre-generation trigger (35%) and the
+    /// batched-clear trigger (40%) share one measure.
+    pub async fn get_context_utilization_percent(&self) -> u64 {
+        self.query("GetContextUtilizationPercent", |reply| {
+            ChatStateCommand::GetContextUtilizationPercent { reply }
+        })
+        .await
+        .unwrap_or(0)
+    }
+
+    /// Whether the Phase C batched pruning mode is active. Gates the
+    /// session-layer Reasoning-summary pre-generation hook.
+    pub async fn is_batched_pruning_enabled(&self) -> bool {
+        self.query("GetBatchedPruningEnabled", |reply| {
+            ChatStateCommand::GetBatchedPruningEnabled { reply }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Whether the master pruning switch (`PruningConfig.enabled`) is on.
+    /// Blind fix 10 (deepseek-flash audit): the session-layer Reasoning-summary
+    /// pre-generation checks this *and* `is_batched_pruning_enabled`, so
+    /// `batched=true + enabled=false` cannot burn LLM summary calls for
+    /// summaries the batched clear would never apply. Fail-closed (`false`,
+    /// zero pre-generation action) when the actor channel is closed.
+    pub async fn is_pruning_enabled(&self) -> bool {
+        self.query("GetPruningEnabled", |reply| {
+            ChatStateCommand::GetPruningEnabled { reply }
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// The retained-layer hard-clear age threshold (turns), read from the live
+    /// [`PruningConfig`]. M10: the session-layer pre-generation passes this to
+    /// `collect_eligible_reasoning_blocks` so both age thresholds share one
+    /// source. Falls back to the config default when the actor is unreachable.
+    pub async fn get_hard_clear_age_turns(&self) -> usize {
+        self.query("GetHardClearAgeTurns", |reply| {
+            ChatStateCommand::GetHardClearAgeTurns { reply }
+        })
+        .await
+        .unwrap_or_else(|| crate::types::PruningConfig::default().hard_clear_age_turns)
+    }
+
+    /// The current Phase C Reasoning-summary table (block fingerprint →
+    /// summary). Read by the session layer before a pre-generation run so it
+    /// skips blocks that were already summarized (R2). Returns an empty table
+    /// if the actor channel is closed.
+    pub async fn get_reasoning_summaries(&self) -> crate::types::ReasoningSummaries {
+        self.query("GetReasoningSummaries", |reply| {
+            ChatStateCommand::GetReasoningSummaries { reply }
+        })
+        .await
+        .unwrap_or_default()
+    }
+
     /// Retrieve the most recent stashed per-turn `TokenUsage`. Returns
     /// `None` if no model turn has completed in this session yet, or if
     /// the actor channel is closed.
@@ -400,7 +469,7 @@ impl ChatStateHandle {
         .ok_or(())
     }
 
-    /// `total_tokens` plus bytes/4 estimate of tool results pushed since the
+    /// `total_tokens` plus character-aware estimate of conversation items pushed since the
     /// last model response. Used by `check_preflight_overflow`.
     pub async fn get_estimated_total_tokens(&self) -> u64 {
         self.query("GetEstimatedTotalTokens", |reply| {
@@ -410,7 +479,7 @@ impl ChatStateHandle {
         .unwrap_or(0)
     }
 
-    /// Bytes/4 estimate of all non-system conversation items.
+    /// Character-aware estimate of all non-system conversation items.
     pub async fn get_estimated_messages_tokens(&self) -> u64 {
         self.query("GetEstimatedMessagesTokens", |reply| {
             ChatStateCommand::GetEstimatedMessagesTokens { reply }

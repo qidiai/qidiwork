@@ -755,6 +755,164 @@ fn slash_new_dispatches_new_session() {
             .any(|e| matches!(e, Effect::CreateSession { .. }))
     );
 }
+/// `/new` never fires `on_session_end`, so it must best-effort flush the
+/// OUTGOING session's memory before switching away. The flush must be a
+/// `/flush` text prompt directed at the OLD `agent_id` + `session_id` (never
+/// the placeholder we're about to create).
+#[test]
+fn new_session_flushes_previous_session_targeting_old_session() {
+    let mut app = test_app_with_agent();
+    let old_id = AgentId(0);
+    // The outgoing session must advertise `/flush` for the best-effort flush
+    // to fire — the shell only advertises it while the memory gate is open
+    // (see `new_session_skips_flush_when_previous_session_lacks_flush_command`).
+    app.agents.get_mut(&old_id).unwrap().session.available_commands =
+        vec![acp::AvailableCommand::new(
+            "flush".to_string(),
+            "Flush conversation memory to disk now".to_string(),
+        )];
+    let old_sid = app.agents[&old_id]
+        .session
+        .session_id
+        .clone()
+        .expect("precondition: outgoing session is bound");
+    let effects = dispatch(Action::NewSession, &mut app);
+    let flush = effects
+        .iter()
+        .find(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "/flush"))
+        .unwrap_or_else(|| panic!("expected a /flush effect, got: {effects:?}"));
+    match flush {
+        Effect::SendPrompt {
+            agent_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(*agent_id, old_id, "flush must target the OLD agent");
+            assert_eq!(
+                *session_id, old_sid,
+                "flush must target the OLD session id, not the new placeholder"
+            );
+        }
+        other => panic!("expected SendPrompt, got {other:?}"),
+    }
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id != old_id),
+        "the new placeholder must be the active view after /new"
+    );
+}
+/// From the welcome screen there is no outgoing session, so `/new` must skip
+/// the flush safely (no panic, no `/flush` effect).
+#[test]
+fn new_session_on_welcome_skips_flush() {
+    let mut app = test_app();
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    let effects = dispatch(Action::NewSession, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "/flush")),
+        "welcome-screen /new must not emit a /flush, got: {effects:?}"
+    );
+}
+/// When the outgoing session does NOT advertise `/flush` (the memory gate is
+/// closed, so the shell omits it from `AvailableCommandsUpdate`), `/new` must
+/// NOT send the `/flush` text: the shell would resolve it as an ordinary user
+/// prompt and pollute the old session's history instead of flushing it. The
+/// "flushing…" toast must stay silent too (it is only shown when a flush is
+/// actually sent).
+#[test]
+fn new_session_skips_flush_when_previous_session_lacks_flush_command() {
+    let mut app = test_app_with_agent();
+    let old_id = AgentId(0);
+    // Precondition: outgoing session is bound but advertises some OTHER
+    // command, not `flush`.
+    app.agents.get_mut(&old_id).unwrap().session.available_commands =
+        vec![acp::AvailableCommand::new(
+            "compact".to_string(),
+            "Compress conversation history".to_string(),
+        )];
+    assert!(
+        app.agents[&old_id].session.session_id.is_some(),
+        "precondition: outgoing session is bound"
+    );
+    let effects = dispatch(Action::NewSession, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "/flush")),
+        "must not emit /flush when the old session does not advertise it, got: {effects:?}"
+    );
+    let ActiveView::Agent(new_id) = app.active_view else {
+        panic!("expected the new session to be active after /new");
+    };
+    assert_ne!(new_id, old_id, "the new placeholder must differ from the old");
+    assert!(
+        app.agents[&new_id].toast.is_none(),
+        "no flush → no \"flushing\" toast, got {:?}",
+        app.agents[&new_id].toast
+    );
+}
+/// A focused subagent view must not defeat the `/new` flush guard. The
+/// outgoing session lives on the ROOT `AgentView`, but `get_active_agent`
+/// penetrates into a focused child view (`ctx.rs:38-49`) whose
+/// `session.available_commands` is never populated — so a guard reading through
+/// `get_active_agent` always sees "no /flush" and silently skips the flush
+/// whenever a subagent view is focused. `/new` must still flush the ROOT
+/// session (and only the root agent/session).
+#[test]
+fn new_session_flushes_root_session_when_subagent_view_focused() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    // The ROOT session advertises `/flush`.
+    app.agents.get_mut(&root_id).unwrap().session.available_commands =
+        vec![acp::AvailableCommand::new(
+            "flush".to_string(),
+            "Flush conversation memory to disk now".to_string(),
+        )];
+    let root_sid = app.agents[&root_id]
+        .session
+        .session_id
+        .clone()
+        .expect("precondition: root session is bound");
+    // Focus a subagent view on the root agent. The child view advertises no
+    // commands, so the old `get_active_agent`-based guard would have read the
+    // CHILD and skipped the flush.
+    {
+        let child = AgentView::new(
+            make_test_agent_session(&app, AgentId(99), "child-sess"),
+            ScrollbackState::new(),
+        );
+        let agent = app.agents.get_mut(&root_id).unwrap();
+        agent.subagent_views.insert("child-1".into(), Box::new(child));
+        agent.active_subagent = Some("child-1".into());
+    }
+    // Precondition: active-agent resolution really does penetrate into the
+    // child, so this test exercises the regression the fix targets.
+    assert_eq!(
+        get_active_agent(&app).map(|a| a.session.id),
+        Some(AgentId(99)),
+        "precondition: get_active_agent must resolve to the focused child"
+    );
+    let effects = dispatch(Action::NewSession, &mut app);
+    let flush = effects
+        .iter()
+        .find(|e| matches!(e, Effect::SendPrompt { text, .. } if text == "/flush"))
+        .unwrap_or_else(|| panic!("expected a /flush effect, got: {effects:?}"));
+    match flush {
+        Effect::SendPrompt {
+            agent_id,
+            session_id,
+            ..
+        } => {
+            assert_eq!(*agent_id, root_id, "flush must target the ROOT agent");
+            assert_eq!(
+                *session_id, root_sid,
+                "flush must target the ROOT session, not the child or the new placeholder"
+            );
+        }
+        other => panic!("expected SendPrompt, got {other:?}"),
+    }
+}
 #[test]
 fn new_session_falls_back_to_app_cwd_on_welcome_screen() {
     let mut app = test_app();
@@ -1561,6 +1719,10 @@ fn entry_title_falls_back_to_short_session_id_when_no_prompt() {
     let title = entry_title(&app.agents[&AgentId(0)]);
     assert_eq!(title, "session abcdef01");
 }
+// /tmp-as-non-project-dir is POSIX semantics (Windows treats it as
+// a project dir); terminal-like Tab is compiled out on Windows. Gate
+// to POSIX, matching the cf-shell fixture-gating precedent.
+#[cfg(not(windows))]
 #[test]
 fn new_session_defers_create_session_for_non_project_dir() {
     let mut app = project_picker_app();

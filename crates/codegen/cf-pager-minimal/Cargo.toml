@@ -47,6 +47,3 @@ cf-token-estimation = { workspace = true }
 cf-pager= { path = "../cf-pager", features = ["test-helpers"] }
 
 [features]
-
-[lints]
-workspace = true

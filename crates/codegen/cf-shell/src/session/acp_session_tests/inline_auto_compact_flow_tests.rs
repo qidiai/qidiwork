@@ -1,4 +1,4 @@
-﻿use super::support::*;
+use super::support::*;
 use super::*;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
@@ -22,7 +22,7 @@ async fn create_test_actor(
     gateway_tx: mpsc::UnboundedSender<cf_acp_lib::AcpClientMessage>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
 ) -> SessionActor {
-    let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -99,6 +99,7 @@ async fn create_test_actor(
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        dynamic_tools: false,
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
@@ -201,6 +202,8 @@ async fn create_test_actor(
         mcp_announced_servers: Mutex::new(HashMap::new()),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregen_last_run_end: std::cell::Cell::new(None),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -415,7 +418,7 @@ fn initial_injection_backend_params_use_override_min_score() {
     assert_eq!("tool", params.search_source);
 }
 #[test]
-fn initial_injection_backend_params_preserve_default_zero_min_score() {
+fn initial_injection_backend_params_default_min_score_is_035() {
     let params = crate::session::memory::MemoryBackendParams {
         session_id: "test-session".to_owned(),
         embed_config: None,
@@ -434,6 +437,40 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
     let (adjusted, effective_min_score) = build_initial_injection_backend_params(
         &params,
         &crate::config::MemoryInitialInjectionConfig::default(),
+    );
+    assert_eq!("injection", adjusted.search_source);
+    // Since d81a137 the default is Some(0.35) (aligned with the memory_search
+    // tool path), so it overrides the backend params' own min_score, and the
+    // effective first-turn threshold is 0.35, not 0.0.
+    assert!((0.35 - adjusted.search_config.min_score).abs() < f32::EPSILON);
+    assert!((0.35 - effective_min_score as f32).abs() < f32::EPSILON);
+}
+#[test]
+fn initial_injection_backend_params_none_keeps_params_and_falls_back_to_zero() {
+    // Contract-defense path: `None` only occurs via explicit config, but the
+    // fallback semantics must stay pinned — params keep their own threshold
+    // and the effective score falls back to the historical 0.0.
+    let params = crate::session::memory::MemoryBackendParams {
+        session_id: "test-session".to_owned(),
+        embed_config: None,
+        embed_base_url: "http://localhost".to_owned(),
+        embed_api_key: None,
+        search_config: crate::config::MemorySearchConfig {
+            min_score: 0.41,
+            ..Default::default()
+        },
+        watcher: None,
+        stale_claim_secs: 60,
+        search_source: "tool",
+        api_key_provider: None,
+        auth_credentials: None,
+    };
+    let (adjusted, effective_min_score) = build_initial_injection_backend_params(
+        &params,
+        &crate::config::MemoryInitialInjectionConfig {
+            enabled: true,
+            min_score: None,
+        },
     );
     assert_eq!("injection", adjusted.search_source);
     assert!((0.41 - adjusted.search_config.min_score).abs() < f32::EPSILON);
@@ -532,6 +569,7 @@ async fn create_test_actor_with_memory(
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        dynamic_tools: false,
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
@@ -647,6 +685,8 @@ async fn create_test_actor_with_memory(
         mcp_announced_servers: Mutex::new(HashMap::new()),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregen_last_run_end: std::cell::Cell::new(None),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1203,7 +1243,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let (gateway_tx, _) = mpsc::unbounded_channel::<cf_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let cwd = cf_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = cf_paths::AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(cf_workspace::file_system::MockFs::new(
                 cwd.to_path_buf(),
             ));
@@ -1301,6 +1341,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
                 doom_loop_turn_tally: Default::default(),
+                dynamic_tools: false,
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
@@ -1408,6 +1449,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 mcp_announced_servers: Mutex::new(HashMap::new()),
                 mcp_reminder_mode: McpReminderMode::Delta,
                 mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregen_last_run_end: std::cell::Cell::new(None),
                 mcp_connecting_reminder_injected: std::cell::Cell::new(false),
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),

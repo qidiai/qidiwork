@@ -34,7 +34,6 @@ mod inline_edit;
 mod leader_cluster;
 mod modals;
 mod mouse;
-pub(crate) mod office_watch;
 mod queue_edit;
 pub mod roster;
 pub(crate) mod screen_mode_relaunch;
@@ -559,6 +558,13 @@ pub async fn run(
         ),
         default_yolo_mode: launch_yolo.yolo,
         default_auto_mode: launch_auto && !launch_yolo.yolo,
+        // D channel: --tools/--disallowed-tools are no longer
+        // headless-only; parse with the same helper the headless
+        // path uses so both modes converge on one CliAgentOverrides.
+        tools: crate::headless::parse_comma_list(args.cli_tools.as_deref()),
+        disallowed_tools: crate::headless::parse_comma_list(
+            args.cli_disallowed_tools.as_deref(),
+        ),
     };
     let connection = if use_leader {
         let conn = crate::acp::connect_via_leader(&cancel, connect_flags, &raw_config).await?;
@@ -590,17 +596,37 @@ pub async fn run(
         .and_then(|ui| ui.get("screen_mode"))
         .and_then(|v| v.as_str());
     let auto_minimal_mouse_leak = term_ctx.mouse_reporting_leaks_as_raw_text();
-    // QIDI local patch: never enter scrollback-native minimal mode from the
-    // startup resolution. A persisted `ui.screen_mode = "minimal"` config
-    // write (side effect of a `--minimal` launch) or the mouse-leak auto
-    // downgrade flipped sessions into the one-line welcome card, which looks
-    // like a completely different product from the full-screen welcome.
-    // Hard-pin the classic full TUI: minimal is reachable only via the
-    // explicit `--minimal` CLI flag for that single launch and is never
-    // persisted back into the config.
-    let screen_mode = ScreenMode::Fullscreen;
-    MINIMAL_AUTO_SET_FOR_MOUSE_LEAK.store(false, Ordering::Release);
-    let _ = &config_screen_mode;
+    let explicit_minimal = screen_mode_relaunch::effective_minimal_preference(
+        args.minimal,
+        args.fullscreen,
+        config_screen_mode,
+        config_watcher.current().minimal,
+    );
+    let screen_mode = screen_mode_relaunch::resolve_screen_mode(
+        screen_mode_override,
+        explicit_minimal.unwrap_or(auto_minimal_mouse_leak),
+        alt_screen_wants_fullscreen,
+    );
+    MINIMAL_AUTO_SET_FOR_MOUSE_LEAK.store(
+        screen_mode.is_minimal() && explicit_minimal.is_none() && screen_mode_override.is_none(),
+        Ordering::Release,
+    );
+    if args.minimal || args.fullscreen {
+        let want = if args.minimal {
+            "minimal"
+        } else {
+            "fullscreen"
+        };
+        if config_screen_mode != Some(want) {
+            tokio::spawn(async move {
+                if let Err(e) =
+                    cf_shell::util::config::set_screen_mode(want.to_string()).await
+                {
+                    tracing::warn!("failed to persist screen mode preference: {e}");
+                }
+            });
+        }
+    }
     let minimal = screen_mode.is_minimal();
     let relaunched_into_minimal = screen_mode_override == Some(ScreenMode::Minimal);
     tracing::info!(
@@ -1026,30 +1052,19 @@ fn init_terminal(
         MOUSE_CAPTURE_ENABLED.store(!want_minimal, Ordering::Release);
         set_panic_hook(mode);
         signal_handler::install(mode);
-        let drain_timeout = if crate::terminal::terminal_context().vte_version.is_some() {
-            std::time::Duration::from_millis(20)
-        } else {
-            std::time::Duration::ZERO
-        };
+        // Drain terminal replies queued during setup (probe responses,
+        // console-mode-flip events). All terminals get the same 20ms: the old
+        // 0ms path for non-VTE terminals let late-arriving garbage land in the
+        // input reader thread instead of being discarded here.
+        let drain_timeout = std::time::Duration::from_millis(20);
         drain_pending_events_with_timeout(drain_timeout);
         crate::theme::apply_cursor_color();
         let ctx = crate::terminal::terminal_context();
         let skip_reason: Option<&str> =
             ctx.kitty_skip_reason()
-                .or_else(|| {
-                    // PTY e2e (ConPTY): conhost swallows the Kitty keyboard
-                    // probe (`CSI ? u`) instead of answering it, so
-                    // `supports_keyboard_enhancement()` blocks forever and the
-                    // welcome screen never paints. Real terminals answer the
-                    // probe (Windows Terminal is skipped via brand above).
-                    // The PTY harness sets QIDI_SKIP_TERMINAL_PROBE=1.
-                    if std::env::var_os("QIDI_SKIP_TERMINAL_PROBE").is_some() {
-                        return Some("pty_probe_skipped");
-                    }
-                    match terminal::supports_keyboard_enhancement() {
-                        Ok(true) => None,
-                        _ => Some("unsupported"),
-                    }
+                .or_else(|| match terminal::supports_keyboard_enhancement() {
+                    Ok(true) => None,
+                    _ => Some("unsupported"),
                 });
         let use_keyboard_enhancement = skip_reason.is_none();
         if use_keyboard_enhancement {
@@ -1681,9 +1696,9 @@ mod tests {
         assert!(!args.no_alt_screen);
     }
     #[test]
-    fn cli_command_name_is_qidiwork() {
+    fn cli_command_name_is_qidi() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "qidiwork");
+        assert_eq!(PagerArgs::command().get_name(), "qidi");
     }
     #[test]
     fn cli_help_output_header() {
@@ -1693,9 +1708,9 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "QIDI Code TUI",
+                "QIDI Code — AI coding assistant",
                 "",
-                "Usage: qidiwork [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: qidi [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]

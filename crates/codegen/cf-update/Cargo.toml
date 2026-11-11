@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "cf-update"
-version = "0.1.220-alpha.8"
+version = "0.1.220-alpha.4"
 edition.workspace = true
 
 [dependencies]
@@ -31,6 +31,3 @@ time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
 dunce = { workspace = true }
-
-[lints]
-workspace = true

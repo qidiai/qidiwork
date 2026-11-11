@@ -2375,7 +2375,7 @@ pub fn derive_source_label(source_dir: &str) -> (String, bool) {
             .collect();
         comps
             .windows(3)
-            .find(|w| w[0] == ".grok" && w[1] == subdir && !w[2].is_empty())
+            .find(|w| w[0] == ".qidi" && w[1] == subdir && !w[2].is_empty())
             .map(|w| w[2].clone())
     };
     if let Some(name) = plugin_name("plugins").or_else(|| plugin_name("installed-plugins")) {
@@ -4314,7 +4314,7 @@ mod tests {
         assert!(
             rows.labels
                 .iter()
-                .any(|l| l.starts_with("由 QIDI 托管")),
+                .any(|l| l.starts_with("Managed by QIDI")),
             "managed section header must appear"
         );
         assert!(
@@ -6502,12 +6502,12 @@ mod tests {
             ),
             (
                 PluginOrigin::MarketplaceInstall {
-                    source_name: Some("QIDI Official".into()),
+                    source_name: Some("xAI Official".into()),
                     git_url: Some("https://example.com/r.git".into()),
                 },
                 5,
-                "grok-mp:QIDI Official",
-                "QIDI Official",
+                "grok-mp:xAI Official",
+                "xAI Official",
             ),
             (
                 PluginOrigin::MarketplaceInstall {
@@ -6564,10 +6564,10 @@ mod tests {
         assert_eq!(plugin_group(&config).key, "origin:config");
 
         let mut mp = make_plugin("mp-tool");
-        mp.marketplace_source = Some("QIDI Official".into());
+        mp.marketplace_source = Some("xAI Official".into());
         let group = plugin_group(&mp);
-        assert_eq!(group.key, "grok-mp:QIDI Official");
-        assert_eq!(group.label, "QIDI Official");
+        assert_eq!(group.key, "grok-mp:xAI Official");
+        assert_eq!(group.label, "xAI Official");
 
         let mut direct = make_plugin("direct-tool");
         direct.marketplace_source = Some("git: owner/repo".into());
@@ -6582,8 +6582,8 @@ mod tests {
         );
         assert_eq!(plugin_group(&unknown).key, "origin:user");
 
-        unknown.marketplace_source = Some("QIDI Official".into());
-        assert_eq!(plugin_group(&unknown).key, "grok-mp:QIDI Official");
+        unknown.marketplace_source = Some("xAI Official".into());
+        assert_eq!(plugin_group(&unknown).key, "grok-mp:xAI Official");
     }
 
     #[test]
@@ -6708,14 +6708,14 @@ mod tests {
         let mut direct = make_plugin("direct-tool");
         direct.marketplace_source = Some("git: owner/repo".into());
         let mut mp = make_plugin("official-tool");
-        mp.marketplace_source = Some("QIDI Official".into());
+        mp.marketplace_source = Some("xAI Official".into());
         let plain = make_plugin("plain-tool");
 
         let mut state = plugins_modal_state(vec![direct, mp, plain]);
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
 
         assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "QIDI Official (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "xAI Official (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "Direct installs (1 plugin)"), 1);
     }
 

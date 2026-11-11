@@ -129,6 +129,20 @@ pub struct SessionTurnDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub itl_mean_ms: Option<i64>,
 
+    /// **[turn-level]** Whether any response this turn needed the sampler's
+    /// one-shot `max_tokens` budget boost (a truncated attempt was re-sampled
+    /// with a larger budget). `None` when the turn never truncated — the field
+    /// is never sent as `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_retry: Option<bool>,
+
+    /// **[turn-level]** Output tokens discarded by this turn's truncated
+    /// attempts, summed across the turn's boosted retries. `Some(0)` means a
+    /// retry happened but nothing was wasted, which is distinct from `None`
+    /// (no retry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_retry_tokens_wasted: Option<i64>,
+
     // ── Accumulated / snapshot session-level values ─────────────────────
     /// **[accumulated]** Current context window usage as a percentage (0–100)
     /// at turn end. Read from cumulative `SessionSignals.context_window_usage`.
@@ -437,21 +451,32 @@ impl FeedbackClient {
         }
     }
 
-    fn record_401_attribution_if_needed(&self, response: &reqwest::Response, op: &str) {
+    /// Emit `auth 401 attribution` for a 401 response, tagged
+    /// `consumer = "FeedbackClient.<op>"`.
+    ///
+    /// `sent_bearer` is the bearer tail captured at send time by the
+    /// auth middleware ([`cf_auth::StampedBearerSuffix`]) — the
+    /// credential that actually went on the wire, threaded from
+    /// `send_json` / `send_empty`. It is deliberately NOT re-read
+    /// from the `credentials` snapshot here: that snapshot is taken
+    /// at construction time, so it would attribute a stale
+    /// credential even when the request correctly went out with a
+    /// fresher one from the attached `AuthManager`.
+    fn record_401_attribution_if_needed(
+        &self,
+        response: &reqwest::Response,
+        op: &str,
+        sent_bearer: Option<&str>,
+    ) {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(am) = self.credentials.auth_manager()
         {
-            let bearer_prefix = self
-                .credentials
-                .deployment_key
-                .as_deref()
-                .or(self.credentials.user_token.as_deref());
             crate::auth::attribution::record_consumer_401(
                 am.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::FeedbackClient,
                 op,
-                bearer_prefix,
+                sent_bearer,
             );
         }
     }
@@ -517,9 +542,10 @@ impl FeedbackClient {
     ) -> Result<T> {
         let request = cf_file_utils::trace_context::inject_trace_context_into_request(request);
         let req = request.build().context(context)?;
-        let response = self.client.execute(req).await.context(context)?;
+        let (response, sent_bearer) =
+            cf_auth::execute_with_stamp(&self.client, req).await.context(context)?;
 
-        self.record_401_attribution_if_needed(&response, context);
+        self.record_401_attribution_if_needed(&response, context, sent_bearer.as_ref().map(|s| s.0.as_str()));
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             tracing::debug!("{context} rejected (403), skipping");
@@ -549,9 +575,10 @@ impl FeedbackClient {
     async fn send_empty(&self, request: RequestBuilder, context: &'static str) -> Result<()> {
         let request = cf_file_utils::trace_context::inject_trace_context_into_request(request);
         let req = request.build().context(context)?;
-        let response = self.client.execute(req).await.context(context)?;
+        let (response, sent_bearer) =
+            cf_auth::execute_with_stamp(&self.client, req).await.context(context)?;
 
-        self.record_401_attribution_if_needed(&response, context);
+        self.record_401_attribution_if_needed(&response, context, sent_bearer.as_ref().map(|s| s.0.as_str()));
 
         if response.status() == reqwest::StatusCode::FORBIDDEN {
             tracing::debug!("{context} rejected (403), skipping");
@@ -821,6 +848,9 @@ pub fn snapshot_to_turn_delta(
         itl_p99_ms: d.last_itl_p99_ms.map(|v| v as i64),
         itl_max_ms: d.last_itl_max_ms.map(|v| v as i64),
         itl_mean_ms: d.last_itl_mean_ms.map(|v| v as i64),
+        // Truncation retries (signals uses u64; wire type uses i64)
+        truncation_retry: d.last_truncation_retry,
+        truncation_retry_tokens_wasted: d.last_truncation_retry_tokens_wasted.map(|v| v as i64),
         context_window_usage: c.context_window_usage as i64,
         model_id: c.primary_model_id.clone(),
         turn_duration_ms,
@@ -992,6 +1022,96 @@ mod tests {
         assert_eq!(delta.turn_duration_ms, Some(1500));
         assert_eq!(delta.turn_outcome.as_deref(), Some("completed"));
         assert_eq!(delta.model_fingerprint.as_deref(), Some("fp_test_123"));
+    }
+
+    /// A truncated turn's retry must reach the wire payload, and a retry that
+    /// wasted nothing (`Some(0)`) must not be collapsed to "no retry".
+    #[test]
+    fn test_snapshot_to_turn_delta_carries_truncation_retry() {
+        let snapshot = crate::session::signals::TurnDeltaSnapshot {
+            current: crate::session::signals::SessionSignals::default(),
+            delta: crate::session::signals::SessionSignalsDelta {
+                turn_number: 1,
+                last_truncation_retry: Some(true),
+                last_truncation_retry_tokens_wasted: Some(0),
+                ..Default::default()
+            },
+            start_prompt_mode: None,
+            end_prompt_mode: None,
+            turn_input_tokens: 0,
+            turn_output_tokens: 0,
+            turn_cached_input_tokens: 0,
+        };
+
+        let delta = snapshot_to_turn_delta(
+            &snapshot,
+            ClientType::Agent,
+            None,
+            0,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(delta.truncation_retry, Some(true));
+        assert_eq!(delta.truncation_retry_tokens_wasted, Some(0));
+
+        let json = serde_json::to_value(&delta).unwrap();
+        assert_eq!(
+            json.get("truncationRetry"),
+            Some(&serde_json::json!(true)),
+            "retry flag must be present in the payload: {json}"
+        );
+        assert_eq!(
+            json.get("truncationRetryTokensWasted"),
+            Some(&serde_json::json!(0)),
+            "a zero wasted count must survive serialization: {json}"
+        );
+    }
+
+    /// A turn that never truncated sends neither field — no nulls in the
+    /// data surface.
+    #[test]
+    fn test_snapshot_to_turn_delta_omits_truncation_retry_when_absent() {
+        let snapshot = crate::session::signals::TurnDeltaSnapshot {
+            current: crate::session::signals::SessionSignals::default(),
+            delta: crate::session::signals::SessionSignalsDelta {
+                turn_number: 1,
+                ..Default::default()
+            },
+            start_prompt_mode: None,
+            end_prompt_mode: None,
+            turn_input_tokens: 0,
+            turn_output_tokens: 0,
+            turn_cached_input_tokens: 0,
+        };
+
+        let delta = snapshot_to_turn_delta(
+            &snapshot,
+            ClientType::Agent,
+            None,
+            0,
+            None,
+            false,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(delta.truncation_retry, None);
+        assert_eq!(delta.truncation_retry_tokens_wasted, None);
+
+        let json = serde_json::to_value(&delta).unwrap();
+        assert!(
+            json.get("truncationRetry").is_none(),
+            "no-retry turn must omit the flag entirely: {json}"
+        );
+        assert!(
+            json.get("truncationRetryTokensWasted").is_none(),
+            "no-retry turn must omit the wasted count: {json}"
+        );
     }
 
     #[test]
@@ -1234,6 +1354,83 @@ mod auth_refresh_tests {
             sent, "Bearer fresh-from-auth-manager",
             "outgoing bearer must come from AuthManager (not the build-time snapshot)"
         );
+    }
+
+    /// A 401 must be attributed to the send-time generation: the auth
+    /// middleware stamps the live `AuthManager` bearer when the request
+    /// goes out, and `record_401_attribution_if_needed` records exactly
+    /// that tail — not a re-read of the construction-time `credentials`
+    /// snapshot (the pre-fix source, which would attribute the stale
+    /// build-time token even though the wire carried the fresh one).
+    ///
+    /// The mock rotates the `AuthManager` mid-flight (server-side,
+    /// before answering 401): the wire generation stays the send-time
+    /// one, which is what the attribution must pin.
+    #[tokio::test]
+    async fn feedback_401_attribution_pins_send_time_bearer() {
+        let captured = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let captured_for_handler = captured.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let am = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+        am.hot_swap(GrokAuth {
+            key: "feedback-send-time-token".into(),
+            auth_mode: AuthMode::ApiKey,
+            create_time: Utc::now(),
+            user_id: "user-42".into(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            ..GrokAuth::test_default()
+        });
+        let am_for_handler = am.clone();
+        let router = Router::new().route(
+            "/v1/feedback/requests/{id}/complete",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let captured = captured_for_handler.clone();
+                let am = am_for_handler.clone();
+                async move {
+                    if let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) {
+                        *captured.lock() = Some(auth.to_str().unwrap_or("").to_owned());
+                    }
+                    // Mid-flight rotation: the refresh a real 401 would
+                    // trigger lands before the attribution arm runs.
+                    am.hot_swap(GrokAuth {
+                        key: "feedback-rotated-token".into(),
+                        auth_mode: AuthMode::ApiKey,
+                        create_time: Utc::now(),
+                        user_id: "user-42".into(),
+                        expires_at: Some(Utc::now() + Duration::hours(1)),
+                        ..GrokAuth::test_default()
+                    });
+                    axum::http::StatusCode::UNAUTHORIZED
+                }
+            }),
+        );
+        let (addr, _server) = start_server(router).await;
+
+        // Build-time user token differs from the AuthManager token on
+        // purpose: the pre-fix attribution read this stale snapshot.
+        let client = FeedbackClient::new(
+            format!("http://{addr}/v1"),
+            Some("build-time-user-token".into()),
+        )
+        .with_auth_manager(am);
+
+        let submission: FeedbackSubmission = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "clientType": "agent",
+            "feedbackType": "rating",
+        }))
+        .unwrap();
+        let result = client.complete_request("req-1", &submission).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("401"),
+            "expected the 401 to surface as an error, got: {err}"
+        );
+
+        // The wire bearer is the send-time AuthManager token — the
+        // exact generation the 401 attribution now records.
+        let sent = captured.lock().clone().expect("server saw the request");
+        assert_eq!(sent, "Bearer feedback-send-time-token");
     }
 
     /// Counts refresh() calls -- proves disk-reload short-circuits

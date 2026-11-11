@@ -5,9 +5,9 @@ use indexmap::IndexMap;
 use prod_mc_cli_chat_proxy_types::SubagentBundle;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-const QIDI_CODE_BACKEND_URL: &str = "https://api.qidiai.ltd";
+const QIDI_CODE_BACKEND_URL: &str = "https://code.grok.com";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const QIDI_CODE_WEB_URL: &str = "https://qidiwork.qidiai.ltd";
+const QIDI_CODE_WEB_URL: &str = "https://qidiai.ltd";
 /// Build a share URL from a permission ID
 pub fn share_url(permission_id: &str) -> String {
     let web_url =
@@ -1401,9 +1401,9 @@ mod tests {
             { "id" : "grok-3", "object" : "model", "owned_by" : "xai", "context_window" :
             131072 }
         );
-        let result = parse_remote_model_value(&value, "https://api.qidiai.ltd/v1").unwrap();
+        let result = parse_remote_model_value(&value, "https://api.x.ai/v1").unwrap();
         assert_eq!(result.model, "grok-3");
-        assert_eq!(result.base_url, "https://api.qidiai.ltd/v1");
+        assert_eq!(result.base_url, "https://api.x.ai/v1");
         assert_eq!(result.name.as_deref(), Some("grok-3"));
     }
     #[test]
@@ -1754,10 +1754,10 @@ mod tests {
     fn list_url_derived_from_base_url() {
         let ep = endpoints(
             "https://proxy.grok.com/v1",
-            Some("https://api.qidiai.ltd/v1"),
+            Some("https://api.x.ai/v1"),
             None,
         );
-        assert_eq!(ep.resolve_models_list_url(), "https://api.qidiai.ltd/v1/models");
+        assert_eq!(ep.resolve_models_list_url(), "https://api.x.ai/v1/models");
     }
     #[test]
     fn list_url_explicit_overrides_derivation() {
@@ -1819,7 +1819,7 @@ mod tests {
         assert_eq!(ep.url, "https://models.acme.com/v1/models");
         assert_eq!(ep.auth, EndpointAuth::ApiKey);
     }
-    /// REGRESSION: `grok setup` must send the deployment key to
+    /// REGRESSION: `qidi setup` must send the deployment key to
     /// the proxy, never the inference endpoint.
     #[test]
     #[serial_test::serial]

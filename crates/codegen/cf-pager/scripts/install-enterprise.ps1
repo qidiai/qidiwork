@@ -1,17 +1,25 @@
 #
-# Grok CLI installer (enterprise channel) for PowerShell — https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1
+# QIDI Code CLI installer (enterprise channel) for PowerShell — https://x.ai/cli/enterprise-install.ps1
 #
 # Standalone installer for the enterprise channel. Intentionally a full copy of
 # the install logic so changes to the stable installer cannot break enterprise.
 #
 # Auth: GROK_DEPLOYMENT_KEY env var (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_BIN_DIR, GROK_PROXY_URL
+# Env: QIDI_BIN_DIR, QIDI_PROXY_URL
+#
+# Env naming domains (authoritative contract: scripts/README.md):
+#   Installer scripts read the QIDI_* domain only (QIDI_BIN_DIR,
+#   QIDI_PROXY_URL). The running CLI reads the GROK_* domain
+#   (GROK_DEPLOYMENT_KEY, GROK_VERSION, ...). The only crossings
+#   are retained contract points: GROK_DEPLOYMENT_KEY (enterprise
+#   installer auth) and GROK_VERSION (ps1 version input).
+#   ~/.grok stays the runtime home regardless of QIDI_BIN_DIR.
 #
 # Usage:
-#   irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex                                       # latest enterprise
-#   & ([scriptblock]::Create((irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1))) -Version 0.1.42 # specific version
-#   $env:GROK_VERSION="0.1.42"; irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex           # specific version (alt)
-#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://qidiwork.qidiai.ltd/cli/enterprise-install.ps1 | iex
+#   irm https://x.ai/cli/enterprise-install.ps1 | iex                                       # latest enterprise
+#   & ([scriptblock]::Create((irm https://x.ai/cli/enterprise-install.ps1))) -Version 0.1.42 # specific version
+#   $env:GROK_VERSION="0.1.42"; irm https://x.ai/cli/enterprise-install.ps1 | iex           # specific version (alt)
+#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://x.ai/cli/enterprise-install.ps1 | iex
 #
 
 param(
@@ -34,7 +42,7 @@ if (-not $Version -and $env:GROK_VERSION) {
 
 # This script is Windows-only. PS 5.1 has no Platform property and only runs on Windows.
 if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
-    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash"
+    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://x.ai/cli/enterprise-install.sh | bash"
     exit 1
 }
 
@@ -113,7 +121,7 @@ if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-\S+)?$') {
 
 # --- Resolve auth ---
 
-$OidcScope = 'https://api.qidiai.ltd::qidi-code'
+$OidcScope = 'https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828'
 $LegacyScope = 'https://accounts.x.ai/sign-in'
 $AuthSource = ''
 
@@ -150,10 +158,10 @@ $platform = "windows-$arch"
 
 # --- Resolve version ---
 
-$BaseUrlPrimary = 'https://qidiwork.qidiai.ltd/cli'
-$BaseUrlFallback = 'https://qidiwork.qidiai.ltd/cli'
+$BaseUrlPrimary = 'https://x.ai/cli'
+$BaseUrlFallback = 'https://storage.googleapis.com/grok-build-public-artifacts/cli'
 $DownloadDir = Join-Path $GrokDir 'downloads'
-$BinDir = if ($env:GROK_BIN_DIR) { $env:GROK_BIN_DIR } else { Join-Path $GrokDir 'bin' }
+$BinDir = if ($env:QIDI_BIN_DIR) { $env:QIDI_BIN_DIR } else { Join-Path $GrokDir 'bin' }
 
 New-Item -ItemType Directory -Path $DownloadDir -Force | Out-Null
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
@@ -182,21 +190,32 @@ if ($Version) {
     exit 1
 }
 
+# Validate the resolved version too: $Version was checked above,
+# but a probe-returned channel pointer is server-controlled input.
+if ($resolvedVersion -notmatch '^\d+\.\d+\.\d+(-\S+)?$') {
+    Write-Error "Invalid version format: $resolvedVersion (expected X.Y.Z or X.Y.Z-suffix)"
+    exit 1
+}
+
 if ($AuthSource) {
-    Write-Host "Installing Grok $resolvedVersion ($platform, $AuthSource)..." -ForegroundColor Cyan
+    Write-Host "Installing QIDI Code $resolvedVersion ($platform, $AuthSource)..." -ForegroundColor Cyan
 } else {
-    Write-Host "Installing Grok $resolvedVersion ($platform)..." -ForegroundColor Cyan
+    Write-Host "Installing QIDI Code $resolvedVersion ($platform)..." -ForegroundColor Cyan
 }
 
 # --- Download binary ---
 
+# Download to a sibling .tmp.$PID file first so a failed fetch
+# never destroys the previous install (atomic promote via
+# Move-Item, mirroring install.sh / install-enterprise.sh).
 $binaryPath = Join-Path $DownloadDir "grok-$platform.exe"
+$binaryTmp = "$binaryPath.tmp.$PID"
 $artifactBase = "$BaseUrl/grok-$resolvedVersion-$platform"
 
 $downloaded = $false
 foreach ($url in @("$artifactBase.exe", $artifactBase)) {
     try {
-        Download-File $url $binaryPath
+        Download-File $url $binaryTmp
         $downloaded = $true
         break
     } catch {
@@ -205,10 +224,12 @@ foreach ($url in @("$artifactBase.exe", $artifactBase)) {
 }
 
 if (-not $downloaded) {
-    if (Test-Path $binaryPath) { Remove-Item $binaryPath -Force }
+    if (Test-Path $binaryTmp) { Remove-Item $binaryTmp -Force }
     Write-Error "Binary download failed from $artifactBase.exe and $artifactBase"
     exit 1
 }
+
+Move-Item -Path $binaryTmp -Destination $binaryPath -Force
 
 # --- Install binary (locked-file safe) ---
 
@@ -251,7 +272,9 @@ $cliLines = @('installer = "internal"', 'channel = "enterprise"')
 if (-not (Test-Path $ConfigFile)) {
     New-Item -ItemType Directory -Path (Split-Path $ConfigFile) -Force | Out-Null
     $content = "[cli]`r`n" + ($cliLines -join "`r`n") + "`r`n"
-    [System.IO.File]::WriteAllText($ConfigFile, $content, [System.Text.Encoding]::UTF8)
+    $configTmp = "$ConfigFile.tmp.$PID"
+    [System.IO.File]::WriteAllText($configTmp, $content, [System.Text.Encoding]::UTF8)
+    Move-Item -Path $configTmp -Destination $ConfigFile -Force
 } elseif ((Get-Content -Raw $ConfigFile) -match '(?m)^\[cli\]') {
     # Section-aware: only replace installer/channel under [cli], not other sections.
     $existingLines = Get-Content $ConfigFile
@@ -273,7 +296,9 @@ if (-not (Test-Path $ConfigFile)) {
         }
         [void]$output.Add($line)
     }
-    [System.IO.File]::WriteAllLines($ConfigFile, [string[]]$output.ToArray(), [System.Text.Encoding]::UTF8)
+    $configTmp = "$ConfigFile.tmp.$PID"
+    [System.IO.File]::WriteAllLines($configTmp, [string[]]$output.ToArray(), [System.Text.Encoding]::UTF8)
+    Move-Item -Path $configTmp -Destination $ConfigFile -Force
 } else {
     Add-Content -Path $ConfigFile -Value "`r`n[cli]`r`n$($cliLines -join "`r`n")`r`n"
 }
@@ -281,7 +306,7 @@ if (-not (Test-Path $ConfigFile)) {
 # --- Fetch deployment config (deployment key only) ---
 
 if ($env:GROK_DEPLOYMENT_KEY) {
-    $ProxyUrl = if ($env:GROK_PROXY_URL) { $env:GROK_PROXY_URL } else { 'https://api.qidiai.ltd/v1' }
+    $ProxyUrl = if ($env:QIDI_PROXY_URL) { $env:QIDI_PROXY_URL } else { 'https://api.qidiai.ltd/v1' }
     Write-Host '  Fetching deployment config...' -ForegroundColor DarkGray
     try {
         $headers = @{ 'Authorization' = "Bearer $($env:GROK_DEPLOYMENT_KEY)" }
@@ -314,7 +339,7 @@ if ($env:GROK_DEPLOYMENT_KEY) {
     }
 }
 
-Write-Host "Grok $resolvedVersion installed to $BinDir\grok.exe" -ForegroundColor Green
+Write-Host "QIDI Code $resolvedVersion installed to $BinDir\grok.exe" -ForegroundColor Green
 
 # --- Ensure grok is on PATH ---
 

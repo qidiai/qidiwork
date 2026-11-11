@@ -26,14 +26,22 @@ pub(super) fn is_max_tier(subscription_tier: Option<&str>) -> bool {
     };
     // Normalize: lowercase + spaces→underscores to match both JWT-derived
     // keys ("supergrok_heavy") and CCP display names ("SuperGrok Heavy").
-    t.to_ascii_lowercase().replace(' ', "_") == "supergrok_heavy"
+    // Normalize: lowercase + spaces to underscores so both JWT-derived keys
+    // and CCP display names match. Accept BOTH brand spellings: the CCP
+    // server may still emit the upstream "SuperGrok Heavy" while new
+    // deployments emit "SuperQIDI Heavy" (rebrand half-migration kept both
+    // alive in the wild).
+    matches!(
+        t.trim().to_ascii_lowercase().replace(' ', "_").as_str(),
+        "supergrok_heavy" | "superqidi_heavy"
+    )
 }
 
 /// URL for upgrading the subscription tier.
-pub(crate) const UPSELL_URL_UPGRADE: &str = "https://www.qidiai.ltd";
+pub(crate) const UPSELL_URL_UPGRADE: &str = "https://qidiai.ltd/superqidi?referrer=cf-tools";
 
 /// URL for managing pay-as-you-go / on-demand spending / purchasing credits.
-pub(crate) const UPSELL_URL_PAYG: &str = "https://www.qidiai.ltd";
+pub(crate) const UPSELL_URL_PAYG: &str = "https://qidiai.ltd?_s=usage";
 
 /// Billing mode for credit-limit upsell copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +120,7 @@ pub(crate) fn acp_error_is_free_usage_exhausted(err: &agent_client_protocol::Err
 /// User-facing message for free-usage exhaustion. Shown by headless mode and
 /// `format_acp_error` in place of auth-aware rate-limit copy. Deliberately
 /// promises no reset duration — the quota window is backend-config-driven.
-pub(crate) const FREE_USAGE_USER_MESSAGE: &str = "你已达到今日 QIDI Code 免费用量上限。升级到 pro 版可获得更高限额,或稍后再试:https://www.qidiai.ltd";
+pub(crate) const FREE_USAGE_USER_MESSAGE: &str = "You\u{2019}ve reached your free QIDI Code usage limit for now. Get SuperQIDI for much higher limits, or try again later: https://qidiai.ltd/superqidi?referrer=cf-tools";
 
 /// Open the credit-limit upsell on the given agent.
 ///
@@ -125,9 +133,9 @@ pub(crate) const FREE_USAGE_USER_MESSAGE: &str = "你已达到今日 QIDI Code �
 /// continue action. No Q&A modal — the user can't upgrade further.
 #[allow(unreachable_code)]
 pub(super) fn open_credit_limit_upsell(
-    agent: &mut AgentView,
-    mode: CreditLimitUpsellMode,
-    max_tier: bool,
+    _agent: &mut AgentView,
+    _mode: CreditLimitUpsellMode,
+    _max_tier: bool,
 ) {
     // QIDI local patch: credit-limit upsell popup disabled - self-hosted
     // model endpoints make the upstream Grok paywall irrelevant.
@@ -150,7 +158,7 @@ pub(super) fn open_credit_limit_upsell(
         CreditLimitCardAction,
         cf_telemetry::events::CreditLimitChoice,
         bool,
-    ) = match mode {
+    ) = match _mode {
         CreditLimitUpsellMode::UnifiedCredits => (
             "You hit your weekly limit.",
             "Upgrade to a higher tier for more usage",
@@ -179,10 +187,10 @@ pub(super) fn open_credit_limit_upsell(
             false,
         ),
     };
-    let unified_billing = matches!(mode, CreditLimitUpsellMode::UnifiedCredits);
+    let unified_billing = matches!(_mode, CreditLimitUpsellMode::UnifiedCredits);
 
     // ── Max tier: inline scrollback card ─────────────────────────
-    if max_tier {
+    if _max_tier {
         use crate::scrollback::block::RenderBlock;
         log_event(cf_telemetry::events::CreditLimitUpsellShown {
             surface: cf_telemetry::events::CreditLimitUpsellSurface::InlineCard,
@@ -190,7 +198,7 @@ pub(super) fn open_credit_limit_upsell(
             pay_as_you_go: payg_telemetry,
             unified_billing,
         });
-        agent.scrollback.push_block(RenderBlock::credit_limit_card(
+        _agent.scrollback.push_block(RenderBlock::credit_limit_card(
             heading,
             card_action,
             UPSELL_URL_PAYG,
@@ -211,7 +219,7 @@ pub(super) fn open_credit_limit_upsell(
         Question, QuestionOption,
     };
 
-    if agent.question_view.is_some() {
+    if _agent.question_view.is_some() {
         return;
     }
 
@@ -235,7 +243,7 @@ pub(super) fn open_credit_limit_upsell(
         id: None,
     };
 
-    let stashed = agent.prompt.stash();
+    let stashed = _agent.prompt.stash();
     let state = QuestionViewState::new(
         format!("credit-limit-upsell-{}", uuid::Uuid::new_v4()),
         vec![question],
@@ -248,8 +256,8 @@ pub(super) fn open_credit_limit_upsell(
         ],
     })
     .with_no_freeform();
-    agent.question_view = Some(state);
-    agent.prompt.set_text("");
+    _agent.question_view = Some(state);
+    _agent.prompt.set_text("");
 }
 
 /// Open the free-usage paywall on the given agent: a Q&A modal in the
@@ -264,7 +272,7 @@ pub(super) fn open_free_usage_upsell(agent: &mut AgentView, auth_method: Option<
     open_supergrok_upsell(agent, UpsellReason::FreeUsageLimit, auth_method);
 }
 
-/// Open the SuperGrok upsell for a tier-restricted slash command
+/// Open the SuperQIDI upsell for a tier-restricted slash command
 /// (`/usage`, `/imagine`, …). Returns whether the modal opened (`false`
 /// when another question modal is already up) so the caller can decide
 /// whether to consume the input that triggered it.
@@ -275,7 +283,7 @@ pub(super) fn open_restricted_command_upsell(
     open_supergrok_upsell(agent, UpsellReason::RestrictedCommand, auth_method)
 }
 
-/// Which situation opened the SuperGrok upsell modal. Controls the heading
+/// Which situation opened the SuperQIDI upsell modal. Controls the heading
 /// and the telemetry source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UpsellReason {
@@ -291,11 +299,11 @@ pub(super) enum UpsellReason {
 /// URL in the option `id` (position-independent submit handling).
 #[allow(unreachable_code)]
 fn open_supergrok_upsell(
-    agent: &mut AgentView,
-    reason: UpsellReason,
-    auth_method: Option<String>,
+    _agent: &mut AgentView,
+    _reason: UpsellReason,
+    _auth_method: Option<String>,
 ) -> bool {
-    // QIDI local patch: SuperGrok upsell popup disabled - return not-opened
+    // QIDI local patch: SuperQIDI upsell popup disabled - return not-opened
     // so callers keep the user's input instead of consuming it.
     return false;
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
@@ -305,18 +313,18 @@ fn open_supergrok_upsell(
 
     // Never displace an already-open question modal. Callers that consume
     // input on open must check this `false` and keep the input instead.
-    if agent.question_view.is_some() {
+    if _agent.question_view.is_some() {
         return false;
     }
 
-    let (heading, source, modal_id_prefix) = match reason {
+    let (heading, source, modal_id_prefix) = match _reason {
         UpsellReason::FreeUsageLimit => (
             "You hit your free usage limit.",
             SuperGrokUpsell::FreeUsagePaywall,
             "free-usage-upsell",
         ),
         UpsellReason::RestrictedCommand => (
-            "Unlock all features with SuperGrok.",
+            "Unlock all features with SuperQIDI.",
             SuperGrokUpsell::RestrictedCommand,
             "restricted-command-upsell",
         ),
@@ -324,18 +332,18 @@ fn open_supergrok_upsell(
 
     log_event(cf_telemetry::events::SuperGrokUpsellShown {
         source,
-        auth_method,
+        auth_method: _auth_method,
     });
 
     let options = vec![
         QuestionOption {
-            label: "Upgrade to SuperGrok".into(),
+            label: "Upgrade to SuperQIDI".into(),
             description: "For everyday coding and productivity tasks".into(),
             preview: None,
             id: Some(UPSELL_URL_UPGRADE.into()),
         },
         QuestionOption {
-            label: "Upgrade to SuperGrok Heavy".into(),
+            label: "Upgrade to SuperQIDI Heavy".into(),
             description: "Get the most out of QIDI Code. Highest usage limits.".into(),
             preview: None,
             // No Heavy-specific URL exists; the /supergrok page lists
@@ -350,7 +358,7 @@ fn open_supergrok_upsell(
         id: None,
     };
 
-    let stashed = agent.prompt.stash();
+    let stashed = _agent.prompt.stash();
     let state = QuestionViewState::new(
         format!("{modal_id_prefix}-{}", uuid::Uuid::new_v4()),
         vec![question],
@@ -358,8 +366,8 @@ fn open_supergrok_upsell(
     )
     .with_local_kind(LocalQuestionKind::FreeUsageUpsell { source })
     .with_no_freeform();
-    agent.question_view = Some(state);
-    agent.prompt.set_text("");
+    _agent.question_view = Some(state);
+    _agent.prompt.set_text("");
     true
 }
 
@@ -578,9 +586,15 @@ pub(super) fn dispatch_open_supergrok_url(app: &mut AppView) -> Vec<Effect> {
         .gate
         .as_ref()
         .and_then(|g| g.url.as_deref())
-        .unwrap_or("https://www.qidiai.ltd");
-    // Unified portal URL: no referrer query string is appended.
-    crate::app::link_opener::open_url(url);
+        .unwrap_or("https://qidiai.ltd/superqidi?referrer=cf-tools");
+    // Funnel attribution: tag CLI-originated SuperQIDI upsell clicks
+    // with `referrer=cf-tools`, matching the OAuth consent flow and
+    // x.ai/cli marketing links. Applied even when the URL came from
+    // remote settings's `gate_url`, so we don't depend on the remote flag
+    // being correctly configured. If the URL already specifies a
+    // referrer it's left alone.
+    let url = crate::app::link_opener::ensure_query_param(url, "referrer", "cf-tools");
+    crate::app::link_opener::open_url(&url);
     vec![]
 }
 

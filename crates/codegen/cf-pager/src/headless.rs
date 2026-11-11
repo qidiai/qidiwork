@@ -164,6 +164,11 @@ pub struct HeadlessOptions {
     pub model: Option<String>,
     pub rules: Option<String>,
     pub system_prompt_override: Option<String>,
+    /// `--session-kind`: explicit `summary.session_kind` for a **new** session.
+    /// `user`/`normal`/`none` opts back into history browsing. When absent the
+    /// agent infers `subagent_headless` from the non-interactive startup hint,
+    /// so dispatched one-shot runs stay out of the history picker.
+    pub session_kind: Option<String>,
     pub continue_last_session: bool,
     /// Fork on resume/continue (`--fork-session`).
     pub fork_session: bool,
@@ -192,12 +197,21 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background quiescence after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// `--no-memory`: plumb the CLI memory-disable flag into the shell session.
+    /// Was previously hardcoded `false` at the ctx-construction site, which
+    /// silently ignored the flag (audit BUG-1, 2026-10-08).
+    pub no_memory: bool,
+    /// `--experimental-memory`: same silent-ignore bug, fixed alongside.
+    pub experimental_memory: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
 
 /// Parse a comma-separated list into a vec, or None if empty.
-fn parse_comma_list(s: Option<&str>) -> Option<Vec<String>> {
+/// Shared by the headless `HeadlessOptions` construction and the
+/// TUI's `ConnectFlags` construction so both parse
+/// `--tools`/`--disallowed-tools` identically.
+pub(crate) fn parse_comma_list(s: Option<&str>) -> Option<Vec<String>> {
     s.and_then(|s| {
         let v: Vec<String> = s
             .split(',')
@@ -313,6 +327,47 @@ fn apply_agent_flag(agent: &Option<String>, config: &mut cf_shell::agent::config
             ResolvedAgent::Name(name) => config.agent.name = Some(name),
         }
     }
+}
+
+/// The agent type an explicit `--agent` flag names, if one is given.
+///
+/// A definition file contributes its `name` (that is the identity persisted
+/// in `Summary.agent_name`), so both flag forms are comparable to a resumed
+/// session's binding. Unreadable files yield `None` — the spawn path reports
+/// the real load error; this check must not mask it.
+fn requested_agent_name(agent: &Option<String>) -> Option<String> {
+    match resolve_agent_arg(agent.as_deref()?) {
+        ResolvedAgent::Name(name) => Some(name),
+        ResolvedAgent::FilePath(path) => {
+            cf_shell::agent::config::AgentDefinition::from_file(&path)
+                .ok()
+                .map(|def| def.name)
+        }
+    }
+}
+
+/// Reject `--resume` combined with an `--agent` that names a different type.
+///
+/// A resumed session restores the agent type persisted in its summary. An
+/// explicit `--agent` naming another type makes the two sources disagree;
+/// instead of silently letting one side win, resume fails loudly and says
+/// how to proceed. Matching types (case-insensitively) and sessions without
+/// a persisted agent name (pre-feature summaries) pass through.
+fn resume_agent_conflict(
+    session_id: &str,
+    requested: Option<&str>,
+    persisted: Option<&str>,
+) -> Option<String> {
+    let requested = requested.map(str::trim).filter(|s| !s.is_empty())?;
+    let persisted = persisted.map(str::trim).filter(|s| !s.is_empty())?;
+    if requested.eq_ignore_ascii_case(persisted) {
+        return None;
+    }
+    Some(format!(
+        "--resume {session_id} was persisted with agent type '{persisted}', \
+         but --agent '{requested}' was requested. A resumed session keeps its persisted \
+         agent binding; drop --agent to resume as '{persisted}', or pass a matching agent type."
+    ))
 }
 
 // ── Emitter ──────────────────────────────────────────────────────────────
@@ -507,14 +562,14 @@ fn auto_respond_to_permissions(
 /// "Not signed in" error message, tailored to the session type.
 fn auth_required_message(interactive: bool) -> String {
     if interactive {
-        "尚未登录。请运行 `qidiwork login` 完成登录 \
-         （没有浏览器时可用 `qidiwork login --device-code`）。"
+        "Not signed in. Run `qidi login` to authenticate \
+         (or `qidi login --device-code` if no browser is available)."
             .to_string()
     } else {
-        "尚未登录。如无浏览器，请运行：\n  \
-         qidiwork login --device-code\n\n\
-         或者设置 XAI_API_KEY 环境变量，\
-         或在有浏览器的机器上运行 `qidiwork login`。"
+        "Not signed in. To authenticate without a browser, run:\n  \
+         qidi login --device-code\n\n\
+         Alternatively, set the XAI_API_KEY environment variable \
+         or run `qidi login` on a machine with a browser."
             .to_string()
     }
 }
@@ -607,6 +662,7 @@ async fn open_session(
     cwd: &Path,
     session_id_flag: Option<&str>,
     restore_code: Option<bool>,
+    session_kind: Option<&str>,
 ) -> anyhow::Result<OpenedSession> {
     // Pager opens sessions before the agent resolves per-vendor compat;
     // default (all-on) preserves existing behavior — the agent applies
@@ -639,7 +695,16 @@ async fn open_session(
     }
 
     let new_resp: acp::NewSessionResponse = acp_send(
-        acp::NewSessionRequest::new(cwd.to_path_buf()).mcp_servers(mcp_servers),
+        acp::NewSessionRequest::new(cwd.to_path_buf())
+            .mcp_servers(mcp_servers)
+            .meta(session_kind.map(|kind| {
+                let mut meta = acp::Meta::new();
+                meta.insert(
+                    "sessionKind".to_string(),
+                    serde_json::Value::String(kind.to_string()),
+                );
+                meta
+            })),
         acp_tx,
     )
     .await?;
@@ -653,19 +718,26 @@ async fn open_session_with_id(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_id: &str,
+    session_kind: Option<&str>,
 ) -> anyhow::Result<OpenedSession> {
     let cwd_str = cwd.to_string_lossy();
     crate::app::session_startup::ensure_session_id_available(session_id, &cwd_str)?;
     let mcp_servers =
         cli_config::load_mcp_servers(cwd, &cf_tools::types::compat::CompatConfig::default());
+    let mut meta = serde_json::json!({ "sessionId": session_id })
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(kind) = session_kind {
+        meta.insert(
+            "sessionKind".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
+    }
     let new_resp: acp::NewSessionResponse = acp_send(
         acp::NewSessionRequest::new(cwd.to_path_buf())
             .mcp_servers(mcp_servers)
-            .meta(
-                serde_json::json!({ "sessionId": session_id })
-                    .as_object()
-                    .cloned(),
-            ),
+            .meta(Some(meta)),
         acp_tx,
     )
     .await?;
@@ -709,7 +781,7 @@ async fn fork_then_open(
     }
     let child = fork_response_new_session_id(resp.0.get())
         .ok_or_else(|| anyhow::anyhow!("fork response missing newSessionId"))?;
-    match open_session(acp_tx, &write_cwd, Some(&child), restore_code).await {
+    match open_session(acp_tx, &write_cwd, Some(&child), restore_code, None).await {
         Ok(opened) => Ok(opened),
         Err(e) => Err(anyhow::anyhow!(
             "fork succeeded as {child} but load failed: {e}"
@@ -829,6 +901,113 @@ fn headless_materialize_ctx(has_worktree: bool) -> crate::app::session_startup::
     }
 }
 
+/// Validate `--worktree` combinations in headless single-turn mode.
+///
+/// A new session creates a real worktree through the same ACP extension the
+/// TUI uses (`x.ai/git/worktree/create_from_worktree_sync`). Resume /
+/// continue / fork have their own cwd-discovery paths and are not wired to
+/// worktree creation here yet, so reject those combinations loudly instead
+/// of silently running in the source cwd.
+fn validate_headless_worktree_flag(
+    worktree: Option<&str>,
+    resume_like: bool,
+) -> Result<(), String> {
+    match worktree {
+        None => Ok(()),
+        Some(_) if resume_like => Err(
+            "--worktree combined with --resume/--continue/--fork-session is not supported in \
+             headless single-turn mode; retry with only one of them"
+                .to_string(),
+        ),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Request payload for the worktree-creation extension. Mirrors the TUI's
+/// `Effect::CreateWorktreeSession` payload (same ACP route, same fields).
+fn worktree_create_params(
+    source_cwd: &Path,
+    new_session_id: &str,
+    label: Option<&str>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "sourceWorktreePath": source_cwd.to_string_lossy(),
+        "newSessionId": new_session_id,
+        "copyMode": "dirty",
+    });
+    if let Some(lbl) = label.filter(|s| !s.is_empty()) {
+        params["label"] = serde_json::Value::String(lbl.to_string());
+    }
+    params
+}
+
+/// Map the source cwd into the new worktree, preserving subdirectory depth.
+///
+/// The extension returns the worktree root plus the source git root; a cwd
+/// nested below the repo root must stay nested (`repo/crates/foo` →
+/// `worktree/crates/foo`).
+fn session_cwd_in_worktree(
+    source_cwd: &Path,
+    worktree_root: &Path,
+    source_git_root: Option<&str>,
+) -> PathBuf {
+    let Some(git_root) = source_git_root else {
+        return worktree_root.to_path_buf();
+    };
+    let cwd_str = source_cwd.to_string_lossy();
+    let Some(relative) = cwd_str.strip_prefix(git_root) else {
+        return worktree_root.to_path_buf();
+    };
+    let relative = relative.trim_start_matches(['/', '\\']);
+    if relative.is_empty() {
+        worktree_root.to_path_buf()
+    } else {
+        worktree_root.join(relative)
+    }
+}
+
+/// Create a worktree for a headless new session via the shared ACP route.
+///
+/// Returns `(worktree_root, session_cwd)`.
+async fn create_headless_worktree(
+    acp_tx: &AcpAgentTx,
+    source_cwd: &Path,
+    label: Option<&str>,
+    new_session_id: &str,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let params = worktree_create_params(source_cwd, new_session_id, label);
+    let req = acp::ExtRequest::new(
+        "x.ai/git/worktree/create_from_worktree_sync",
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize worktree params")
+            .into(),
+    );
+    let resp: acp::ExtResponse = acp_send(req, acp_tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("couldn't create worktree: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(resp.0.get())
+        .map_err(|e| anyhow::anyhow!("couldn't create worktree: {e}"))?;
+    if let Some(err) = value.get("error").filter(|v| !v.is_null()) {
+        let msg = err
+            .as_str()
+            .map(String::from)
+            .unwrap_or_else(|| err.to_string());
+        anyhow::bail!("couldn't create worktree: {msg}");
+    }
+    let result = value.get("result").unwrap_or(&value);
+    let worktree_root = result
+        .get("worktreePath")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("couldn't create worktree: response missing worktreePath"))?;
+    let worktree_root = PathBuf::from(worktree_root);
+    let session_cwd = session_cwd_in_worktree(
+        source_cwd,
+        &worktree_root,
+        result.get("sourceGitRoot").and_then(|v| v.as_str()),
+    );
+    Ok((worktree_root, session_cwd))
+}
+
 /// Run a headless single-turn prompt.
 ///
 /// Spawns the agent in-process, runs the full ACP lifecycle (init → auth →
@@ -848,6 +1027,16 @@ pub async fn run_single_turn(
     };
 
     let mut emitter = HeadlessEmitter::new(options.output_format, options.json_schema.is_some());
+
+    // F3: `--worktree` is supported for new sessions; the resume-like
+    // combinations are rejected up front (they never create a worktree).
+    let resume_like = options.resume.is_some()
+        || options.continue_last_session
+        || options.fork_session;
+    if let Err(msg) = validate_headless_worktree_flag(options.worktree.as_deref(), resume_like) {
+        emitter.on_error(&msg);
+        anyhow::bail!("{msg}");
+    }
 
     // Load config and spawn agent
     let t_spawn = Instant::now();
@@ -875,8 +1064,8 @@ pub async fn run_single_turn(
         cli_subagents: None,
         cli_web_search_model: None,
         cli_session_summary_model: None,
-        cli_experimental_memory: false,
-        cli_no_memory: false,
+        cli_experimental_memory: options.experimental_memory,
+        cli_no_memory: options.no_memory,
         disable_web_search: options.disable_web_search,
         todo_gate: false,
         laziness_debug_log: None,
@@ -983,6 +1172,46 @@ pub async fn run_single_turn(
         "headless: authenticate complete"
     );
 
+    // F3 root fix: create the worktree before opening the session, through
+    // the same ACP extension the TUI dispatch path uses
+    // (`x.ai/git/worktree/create_from_worktree_sync`). The returned root is
+    // mapped back to the caller's subdirectory, then used as the session cwd.
+    let mut session_cwd = cwd.clone();
+    if options.worktree.is_some() {
+        let worktree_id = options.session_id.clone().unwrap_or_else(|| {
+            format!(
+                "pager-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            )
+        });
+        match create_headless_worktree(
+            &acp_tx,
+            &cwd,
+            options.worktree.as_deref(),
+            &worktree_id,
+        )
+        .await
+        {
+            Ok((root, wt_cwd)) => {
+                eprintln!(
+                    "Worktree: {} (session cwd: {})",
+                    root.display(),
+                    wt_cwd.display()
+                );
+                tracing::info!(
+                    worktree = %root.display(), session_cwd = %wt_cwd.display(),
+                    "headless: created worktree"
+                );
+                session_cwd = wt_cwd;
+            }
+            Err(e) => {
+                emitter.on_error(&e.to_string());
+                cancel.cancel();
+                return Err(e);
+            }
+        }
+    }
+
     // Same intent + materialize path as interactive (shared SSOT).
     use crate::app::session_startup::{self, MaterializedStartup, SessionStartupFlags};
     let has_resume_id = options.resume.as_deref().filter(|s| !s.is_empty());
@@ -997,7 +1226,7 @@ pub async fn run_single_turn(
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let cwd_str = cwd.to_string_lossy().to_string();
+    let cwd_str = session_cwd.to_string_lossy().to_string();
     let materialized = session_startup::materialize_startup_for_cwd(
         headless_materialize_ctx(options.worktree.is_some()),
         intent,
@@ -1005,13 +1234,45 @@ pub async fn run_single_turn(
     )
     .await?;
 
+    // A resumed session restores the agent type persisted in its summary.
+    // An explicit `--agent` naming a different type is a contradiction, not a
+    // silent rebinding: fail before opening the session and say why.
+    if let MaterializedStartup::Resume { session_id, .. } = &materialized {
+        let persisted = cf_shell::session::persistence::find_summary_by_session_id(session_id)
+            .and_then(|summary| summary.agent_name);
+        if let Some(msg) = resume_agent_conflict(
+            session_id,
+            requested_agent_name(&options.agent).as_deref(),
+            persisted.as_deref(),
+        ) {
+            emitter.on_error(&msg);
+            cancel.cancel();
+            anyhow::bail!("{msg}");
+        }
+    }
+
     // Open session
     let restore_code = options.restore_code.then_some(true);
     let t_session = Instant::now();
     let opened = match materialized {
-        MaterializedStartup::NewAuto => open_session(&acp_tx, &cwd, None, None).await,
+        MaterializedStartup::NewAuto => {
+            open_session(
+                &acp_tx,
+                &session_cwd,
+                None,
+                None,
+                options.session_kind.as_deref(),
+            )
+            .await
+        }
         MaterializedStartup::NewWithId { session_id } => {
-            open_session_with_id(&acp_tx, &cwd, &session_id).await
+            open_session_with_id(
+                &acp_tx,
+                &session_cwd,
+                &session_id,
+                options.session_kind.as_deref(),
+            )
+            .await
         }
         MaterializedStartup::Resume {
             session_id,
@@ -1019,7 +1280,14 @@ pub async fn run_single_turn(
             ..
         } => {
             let load_cwd = original_cwd.as_deref().unwrap_or(cwd.as_path());
-            open_session(&acp_tx, load_cwd, Some(session_id.as_str()), restore_code).await
+            open_session(
+                &acp_tx,
+                load_cwd,
+                Some(session_id.as_str()),
+                restore_code,
+                None,
+            )
+            .await
         }
         MaterializedStartup::Fork {
             parent_session_id,
@@ -1753,6 +2021,63 @@ fn handle_ext_notification(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn parse_comma_list_trims_drops_empty_and_none_when_blank() {
+        assert_eq!(
+            super::parse_comma_list(None),
+            None,
+            "None input must yield None (no flags set)"
+        );
+        assert_eq!(
+            super::parse_comma_list(Some("")),
+            None,
+            "empty string must yield None (blank --tools value)"
+        );
+        assert_eq!(
+            super::parse_comma_list(Some(" , ,")),
+            None,
+            "comma-only string (all entries blank) must yield None"
+        );
+        assert_eq!(
+            super::parse_comma_list(Some("read_file, grep ,,list_dir")),
+            Some(vec![
+                "read_file".to_string(),
+                "grep".to_string(),
+                "list_dir".to_string()
+            ]),
+            "entries must be trimmed and empty entries dropped"
+        );
+    }
+
+    /// Design-doc contract C-1 (P0-2 第二步 §Q4): a blank
+    /// `--tools`/`--disallowed-tools` value is **exactly
+    /// equivalent to the flag being unset** — both parse to
+    /// `None`, which is the "no filter branch" sentinel
+    /// (empty allowlist ≠ empty toolset: `None` means
+    /// "inherit all", so defs ship at full count). This is
+    /// the YOLO-false-positive guard: a search_tool-mode
+    /// session must never read a blank allowlist as "unlock
+    /// domain = ∅".
+    #[test]
+    fn c1_blank_tools_list_is_equivalent_to_unset() {
+        // Three spellings of "not set" must agree — None,
+        // empty string, all-blank entries.
+        let unset = super::parse_comma_list(None);
+        let blank = super::parse_comma_list(Some(""));
+        let commas_only = super::parse_comma_list(Some(" , ,"));
+        assert_eq!(unset, None);
+        assert_eq!(blank, unset, "blank --tools ≡ unset --tools (C-1)");
+        assert_eq!(
+            commas_only,
+            unset,
+            "comma-only --tools ≡ unset --tools (C-1)"
+        );
+        // And the same equivalence holds for the denylist
+        // flag — both flags share one parser and one
+        // no-filter sentinel.
+        assert_eq!(super::parse_comma_list(Some("")), None);
+    }
+
+    #[test]
     fn lifecycle_tracking_is_independent_of_wait_flag() {
         let mut pending = std::collections::HashSet::new();
         let mut completed = std::collections::HashSet::new();
@@ -1849,6 +2174,195 @@ mod tests {
             assert!(!ctx.allow_remote_restore);
             assert_eq!(ctx.has_worktree, has_worktree);
         }
+    }
+
+    /// F3 root fix: a plain `--worktree=<x>` on a new session is supported
+    /// and must pass validation.
+    #[test]
+    fn worktree_flag_new_session_is_ok() {
+        assert!(
+            super::validate_headless_worktree_flag(Some("x"), false).is_ok(),
+            "new-session --worktree is supported"
+        );
+    }
+
+    /// F3: resume-like combinations are rejected loudly (they have no
+    /// worktree-creation path yet) instead of silently ignoring the flag.
+    #[test]
+    fn worktree_flag_with_resume_rejected_with_explicit_message() {
+        let err = super::validate_headless_worktree_flag(Some("x"), true)
+            .expect_err("--worktree + --resume must be rejected");
+        assert!(
+            err.contains("--worktree combined with"),
+            "message must name the unsupported combination: got {err:?}"
+        );
+    }
+
+    /// F3: no flag → no error (byte-identical to pre-fix behavior).
+    #[test]
+    fn worktree_flag_absent_is_ok() {
+        assert!(super::validate_headless_worktree_flag(None, false).is_ok());
+        assert!(super::validate_headless_worktree_flag(None, true).is_ok());
+    }
+
+    /// F3: the worktree root is mapped back onto the caller's subdirectory.
+    #[test]
+    fn worktree_session_cwd_preserves_subdirectory() {
+        let root = std::path::Path::new("/wt/feat");
+        assert_eq!(
+            super::session_cwd_in_worktree(
+                std::path::Path::new("/repo"),
+                root,
+                Some("/repo"),
+            ),
+            std::path::PathBuf::from("/wt/feat"),
+            "repo root cwd maps to the worktree root"
+        );
+        assert_eq!(
+            super::session_cwd_in_worktree(
+                std::path::Path::new("/repo/crates/foo"),
+                root,
+                Some("/repo"),
+            ),
+            root.join("crates/foo"),
+            "nested cwd keeps its subdirectory inside the worktree"
+        );
+        assert_eq!(
+            super::session_cwd_in_worktree(std::path::Path::new("/repo"), root, None),
+            std::path::PathBuf::from("/wt/feat"),
+            "missing sourceGitRoot falls back to the worktree root"
+        );
+    }
+
+    /// F3: the creation payload mirrors the TUI effect (same route/fields).
+    #[test]
+    fn worktree_create_params_match_tui_effect_shape() {
+        let params = super::worktree_create_params(
+            std::path::Path::new("/repo"),
+            "pager-abc123",
+            Some("feat"),
+        );
+        assert_eq!(params["sourceWorktreePath"], "/repo");
+        assert_eq!(params["newSessionId"], "pager-abc123");
+        assert_eq!(params["copyMode"], "dirty");
+        assert_eq!(params["label"], "feat");
+        let bare = super::worktree_create_params(
+            std::path::Path::new("/repo"),
+            "pager-abc123",
+            Some(""),
+        );
+        assert!(
+            bare.get("label").is_none(),
+            "empty label must be omitted (auto-generated worktree name)"
+        );
+    }
+
+    /// F3: `run_single_turn` bails before spawning the shell when an
+    /// unsupported worktree combination is requested, so the process exits
+    /// non-zero with the explicit message.
+    #[tokio::test]
+    async fn run_single_turn_rejects_worktree_with_resume_before_spawn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let options = super::HeadlessOptions {
+            session_id: None,
+            resume: Some("some-session".to_string()),
+            cwd: Some(tmp.path().to_path_buf()),
+            yolo: false,
+            trust: false,
+            output_format: super::OutputFormat::Plain,
+            json_schema: None,
+            model: None,
+            rules: None,
+            system_prompt_override: None,
+            session_kind: None,
+            continue_last_session: false,
+            fork_session: false,
+            worktree: Some("wt-label".to_string()),
+            restore_code: false,
+            agent: None,
+            agents_json: None,
+            cli_tools: None,
+            cli_disallowed_tools: None,
+            disable_web_search: false,
+            allow_rules: Vec::new(),
+            deny_rules: Vec::new(),
+            max_turns: None,
+            permission_mode_flag: None,
+            reasoning_effort: None,
+            self_verify: false,
+            best_of_n: None,
+            wait_for_background: true,
+            background_wait_timeout: std::time::Duration::from_secs(1),
+            no_memory: false,
+            experimental_memory: false,
+        };
+        let prompt = super::HeadlessPrompt::from_text("hi").expect("prompt must parse");
+        let err = super::run_single_turn(prompt, false, options)
+            .await
+            .expect_err("--worktree + --resume must fail the run");
+        assert!(
+            err.to_string().contains("--worktree combined with"),
+            "error must carry the explicit message: got {err}"
+        );
+    }
+
+    /// P3: `--resume` + a different `--agent` must fail loudly and name both
+    /// sides of the conflict, instead of silently letting one win.
+    #[test]
+    fn resume_agent_conflict_rejects_mismatched_type_with_message() {
+        let msg = super::resume_agent_conflict("sess-1", Some("explore"), Some("general-purpose"))
+            .expect("mismatched agent types must conflict");
+        assert!(
+            msg.contains("--resume sess-1"),
+            "message must name the resumed session: {msg:?}"
+        );
+        assert!(
+            msg.contains("'general-purpose'"),
+            "message must name the persisted agent type: {msg:?}"
+        );
+        assert!(
+            msg.contains("'explore'"),
+            "message must name the requested agent type: {msg:?}"
+        );
+        assert!(
+            msg.contains("persisted"),
+            "message must explain the persisted binding: {msg:?}"
+        );
+        assert!(
+            msg.contains("drop --agent"),
+            "message must state the way out: {msg:?}"
+        );
+    }
+
+    /// P3: matching types (case-insensitively), no `--agent`, and summaries
+    /// predating the persisted agent name all resume unchanged.
+    #[test]
+    fn resume_agent_conflict_allows_compatible_inputs() {
+        assert!(
+            super::resume_agent_conflict(
+                "sess-1",
+                Some("general-purpose"),
+                Some("general-purpose")
+            )
+            .is_none(),
+            "identical agent types must resume"
+        );
+        assert!(
+            super::resume_agent_conflict("sess-1", Some("Explore"), Some("explore")).is_none(),
+            "agent type comparison must ignore case"
+        );
+        assert!(
+            super::resume_agent_conflict("sess-1", Some("  explore  "), Some("explore")).is_none(),
+            "agent type comparison must ignore surrounding whitespace"
+        );
+        assert!(
+            super::resume_agent_conflict("sess-1", None, Some("explore")).is_none(),
+            "resume without --agent must keep the persisted binding"
+        );
+        assert!(
+            super::resume_agent_conflict("sess-1", Some("explore"), None).is_none(),
+            "old sessions without a persisted agent name must not be rejected"
+        );
     }
 
     #[test]

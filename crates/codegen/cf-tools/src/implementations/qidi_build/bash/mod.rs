@@ -2861,7 +2861,16 @@ mod tests {
         let mut stream = cf_tool_runtime::Tool::execute(
             &tool,
             ctx,
-            make_input("for i in 1 2 3; do echo $i; sleep 0.1; done"),
+            make_input({
+                #[cfg(windows)]
+                {
+                    "foreach ($i in 1..3) { $i; Start-Sleep -Milliseconds 100 }"
+                }
+                #[cfg(not(windows))]
+                {
+                    "for i in 1 2 3; do echo $i; sleep 0.1; done"
+                }
+            }),
         )
         .await;
 
@@ -2906,7 +2915,16 @@ mod tests {
         let mut stream = cf_tool_runtime::Tool::execute(
             &tool,
             test_ctx(resources.into_shared()),
-            make_input("for i in 1 2 3; do echo $i; sleep 0.1; done"),
+            make_input({
+                #[cfg(windows)]
+                {
+                    "foreach ($i in 1..3) { $i; Start-Sleep -Milliseconds 100 }"
+                }
+                #[cfg(not(windows))]
+                {
+                    "for i in 1 2 3; do echo $i; sleep 0.1; done"
+                }
+            }),
         )
         .await;
 
@@ -2957,7 +2975,10 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             make_input(
-                "for i in $(seq 1 60); do printf 'LINE%03d-XXXXXXXXXXXXXXXXXXXX\\n' \"$i\"; sleep 0.03; done",
+                #[cfg(windows)]
+                "foreach ($i in 1..60) { 'LINE{0:D3}-XXXXXXXXXXXXXXXXXXXX' -f $i; Start-Sleep -Milliseconds 30 }",
+                #[cfg(not(windows))]
+                "for i in $(seq 1 60); do printf 'LINE%03d-XXXXXXXXXXXXXXXXXXXX\n' \"$i\"; sleep 0.03; done",
             ),
         )
         .await;
@@ -3063,7 +3084,10 @@ mod tests {
         // Fast-exiting command that emits its full output in one burst —
         // exercises the "drained after the last periodic chunk" path that the
         // bug missed. ASCII so lossy UTF-8 conversion is exact.
-        let cmd = "printf 'tail-bytes-after-final-tick\\n'";
+        #[cfg(windows)]
+        let cmd = "'tail-bytes-after-final-tick'";
+        #[cfg(not(windows))]
+        let cmd = "printf 'tail-bytes-after-final-tick\n'";
         let mut stream = cf_tool_runtime::Tool::execute(
             &tool,
             test_ctx(resources.into_shared()),
@@ -3476,7 +3500,9 @@ mod tests {
         let (args, cmd) =
             BashTool::get_prefixed_command(&Some("env FOO=bar".to_string()), "echo hi");
         let composed = BashTool::compose_prefixed_command(&args, cmd);
-        assert_eq!(composed, "env FOO=bar echo hi");
+        // shlex quote-if-needed includes `=`, so the env assignment is
+        // re-quoted on every platform; both forms are equivalent shell.
+        assert_eq!(composed, "env 'FOO=bar' echo hi");
     }
 
     #[tokio::test]

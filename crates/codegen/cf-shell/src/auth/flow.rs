@@ -215,7 +215,10 @@ async fn run_external_auth_provider(
         "auth: running external auth provider"
     );
 
-    let mut cmd = tokio::process::Command::new("sh");
+    // TODO(security): scrub QIDI_AUTH from this child's env
+    // (`.env_remove("QIDI_AUTH")`) like the hook runner and MCP stdio spawn do;
+    // the external auth script is user-configured arbitrary code.
+    let mut cmd = tokio::process::Command::new(crate::auth::external_auth::resolve_shell());
     cmd.args(["-c", command])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -236,9 +239,6 @@ async fn run_external_auth_provider(
 
     cf_tools::util::detach_command(&mut cmd);
     cmd.envs(cf_tools::util::pager_env());
-    // The external auth script is user-configured arbitrary code; don't let it
-    // inherit inline credentials. Placed last so removal wins over pager_env().
-    cmd.env_remove("QIDI_AUTH");
 
     let mut child = cmd
         .spawn()
@@ -586,7 +586,7 @@ async fn run_auth_flow_inner(
     // browser and won't work on headless devboxes), try minting OIDC
     // credentials via the remote devbox login helper.
     // preferred_method=api_key: never auto-mint OIDC (fail-closed). Explicit
-    // `grok login --devbox` uses run_devbox_login and is not gated here.
+    // `qidi login --devbox` uses run_devbox_login and is not gated here.
     if !grok_com_config.blocks_automatic_oidc()
         && crate::auth::devbox_login::is_devbox_environment()
     {
@@ -664,7 +664,7 @@ async fn run_auth_flow_inner(
         "auth: no OAuth2 configuration available (neither enterprise OIDC nor xAI OAuth2 configured)"
     );
     anyhow::bail!(
-        "没有可用的 OAuth2 配置。请运行 `qidiwork login` 登录；若你使用企业级 SSO，请联系管理员。"
+        "No OAuth2 configuration available. Run `qidi login` to authenticate, or contact your administrator if you use enterprise SSO."
     )
 }
 
@@ -860,7 +860,7 @@ pub async fn ensure_authenticated_or_noninteractive(
     }
 }
 
-/// Unified `grok login` handler for CLI entry points (tui, pager).
+/// Unified `qidi login` handler for CLI entry points (tui, pager).
 ///
 /// Precedence: `--oauth` forces loopback, `--device-auth` forces device,
 /// otherwise `QIDI_LOGIN_DEVICE_FLOW` env / `[auth] login_device_flow` config /
@@ -876,7 +876,7 @@ pub async fn run_cli_login(
 
     // Mirror `run_auth_flow_inner`'s precedence: enterprise OIDC (oidc=Some,
     // oauth2=None) always uses the loopback flow; only the xAI OAuth2 provider
-    // supports the device flow. Without this guard, `grok login` on an
+    // supports the device flow. Without this guard, `qidi login` on an
     // enterprise-OIDC deployment would wrongly enter the device branch (which
     // requires `oauth2`) and error.
     let authenticated = if devbox {
@@ -912,7 +912,7 @@ pub async fn run_cli_login(
         // OIDC has no device endpoint, so `--device-auth` falls back here.
         if device_auth && crate::auth::oidc::is_configured(&config.grok_com_config) {
             eprintln!(
-                "你的 SSO 提供方不支持设备码登录；已改用浏览器登录。"
+                "Device-code login isn't available for your SSO provider; using browser sign-in."
             );
         }
         // Loopback. `reauth=true` clears creds up front (legacy-scope hygiene),
@@ -930,7 +930,7 @@ pub async fn run_cli_login(
 
     // Sync this principal's config now rather than waiting for the background
     // tick. Stay quiet about absence/failure during login — confirm only when
-    // config was actually applied; `grok setup` reports the no-config case.
+    // config was actually applied; `qidi setup` reports the no-config case.
     let outcome = crate::managed_config::post_login_sync(Some(authenticated)).await;
     match outcome {
         crate::managed_config::ManagedConfigSync::Updated { is_team: true } => {
@@ -1008,7 +1008,7 @@ pub fn perform_logout(
     })
 }
 
-/// `grok logout` CLI handler. Calls [`perform_logout`] and formats
+/// `qidi logout` CLI handler. Calls [`perform_logout`] and formats
 /// the result to stderr.
 pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<()> {
     let grok_home = grok_home::grok_home();
@@ -1384,7 +1384,7 @@ mod tests {
 
     #[tokio::test]
     async fn enterprise_oidc_never_uses_device_flow() {
-        // oidc=Some, oauth2=None: `grok login` must use loopback, not device —
+        // oidc=Some, oauth2=None: `qidi login` must use loopback, not device —
         // even when --device-auth forces device (which would otherwise be true).
         // ForceDevice short-circuits the remote settings fetch, so this stays hermetic.
         let cfg = GrokComConfig {
@@ -1891,7 +1891,7 @@ mod tests {
         assert_eq!(extract("some opaque output"), "some opaque output");
     }
 
-    /// CLI `grok login` passes `on_stderr=None`; stderr must be inherited so
+    /// CLI `qidi login` passes `on_stderr=None`; stderr must be inherited so
     /// sign-in URLs appear in real time. Piped stderr with no reader deadlocks
     /// once the child writes past the pipe buffer (~64 KiB).
     #[tokio::test]

@@ -184,8 +184,12 @@ fn parse_details_path(prompt: &str) -> Option<String> {
 /// Pull the absolute `.../strategy.md` path out of the strategist prompt
 /// (walk left from `/strategy.md` to the path start).
 fn parse_strategy_path(prompt: &str) -> Option<String> {
-    let end_idx = prompt.find("/strategy.md")?;
-    let end = end_idx + "/strategy.md".len();
+    // marker_end already points past the marker for both spellings
+    // (Windows Path::join renders backslashes). Slice [start..marker_end].
+    let end = prompt
+        .find("/strategy.md")
+        .or_else(|| prompt.rfind("\\strategy.md").map(|i| i + "\\strategy.md".len()))?;
+    let end_idx = end;
     let start = prompt[..end_idx]
         .rfind(|c: char| !c.is_ascii_graphic() || c == '`')
         .map(|i| i + 1)
@@ -545,11 +549,25 @@ async fn strategist_cancel_mid_run_revokes_cap_bonus() {
                     .drain_goal_updates(0, DrainPurpose::TurnEnd)
                     .await;
             });
-            for _ in 0..10_000 {
-                if counters.strategist_spawns.load(SeqOrd::SeqCst) == 1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
+            // Wait for the strategist spawn on a wall-clock deadline with
+            // real parks, never a fixed yield-now pass count. A busy
+            // `yield_now` spin never parks the current-thread runtime, so
+            // the driver (timer / IOCP wakeups feeding this multi-await
+            // drain chain) can go unpolled, and a pass budget is inherently
+            // scheduling-dependent — on loaded CI runners (2 vCPU,
+            // RUST_TEST_THREADS=2, a concurrent test on the other worker)
+            // the chain sometimes failed to reach the spawn within 10_000
+            // hot passes (CI run 91, 2026-10-15). `sleep` parks → the
+            // driver is polled every tick; the deadline tolerates slow
+            // runners with seconds instead of passes.
+            let spawn_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while counters.strategist_spawns.load(SeqOrd::SeqCst) == 0 {
+                assert!(
+                    tokio::time::Instant::now() < spawn_deadline,
+                    "strategist spawn not observed within 10s",
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
             assert_eq!(counters.strategist_spawns.load(SeqOrd::SeqCst), 1);
             assert_eq!(

@@ -160,7 +160,6 @@ fn test_app() -> AppView {
         subscription_tier: None,
         paywall_check_started: None,
         last_subscription_check_at: None,
-        office_watch: None,
         subscription_watch_interval_secs: None,
         pending_gate_verification: None,
         gate_verify_gen: 0,
@@ -728,6 +727,7 @@ fn make_picker_entry(id: &str, cwd: &str) -> crate::app::app_view::SessionPicker
         branch: None,
         repo_name: "repo".into(),
         worktree_label: None,
+        is_subagent: false,
         card_detail: None,
     }
 }

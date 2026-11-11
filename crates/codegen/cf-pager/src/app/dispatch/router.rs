@@ -10,9 +10,11 @@ use super::ctx::{
 };
 use super::dashboard::{
     dispatch_dashboard_attach, dispatch_dashboard_begin_rename, dispatch_dashboard_change_location,
-    dispatch_dashboard_commit_rename, dispatch_dashboard_confirm_worktree,
+    dispatch_dashboard_close_agent_picker, dispatch_dashboard_commit_rename,
+    dispatch_dashboard_confirm_agent_type, dispatch_dashboard_confirm_worktree,
     dispatch_dashboard_create_new_agent_with_detail, dispatch_dashboard_dispatch,
-    dispatch_dashboard_dispatch_slash, dispatch_dashboard_open_location_picker,
+    dispatch_dashboard_dispatch_slash, dispatch_dashboard_open_agent_picker,
+    dispatch_dashboard_open_location_picker,
     dispatch_dashboard_open_shortcuts_help, dispatch_dashboard_overlay_cycle,
     dispatch_dashboard_overlay_exit, dispatch_dashboard_overlay_stop,
     dispatch_dashboard_peek_cycle_mode, dispatch_dashboard_peek_reply,
@@ -178,7 +180,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             load_session_id,
             label,
             git_ref,
-        } => dispatch_new_worktree_session(app, load_session_id, label, None, None, git_ref, None),
+        } => dispatch_new_worktree_session(
+            app, load_session_id, label, None, None, None, git_ref, None,
+        ),
         Action::OpenNewWorktreeDialog => {
             app.new_worktree_dialog = Some(crate::app::app_view::NewWorktreeDialogState::new());
             vec![]
@@ -815,6 +819,58 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
+        Action::SwitchModelAndPersistEffort { model_id, effort } => {
+            // `/effort <level> --save`: persist the canonical effort as the
+            // future-session default AND switch the live session, exactly like
+            // `Action::SwitchModel`.
+            //
+            // The two effects below are dispatched CONCURRENTLY: the event
+            // loop spawns each effect in the returned vec as its own task with
+            // no gating between them (`app/effects/mod.rs` — `PersistSetting`
+            // and `SwitchModel` are independent `tasks.spawn(...)`). A failed
+            // persist therefore does NOT block or roll back the switch; it only
+            // surfaces as a `SettingPersistFailed` toast
+            // (`dispatch/task_result.rs`). `rollback_value` is consequently a
+            // no-op placeholder: the rollback arm for `default_reasoning_effort`
+            // is deliberately empty (`dispatch/settings/ui.rs` — the key is
+            // SHELL-owned with no pager-side in-memory mirror, so there is
+            // nothing to roll back here). We still snapshot the pre-switch
+            // effort so a future rollback arm has a meaningful value to restore
+            // instead of the new value echoing itself.
+            //
+            // Source: `app.models` is the app-level default model state that
+            // new sessions clone (and the welcome card renders), matching the
+            // `default_reasoning_effort` key; fall back to the new value if no
+            // prior effort is recorded.
+            let prev_effort = app.models.reasoning_effort;
+            let rollback_value = crate::settings::SettingValue::Enum(
+                prev_effort.map_or(effort.as_str(), |e| e.as_str()),
+            );
+            let mut effects = vec![Effect::PersistSetting {
+                key: "default_reasoning_effort",
+                value: crate::settings::SettingValue::Enum(effort.as_str()),
+                rollback_value,
+            }];
+            let ActiveView::Agent(id) = app.active_view else {
+                return effects;
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return effects;
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.session.deferred_model_switch = Some((model_id, Some(effort)));
+                return effects;
+            };
+            agent.session.model_switch_pending = true;
+            effects.push(Effect::SwitchModel {
+                agent_id: id,
+                session_id,
+                model_id,
+                effort: Some(effort),
+                prev_model_id: None,
+            });
+            effects
+        }
         Action::AnnouncementsHide => {
             let shown_key = crate::views::announcements::first_session_announcement(
                 &app.active_announcements,
@@ -1076,7 +1132,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             persist_mode,
         } => {
             let mut effects = if worktree {
-                dispatch_new_worktree_session(app, None, None, None, None, None, None)
+                dispatch_new_worktree_session(
+                    app, None, None, None, None, None, None, None,
+                )
             } else {
                 dispatch_new_session_inner(app, None)
             };
@@ -1212,6 +1270,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_dashboard_create_new_agent_with_detail(app)
         }
         Action::DashboardOpenLocationPicker => dispatch_dashboard_open_location_picker(app),
+        // F8: agent-type picker (`Alt+A`). Open / confirm / close mirror the
+        // location picker's three-action shape; staging itself is shared
+        // with the `/agent <name>` slash affordance.
+        Action::DashboardOpenAgentPicker => dispatch_dashboard_open_agent_picker(app),
+        Action::DashboardConfirmAgentType(name) => {
+            dispatch_dashboard_confirm_agent_type(app, name)
+        }
+        Action::DashboardCloseAgentPicker => dispatch_dashboard_close_agent_picker(app),
         Action::DashboardCloseLocationPicker => {
             if let Some(d) = app.dashboard.as_mut() {
                 if let Some(wt) = d.location_picker.as_ref().map(|lp| lp.worktree_mode) {

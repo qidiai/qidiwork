@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use cf_sqlite_journal::JournalMode;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorktreeKind {
     Session,
@@ -271,21 +271,30 @@ impl WorktreeDb {
 
     /// Look up by ID, label, or path.
     ///
-    /// If `id_or_path` contains `/`, it's treated as a path (canonicalized
-    /// before lookup). Otherwise it's looked up first as a DB ID, then as a
-    /// worktree label (stored in `metadata.label`).
+    /// If `id_or_path` looks like a path (contains a `/` OR a `\`, the
+    /// Windows separator -- a Windows path otherwise never matched here
+    /// and every path lookup silently fell through to the ID/label
+    /// branches), it's treated as a path (canonicalized before lookup).
+    /// Otherwise it's looked up first as a DB ID, then as a worktree label
+    /// (stored in `metadata.label`).
     pub fn get(&self, id_or_path: &str) -> Result<Option<WorktreeRecord>> {
-        if id_or_path.contains('/') {
+        if id_or_path.contains('/') || id_or_path.contains('\\') {
             let canon = PathBuf::from(id_or_path);
             let canon = dunce::canonicalize(&canon).unwrap_or(canon);
-            queries::get_by_path(&self.conn, &canon)
-        } else {
-            let by_id = queries::get_by_id(&self.conn, id_or_path)?;
-            if by_id.is_some() {
-                return Ok(by_id);
+            let by_path = queries::get_by_path(&self.conn, &canon)?;
+            if by_path.is_some() {
+                return Ok(by_path);
             }
-            queries::get_by_label(&self.conn, id_or_path)
+            // A backslash-containing custom LABEL would land here with
+            // an empty path hit; fall through to the label branch so it
+            // still resolves instead of a silent Ok(None).
+            return queries::get_by_label(&self.conn, id_or_path);
         }
+        let by_id = queries::get_by_id(&self.conn, id_or_path)?;
+        if by_id.is_some() {
+            return Ok(by_id);
+        }
+        queries::get_by_label(&self.conn, id_or_path)
     }
 
     /// Look up a worktree by its label (stored in metadata JSON).
@@ -305,6 +314,40 @@ impl WorktreeDb {
     /// Returns the number of records marked.
     pub fn sweep_dead(&self) -> Result<u64> {
         queries::sweep_dead(&self.conn)
+    }
+
+    /// Read a value from the `meta` table. `Ok(None)` when the key is absent.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        match self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+        {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e).context(format!("failed to read meta key {key}")),
+        }
+    }
+
+    /// Insert or replace a `meta` table value.
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, value],
+            )
+            .context(format!("failed to write meta key {key}"))?;
+        Ok(())
+    }
+
+    /// Test-only: run raw SQL (e.g. drop tables to force fail-closed paths).
+    #[cfg(test)]
+    pub(crate) fn execute_batch_for_test(&self, sql: &str) -> Result<()> {
+        self.conn
+            .execute_batch(sql)
+            .context("execute_batch_for_test failed")?;
+        Ok(())
     }
 }
 
@@ -346,7 +389,7 @@ pub fn resolve_grok_home() -> Result<PathBuf> {
     // tree as trust/hooks even when it is symlinked. The dunce canonicalization
     // must stay in sync with cf_config::default_grok_home();
     // home resolution deliberately differs ($HOME here vs std::env::home_dir()).
-    Ok(dunce::canonicalize(&home).unwrap_or(home).join(".grok"))
+    Ok(dunce::canonicalize(&home).unwrap_or(home).join(".qidi"))
 }
 
 /// Serializes tests that mutate the process-global `QIDI_HOME` env var so they

@@ -2,7 +2,7 @@
 //!
 //! When `cli.minimum_version` is set in any config layer, Grok refuses to
 //! start below that floor. With auto-update on, we install
-//! `max(latest, minimum)`; otherwise the user is asked to run `grok update`.
+//! `max(latest, minimum)`; otherwise the user is asked to run `qidi update`.
 //!
 //! Set `QIDI_TEST_VERSION` to manually exercise either path without producing
 //! a real out-of-date build.
@@ -36,8 +36,8 @@ enum EnforcementOutcome {
 pub(crate) enum MinimumVersionError {
     /// `source` chains via `Error::source()`; omitted from `Display`.
     #[error(
-        "你的 QIDI 配置中的最低版本 \"{value}\" \
-         不是有效的版本号。请更新 `cli.minimum_version` 后重试。"
+        "The minimum version \"{value}\" in your Grok configuration \
+         isn't a valid version number. Update `cli.minimum_version` and try again."
     )]
     InvalidMinimum {
         value: String,
@@ -45,22 +45,22 @@ pub(crate) enum MinimumVersionError {
         source: semver::Error,
     },
     #[error(
-        "当前 QIDI 版本（{current}）已不再受支持。\
-         请运行 `qidiwork update` 安装 {minimum} 或更高版本。"
+        "This version of Grok ({current}) is no longer supported. \
+         Run `qidi update` to install version {minimum} or later."
     )]
     AutoUpdateDisabled { current: String, minimum: String },
     /// `npm` / `gh` / `internal` GCS — none detected.
     #[error(
-        "当前 QIDI 版本（{current}）已不再受支持。\
-         请运行 `qidiwork update` 安装 {minimum} 或更高版本。"
+        "This version of Grok ({current}) is no longer supported. \
+         Run `qidi update` to install version {minimum} or later."
     )]
     NoInstaller { current: String, minimum: String },
     /// `detail` is telemetry-only; omitted from `Display` to avoid stacking
     /// the installer's own action language.
     #[error(
-        "当前 QIDI 版本（{current}）已不再受支持，\
-         且更新到 {minimum} 未完成。\n\n\
-         请运行 `qidiwork update` 重试。"
+        "This version of Grok ({current}) is no longer supported, \
+         and the update to version {minimum} didn't complete.\n\n\
+         Run `qidi update` to try again."
     )]
     UpgradeFailed {
         current: String,
@@ -70,9 +70,9 @@ pub(crate) enum MinimumVersionError {
     /// Latest release is known but still below the floor (vs `NoReleaseFound`,
     /// which couldn't probe at all).
     #[error(
-        "当前 QIDI 版本（{current}）已不再受支持。\
-         需要 {minimum} 或更高版本，但最新发布是 {latest}。\
-         请联系你的管理员。"
+        "This version of Grok ({current}) is no longer supported. \
+         Version {minimum} or later is required, but the most recent release is {latest}. \
+         Contact your administrator."
     )]
     NoSatisfyingVersion {
         current: String,
@@ -81,15 +81,15 @@ pub(crate) enum MinimumVersionError {
     },
     /// Couldn't probe the registry — likely transient.
     #[error(
-        "当前 QIDI 版本（{current}）已不再受支持。\
-         需要 {minimum} 或更高版本，但未找到任何发布。\
-         请检查网络连接，或联系你的管理员。"
+        "This version of Grok ({current}) is no longer supported. \
+         Version {minimum} or later is required, but no release was found. \
+         Check your network connection, or contact your administrator."
     )]
     NoReleaseFound { current: String, minimum: String },
-    /// `qidiwork update --version X` requested a version below the floor.
+    /// `qidi update --version X` requested a version below the floor.
     #[error(
-        "无法安装 QIDI {target}：配置的最低版本为 {minimum}。\
-         请运行 `qidiwork update` 安装允许的最新版本。"
+        "Cannot install Grok {target}: the configured minimum is {minimum}. \
+         Run `qidi update` to install the latest allowed version."
     )]
     TargetBelowFloor { target: String, minimum: String },
 }
@@ -133,7 +133,7 @@ fn evaluate_minimum_version(
 }
 
 /// Refuse an explicit install target below the configured floor.
-/// Used by `grok update --version X`.
+/// Used by `qidi update --version X`.
 pub(crate) fn check_install_target(target: &str) -> Result<(), MinimumVersionError> {
     let floor = resolve_floor_or_error()?;
     check_install_target_inner(target, floor.as_deref())
@@ -154,7 +154,7 @@ fn check_install_target_inner(
 }
 
 /// `max(target, configured_floor)`; passthrough when no floor is set.
-/// Used by `grok update` to keep the install target at or above the pin.
+/// Used by `qidi update` to keep the install target at or above the pin.
 pub(crate) fn apply_floor(target: &str) -> Result<String, MinimumVersionError> {
     let floor = resolve_floor_or_error()?;
     apply_floor_inner(target, floor.as_deref())
@@ -219,8 +219,8 @@ async fn enforce_minimum_version(
 
     info!(%current, %target, installer, "minimum_version: installing upgrade");
     eprintln!(
-        "当前 QIDI 版本（{current}）已不再受支持。\
-         正在更新到 {target}…"
+        "This version of Grok ({current}) is no longer supported. \
+         Updating to {target}…"
     );
 
     if let Err(e) = run_install_script(installer, Some(&target), update_config).await {
@@ -281,7 +281,7 @@ pub async fn enforce_minimum_version_or_exit(update_config: &UpdateConfig) {
             // child process ever writes to a broken pipe. For now this
             // path is rare (only fires when the server pushes a minimum
             // version bump), so print a relaunch message instead.
-            eprintln!("更新已安装。请运行 `qidiwork` 启动。");
+            eprintln!("Update installed. Run `qidi` to start.");
             std::process::exit(0);
         }
         Err(e) => {

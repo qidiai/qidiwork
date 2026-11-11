@@ -143,8 +143,26 @@ env -0
     // Capture baseline environment (before running .envrc)
     let baseline: HashMap<String, String> = std::env::vars().collect();
 
-    // Run the script and capture output
-    let mut bash_cmd = Command::new("/bin/bash");
+    // Run the script and capture output. Resolve bash per-platform:
+    // a hardcoded /bin/bash silently disabled the whole .envrc
+    // fallback on Windows, where Git for Windows ships bash at a
+    // known location (and `bash` on PATH is usually the WSL stub).
+    let bash_binary: &str = {
+        #[cfg(windows)]
+        {
+            const GIT_BASH: &str = r"C:\Program Files\Git\bin\bash.exe";
+            if std::path::Path::new(GIT_BASH).is_file() {
+                GIT_BASH
+            } else {
+                "bash"
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            "/bin/bash"
+        }
+    };
+    let mut bash_cmd = Command::new(bash_binary);
     bash_cmd
         .arg("-c")
         .arg(&script)
@@ -244,8 +262,14 @@ mod tests {
         fs::write(dir.path().join(".envrc"), "export MY_DIR=$PWD/subdir\n").unwrap();
 
         let env = load_envrc(dir.path()).unwrap();
-        let expected = format!("{}/subdir", dir.path().display());
-        assert_eq!(env.get("MY_DIR"), Some(&expected));
+        // Separator-agnostic: bash on Windows emits native separators
+        // for $PWD.
+        let expected_suffix = std::path::Path::new("subdir");
+        let got = env.get("MY_DIR").expect("MY_DIR should be exported");
+        assert!(
+            std::path::Path::new(got).ends_with(expected_suffix),
+            "MY_DIR should end in subdir, got: {got}"
+        );
     }
 
     #[test]
@@ -261,7 +285,14 @@ mod tests {
 
         let env = load_envrc(dir.path()).unwrap();
         let path = env.get("PATH").unwrap();
-        assert!(path.contains(&format!("{}/bin", dir.path().display())));
+        // Separator-agnostic: bash on Windows emits native separators
+        // for $PWD-derived PATH entries.
+        assert!(
+            std::path::Path::new(path)
+                .components()
+                .any(|comp| comp.as_os_str() == "bin"),
+            "PATH should contain the bin dir, got: {path}"
+        );
     }
 
     #[test]

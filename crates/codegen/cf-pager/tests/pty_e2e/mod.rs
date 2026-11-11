@@ -1,12 +1,11 @@
-//! End-to-end tests for the built `qidi-code` binary, driven through a PTY.
+//! End-to-end tests for the built `qidi` binary, driven through a PTY.
 //!
-//! Mirrors `qidi-code/tests/test_built_binary_e2e.rs`: every test is
-//! `#[ignore]` so `cargo test` doesn't run them by default, and CI opts in
-//! via `-- --ignored`. The pager binary path is resolved from:
+//! Every test is `#[ignore]` so `cargo test` doesn't run them by default, and
+//! CI opts in via `-- --ignored`. The pager binary path is resolved from:
 //!
 //! 1. `PAGER_BINARY` env var (set by CI after downloading the release artifact)
 //! 2. `QIDI_BINARY` env var (shared convention with the shell crate)
-//! 3. `CARGO_BIN_EXE_qidi-code` (set by `cargo test` for in-tree runs)
+//! 3. `CARGO_BIN_EXE_qidi` (set by `cargo test` for in-tree runs)
 //! 4. A locally-built debug binary — built on first run if missing
 //!
 //! The harness (spawn / screen state / frame timing / mock inference server)
@@ -15,13 +14,13 @@
 //!
 //! Run locally:
 //! ```bash
-//! cargo test -p qidi-code --test pty_e2e -- --ignored --nocapture
+//! cargo test -p cf-pager --test pty_e2e -- --ignored --nocapture
 //! ```
 //!
 //! Run against a pre-built CI artifact:
 //! ```bash
 //! PAGER_BINARY=./artifacts/grok-${VERSION}-linux-x86_64 \
-//!   cargo test -p qidi-code --test pty_e2e -- --ignored --nocapture
+//!   cargo test -p cf-pager --test pty_e2e -- --ignored --nocapture
 //! ```
 
 mod common;
@@ -82,6 +81,7 @@ mod folder_trust_feature_off_shows_no_question;
 mod folder_trust_home_git_repo_subdir_keys_on_subdir;
 mod folder_trust_question_renders_and_accept_persists_grant;
 mod forced_wheel_mode_env_scrolls_exact_rows;
+mod garbage_storm_keeps_input_reader_alive;
 mod image_chip_preview_path_free_pty;
 mod initial_prompt_positional_auto_submits;
 mod input_echoes_at_idle_prompt;
@@ -99,7 +99,6 @@ mod middle_click_pastes_primary_linux;
 // Experimental `--minimal` (scrollback-native) mode e2e tests — grouped in one
 // subtree so the full-pager suite isn't interleaved with them (see minimal/mod.rs).
 mod minimal;
-mod office_artifact_watch;
 mod misclassified_wheel_flood_does_not_teleport_viewport;
 mod mouse_reporting_toggle_inactive_without_config_pty;
 mod mouse_reporting_toggle_sticky_persists_pty;

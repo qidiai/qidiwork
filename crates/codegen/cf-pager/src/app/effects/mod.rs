@@ -120,6 +120,7 @@ pub(crate) fn execute(
             agent_id,
             cwd: session_cwd,
             model_id,
+            agent_name,
             preferred_session_id,
             chat_kind,
         } => {
@@ -139,6 +140,15 @@ pub(crate) fn execute(
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
+            }
+            // F8: staged agent type (dashboard `/agent <name>`). Same
+            // non-empty filter as `modelId` — never written when unset,
+            // so the no-selection path stays byte-identical.
+            if let Some(ref name) = agent_name
+                && !name.is_empty()
+            {
+                meta.get_or_insert_with(acp::Meta::new)
+                    .insert("agentName".into(), serde_json::json!(name));
             }
             if let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
@@ -219,6 +229,7 @@ pub(crate) fn execute(
             label,
             git_ref,
             model_id,
+            agent_name,
             preferred_session_id,
             chat_kind,
         } => {
@@ -235,6 +246,16 @@ pub(crate) fn execute(
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
+            }
+            // F8: staged agent type — fresh-create only (resume path owns
+            // the session's existing agent binding). Same non-empty filter
+            // as `modelId`.
+            if load_session_id.is_none()
+                && let Some(ref name) = agent_name
+                && !name.is_empty()
+            {
+                meta.get_or_insert_with(acp::Meta::new)
+                    .insert("agentName".into(), serde_json::json!(name));
             }
             if load_session_id.is_none() && let Some(ref sid) = preferred_session_id {
                 meta.get_or_insert_with(acp::Meta::new)
@@ -692,7 +713,7 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     let mut params = serde_json::json!(
-                        { "cwd" : cwd.to_string_lossy(), "limit" : 30, }
+                        { "cwd" : cwd.to_string_lossy(), "limit" : 30, "includeSubagents" : true, }
                     );
                     if let Some(q) = &query {
                         params["query"] = serde_json::Value::String(q.clone());
@@ -718,7 +739,12 @@ pub(crate) fn execute(
                                 };
                             }
                             let payload = wrapper.get("result").unwrap_or(&wrapper);
-                            let sessions = parse_session_picker_entries(payload);
+                            let mut sessions = parse_session_picker_entries(payload);
+                            // Subagent children ride a separate array so they
+                            // never consume a user-facing page row; they are
+                            // appended here (marked `is_subagent`) and stay
+                            // hidden until the picker has a query to search.
+                            sessions.extend(parse_subagent_session_entries(payload));
                             let partial = parse_session_list_partial(payload);
                             TaskResult::SessionListLoaded {
                                 sessions,

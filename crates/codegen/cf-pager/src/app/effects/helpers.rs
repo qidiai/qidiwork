@@ -216,10 +216,10 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 /// | false | true      | false    | `cf-tools` (default)         | `false`            |
 /// | false | false     | true     | `cf-tools-ask-user`          | omitted (shell gate) |
 /// | false | true      | true     | `cf-tools-ask-user`          | omitted (shell gate) |
-/// | true  | false     | false    | `cf-tools-plan-no-subagents` | `false`            |
-/// | true  | true      | false    | `cf-tools-plan`              | `false`            |
-/// | true  | false     | true     | `cf-tools-plan-no-subagents` | omitted (shell gate) |
-/// | true  | true      | true     | `cf-tools-plan`              | omitted (shell gate) |
+/// | true  | false     | false    | `qidi-build-plan-no-subagents` | `false`            |
+/// | true  | true      | false    | `qidi-build-plan`              | `false`            |
+/// | true  | false     | true     | `qidi-build-plan-no-subagents` | omitted (shell gate) |
+/// | true  | true      | true     | `qidi-build-plan`              | omitted (shell gate) |
 ///
 /// When [`Self::chat_mode`] is set (gateway light-frontend / `--chat`), Build
 /// `agentProfile` injection is omitted (K12) and `_meta["x.ai/session"].kind`
@@ -263,8 +263,8 @@ impl SessionFlags {
             return None;
         }
         match (self.plan_mode, self.subagents, self.ask_user) {
-            (true, true, _) => Some("cf-tools-plan"),
-            (true, false, _) => Some("cf-tools-plan-no-subagents"),
+            (true, true, _) => Some("qidi-build-plan"),
+            (true, false, _) => Some("qidi-build-plan-no-subagents"),
             (false, _, true) => Some("cf-tools-ask-user"),
             (false, _, false) => None,
         }
@@ -450,15 +450,44 @@ pub(super) fn parse_session_list_partial(
 /// ([`Effect::FetchDashboardSessions`]) so both produce identical labels.
 /// Sessions older than 30 days, and sessions with no usable user prompt
 /// (empty `summary` after fallbacks), are dropped.
+///
+/// Subagent children are *not* in `sessions` — they ride
+/// `_meta["x.ai/subagentSessions"]` (see [`parse_subagent_session_entries`]).
 pub(super) fn parse_session_picker_entries(
     payload: &serde_json::Value,
 ) -> Vec<crate::app::app_view::SessionPickerEntry> {
-    use crate::app::app_view::SessionPickerEntry;
-    let entries: Vec<serde_json::Value> = payload
+    let rows = payload
         .get("sessions")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    parse_session_rows(rows)
+}
+
+/// Parse the `_meta["x.ai/subagentSessions"]` array of a
+/// `x.ai/session/list` response.
+///
+/// These are the subagent child sessions the server keeps out of `sessions`
+/// (they must never consume a user-facing page row). The picker appends them
+/// to its entry list but hides them unless a query is live, so a user's own
+/// history stays clean while subagent sessions remain searchable.
+pub(super) fn parse_subagent_session_entries(
+    payload: &serde_json::Value,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    let rows = payload
+        .get("_meta")
+        .and_then(|m| m.get("x.ai/subagentSessions"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    parse_session_rows(rows)
+}
+
+/// Shared row decoder for both the user and subagent session arrays.
+fn parse_session_rows(
+    entries: Vec<serde_json::Value>,
+) -> Vec<crate::app::app_view::SessionPickerEntry> {
+    use crate::app::app_view::SessionPickerEntry;
     let now = chrono::Utc::now();
     let cutoff = now - chrono::Duration::days(30);
     entries
@@ -566,6 +595,16 @@ pub(super) fn parse_session_picker_entries(
                 .and_then(|s| s.as_str())
                 .map(String::from);
             let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
+            // `MergedSession.session_kind` is already on the wire (camelCase,
+            // omitted when absent), so a subagent child is recognizable without
+            // a new field on the list contract. Explicit-hidden sessions never
+            // reach a client at all (the server drops them), so kind is the
+            // only marker the picker needs.
+            let is_subagent = v
+                .get("sessionKind")
+                .or_else(|| v.get("session_kind"))
+                .and_then(|s| s.as_str())
+                .is_some_and(|k| k.starts_with("subagent"));
             Some(SessionPickerEntry {
                 id,
                 summary: display,
@@ -580,6 +619,7 @@ pub(super) fn parse_session_picker_entries(
                 branch,
                 repo_name,
                 worktree_label,
+                is_subagent,
                 card_detail: None,
             })
         })
@@ -860,6 +900,20 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("default_model", "String", &value));
             };
             cf_shell::util::config::set_default_model(s)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "default_reasoning_effort" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("default_reasoning_effort", "Enum", &value));
+            };
+            // The canonical string (e.g. "high") round-trips through the
+            // same `FromStr` the CLI/`/effort` gate uses; an unparseable
+            // value is a caller bug, surfaced (not silently dropped).
+            let effort = s
+                .parse::<cf_shell::sampling::types::ReasoningEffort>()
+                .map_err(|e| format!("persist_setting(default_reasoning_effort): {e}"))?;
+            cf_shell::util::config::set_default_reasoning_effort(effort)
                 .await
                 .map_err(|e| e.to_string())
         }

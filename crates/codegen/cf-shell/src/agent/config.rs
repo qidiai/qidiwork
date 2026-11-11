@@ -37,17 +37,23 @@ pub enum AgentMode {
     Generic,
 }
 /// Default agent type when the server or user config doesn't specify one.
-pub const DEFAULT_AGENT_TYPE: &str = "cf-tools-plan";
+pub const DEFAULT_AGENT_TYPE: &str = "qidi-build-plan";
 /// Serde default for `ModelInfo.agent_type` and `ModelEntryConfig.agent_type`.
 pub fn default_agent_type() -> String {
     DEFAULT_AGENT_TYPE.to_owned()
 }
 /// Default base URL for the cli chat proxy.
+/// Rebrand completion (2026-10-16): default now points at the qidiai platform; env/config overrides still win.
 pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://api.qidiai.ltd/v1";
-/// Default base URL for the public API.
+/// Default base URL for the public xAI API.
+/// Rebrand completion (2026-10-16): ApiKey-mode inference base + `/models` source now point at the qidiai platform; env/config overrides still win.
 pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.qidiai.ltd/v1";
 /// Default base URL for the asset server (profile images, etc.).
-pub const ASSET_SERVER_URL_DEFAULT: &str = "https://qidiwork.qidiai.ltd/assets";
+///
+/// Rebrand completion (2026-10-19): qidiai sibling host of the platform API.
+/// `QIDI_ASSET_SERVER_URL` still overrides it; the exact asset host is pending
+/// operator confirmation (no pre-existing qidi asset endpoint in the tree).
+pub const ASSET_SERVER_URL_DEFAULT: &str = "https://assets.qidiai.ltd";
 /// One or more environment variable names that may hold a model API key.
 ///
 /// Serde `untagged`: accepts a string or an array in TOML/JSON.
@@ -338,7 +344,7 @@ impl EndpointsConfig {
     pub fn resolve_trace_upload_url(&self) -> String {
         blank_as_unset(&self.trace_upload_url).unwrap_or_else(|| self.proxy_url())
     }
-    /// Managed deployment-config URL (`grok setup`): explicit `managed_config_url`,
+    /// Managed deployment-config URL (`qidi setup`): explicit `managed_config_url`,
     /// else `proxy_url` + `/deployment/config`. Never `cf_api_base_url`, so the
     /// deployment key reaches the proxy, not the inference host.
     pub fn resolve_managed_config_url(&self) -> String {
@@ -1105,7 +1111,7 @@ pub struct RemoteConfig {
 /// `[hub]` section from config.toml.
 ///
 /// Optional default Computer Hub URL for **workspace provider** exposure
-/// (`grok workspace` / leader `with_default_hub_url`). Does **not** enable
+/// (`qidi workspace` / leader `with_default_hub_url`). Does **not** enable
 /// agent-side harness/client connections or alter local session behavior.
 ///
 /// ```toml
@@ -1116,7 +1122,7 @@ pub struct RemoteConfig {
 #[serde(default)]
 pub struct HubConfig {
     /// Hub WebSocket URL (`ws://` or `wss://`) used as the leader default for
-    /// `grok workspace start` when the CLI does not pass `--hub-url`.
+    /// `qidi workspace start` when the CLI does not pass `--hub-url`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -2644,7 +2650,7 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// Resolve whether to use grok's default OAuth2 (production issuer).
+    /// Resolve whether to use grok's default OAuth2 (xAI auth.x.ai).
     ///
     /// Enterprise OIDC (`oidc` in config.toml) always wins — this only gates
     /// the default xAI OAuth2 fallback when no enterprise OIDC is configured.
@@ -2717,6 +2723,22 @@ impl Config {
             None,
             None,
         )
+    }
+    /// Resolve the dynamic tool pipeline switch (P0-2 第二步,
+    /// design doc §6 Phase A). **Default `false`** — off
+    /// unless `[features] dynamic_tools = true` in
+    /// config.toml. This is the single-shot session-startup
+    /// read: the caller captures the result once when the
+    /// session is spawned and never re-reads it (design doc
+    /// A-4 — a mid-session config edit must not alter the
+    /// live session's defs). Phase A semantics for `true`:
+    /// documented no-op + warn at the defs-assembly point;
+    /// the resident/imported segmentation itself ships in
+    /// Phase B. Per-endpoint override resolution is a
+    /// reserved hook (挂点预留) — Phase B灰度 lands on top
+    /// of this accessor without changing its signature.
+    pub fn resolve_dynamic_tools(&self) -> bool {
+        self.features.dynamic_tools.unwrap_or(false)
     }
 }
 /// Canonical resolver for `mcp.liveness_watchers`. Stacks the full
@@ -3031,7 +3053,7 @@ pub(crate) fn external_otel_master_switch_from(
 /// Layering follows `resolve_telemetry_mode`: **requirement > env > config >
 /// remote > default**, where the `[telemetry]` `otel_*` keys from the
 /// effective config (which already includes managed-config layers distributed
-/// by `grok setup`) sit under the env vars, requirements pins are applied on
+/// by `qidi setup`) sit under the env vars, requirements pins are applied on
 /// top, and the remote layer is restrictive-only + asynchronous
 /// ([`apply_external_otel_remote_policy`]).
 pub fn resolve_external_otel_config(
@@ -3488,7 +3510,7 @@ pub struct ModelEntryConfig {
     pub id: Option<String>,
     /// The routing slug sent in API requests.
     pub model: String,
-    /// The base URL of the model. e.g. "https://api.qidiai.ltd/v1"
+    /// The base URL of the model. e.g. "https://api.x.ai/v1"
     pub base_url: String,
     /// Human-readable display name of the model.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3665,6 +3687,10 @@ pub struct ConfigModelOverride {
     /// order, each with its own catalog entry (base_url, credentials,
     /// api_backend). Empty (the default) disables failover.
     pub fallback_models: Vec<String>,
+    /// Optional source-group tag (`group = "..."` in `[model.<id>]`).
+    /// Models sharing a group fold into one picker row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -3688,6 +3714,9 @@ impl ConfigModelOverride {
         }
         if self.description.is_some() {
             entry.info.description.clone_from(&self.description);
+        }
+        if self.group.is_some() {
+            entry.info.group.clone_from(&self.group);
         }
         if self.max_completion_tokens.is_some() {
             entry.info.max_completion_tokens = self.max_completion_tokens;
@@ -3899,7 +3928,7 @@ pub struct ModelInfo {
     pub id: Option<String>,
     /// The routing slug sent in API requests.
     pub model: String,
-    /// The base URL of the model (session endpoint). e.g. "https://api.qidiai.ltd/v1"
+    /// The base URL of the model (session endpoint). e.g. "https://cli-chat-proxy.grok.com/v1"
     pub base_url: String,
     /// Human-readable name of the model. Honored by both the picker
     /// (`/model`) and `/session-info` -- when set, that's the label shown
@@ -3959,12 +3988,18 @@ pub struct ModelInfo {
     /// injecting nudges. See [`LazinessDetectorPerModelConfig`].
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Optional source-group tag for the `/model` picker. Set via
+    /// `group = "..."` on a `[model.<id>]` config entry; models sharing a
+    /// group collapse into one expandable row (`<group> N models`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 impl ModelInfo {
     /// Minimal fallback descriptor for an unknown model slug.
     /// Used when a configured model ID isn't found in presets or remote models.
     pub fn fallback(slug: &str) -> Self {
         ModelInfo {
+            group: None,
             user_selectable: true,
             id: None,
             model: slug.to_owned(),
@@ -4000,6 +4035,7 @@ impl ModelInfo {
     /// Extract shared model metadata from a flat config entry.
     pub fn from_config(entry: &ModelEntryConfig) -> Self {
         ModelInfo {
+            group: None,
             user_selectable: true,
             id: entry.id.clone(),
             model: entry.model.clone(),
@@ -4326,6 +4362,22 @@ pub struct Features {
     /// MCP tool search/discovery. `None` = defer to remote settings / env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_search: Option<bool>,
+    /// Dynamic tool pipeline (P0-2 第二步): split the per-turn
+    /// tool definitions into a stable resident segment + an
+    /// on-demand imported segment (design doc
+    /// `docs/token-optimization/P0-2第二步-动态工具管线设计稿.md`
+    /// §6 Phase A). `None`/`false` = **off** (default — the
+    /// LAN-endpoint KV-segment asymmetry risk, design doc
+    /// Q3, keeps the flag dark until endpoint灰度); `true` is
+    /// accepted from day one but is a **documented no-op in
+    /// Phase A** (segmentation ships in Phase B) — the
+    /// defs-assembly point warns and ships the full defs.
+    /// Read **once** at session startup (never re-read
+    /// mid-session; a mid-session flip must not change the
+    /// current session's defs — design doc A-4). Per-endpoint
+    /// override hook is reserved (挂点预留) for Phase B灰度.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_tools: Option<bool>,
     /// Web fetch tool. `None` = defer to remote settings / env / default (false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_fetch: Option<bool>,
@@ -4543,7 +4595,7 @@ pub fn enforce_disable_api_key_auth(
 ) {
     if disable_api_key_auth
         && creds.auth_type == cf_chat_state::AuthType::ApiKey
-        && crate::util::is_first_party_qidi_url(&creds.base_url)
+        && crate::util::is_first_party_xai_url(&creds.base_url)
     {
         creds.auth_type = cf_chat_state::AuthType::SessionToken;
         creds.api_key = session_key.map(str::to_owned);
@@ -4686,6 +4738,7 @@ pub fn resolve_aux_model_sampling_config(
     if let Some(bearer) = cf_bearer {
         let entry = ModelEntry {
             info: ModelInfo {
+                group: None,
                 user_selectable: true,
                 id: None,
                 model: catalog_entry
@@ -5021,6 +5074,7 @@ fn resolve_hidden_default_web_search_sampling_config(
 ) -> SamplerConfig {
     let entry = ModelEntry {
         info: ModelInfo {
+            group: None,
             id: None,
             model: model_id.to_owned(),
             base_url: endpoints.resolve_inference_base_url(),
@@ -5076,6 +5130,18 @@ pub fn resolve_web_search_sampling_config(
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
 ) -> Option<SamplerConfig> {
+    // "native" selects the built-in scraping engine before any model lookup:
+    // the sentinel is reserved and never resolves to a `[model.native]`
+    // table. Marker config: spawn.rs turns it into WebSearchConfig::Native.
+    if model_id == cf_tools::implementations::web_search::NATIVE_MODEL_ID {
+        return Some(SamplerConfig {
+            // Empty-string key satisfies the "resolved config has an API key"
+            // guard in spawn.rs; the native engine never sends it anywhere.
+            api_key: Some(String::new()),
+            model: model_id.to_owned(),
+            ..SamplerConfig::default()
+        });
+    }
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         Some(sampling_config_for_model(
@@ -5141,6 +5207,12 @@ pub fn to_acp_model_info(
                     map.insert(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
+                    );
+                }
+                if let Some(group) = info.group.as_deref() {
+                    map.insert(
+                        "group".to_string(),
+                        serde_json::Value::String(group.to_string()),
                     );
                 }
                 if map.is_empty() { None } else { Some(map) }
@@ -5384,7 +5456,7 @@ reasoning_effort = "low"
     #[test]
     fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
         let mut headers = IndexMap::new();
-        inject_url_derived_headers(&mut headers, None, "https://api.vendor.example/v1");
+        inject_url_derived_headers(&mut headers, None, "https://api.x.ai/v1");
         assert!(headers.get("X-XAI-Token-Auth").is_none());
         assert!(headers.get("x-authenticateresponse").is_none());
     }
@@ -5627,7 +5699,7 @@ reasoning_effort = "low"
             "ws-model".to_string(),
             test_model_entry(
                 "ws-model",
-                "https://api.qidiai.ltd/v1",
+                "https://api.x.ai/v1",
                 Some("first-party-key"),
                 None,
                 None,
@@ -5677,6 +5749,7 @@ reasoning_effort = "low"
     ) -> ModelEntry {
         ModelEntry {
             info: ModelInfo {
+                group: None,
                 user_selectable: true,
                 id: None,
                 model: model.to_string(),
@@ -5804,9 +5877,61 @@ reasoning_effort = "low"
             };
             assert_eq!(
                 api_key_creds.base_url, endpoints.cf_api_base_url,
-                "{model_id}: ExternalApiKey must route to api.qidiai.ltd"
+                "{model_id}: ExternalApiKey must route to api.x.ai"
             );
         }
+    }
+    /// Built-in catalog must carry the Kimi K3 direct-Moonshot (BYOK) entry.
+    ///
+    /// Semantics note (behavior not exercised here): the session-auth platform
+    /// prefetch replaces the embedded defaults wholesale, so this entry is
+    /// visible when there is no prefetch (API-key / offline / fetch failure).
+    /// Day-to-day usage is carried by the user-level config.toml entry
+    /// `[model.kimi-k3-moonshot]`, keyed identically to `id` below.
+    #[test]
+    fn default_models_contains_kimi_k3_moonshot_direct_entry() {
+        let endpoints = EndpointsConfig::default();
+        let entries = default_model_entries(&endpoints);
+        let entry = entries.get("kimi-k3-moonshot").unwrap_or_else(|| {
+            panic!(
+                "built-in catalog must contain 'kimi-k3-moonshot'; keys: {:?}",
+                entries.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            entry.info.model, "kimi-k3",
+            "catalog key 'kimi-k3-moonshot' must route to slug 'kimi-k3'"
+        );
+        assert_eq!(
+            entry.info.base_url, "https://api.moonshot.cn/v1",
+            "Moonshot direct entry must use the official api.moonshot.cn endpoint"
+        );
+        assert_eq!(
+            entry.api_base_url, None,
+            "BYOK third-party entry must not get an xAI api_base_url"
+        );
+        let env_key = entry
+            .env_key
+            .as_ref()
+            .expect("Moonshot direct entry must declare env_key");
+        assert_eq!(
+            env_key.names(),
+            vec!["MOONSHOT_API_KEY"],
+            "env_key must resolve to MOONSHOT_API_KEY"
+        );
+        assert_eq!(
+            entry.api_key, None,
+            "API key must never be embedded in the built-in catalog (env_key only)"
+        );
+        assert!(
+            entry.info.supported_in_api,
+            "Moonshot direct entry must be selectable for API-key (BYOK) users"
+        );
+        assert_eq!(
+            entry.info.api_backend,
+            ApiBackend::ChatCompletions,
+            "Moonshot uses the Chat Completions backend"
+        );
     }
     #[test]
     fn env_keys_deser_string_or_array() {
@@ -6092,15 +6217,15 @@ reasoning_effort = "low"
     #[test]
     fn enforce_disable_api_key_auth_blocks_first_party_only() {
         use cf_chat_state::AuthType;
-        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
+        let mut creds = api_key_creds("https://api.x.ai/v1");
         enforce_disable_api_key_auth(&mut creds, false, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
         assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
-        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
+        let mut creds = api_key_creds("https://api.x.ai/v1");
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
-        let mut creds = api_key_creds("https://api.qidiai.ltd/v1");
+        let mut creds = api_key_creds("https://api.x.ai/v1");
         enforce_disable_api_key_auth(&mut creds, true, None);
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         assert_eq!(creds.api_key, None);
@@ -6110,7 +6235,7 @@ reasoning_effort = "low"
         assert_eq!(creds.api_key.as_deref(), Some("xai-secret"));
         let mut creds = ResolvedCredentials {
             auth_type: AuthType::SessionToken,
-            ..api_key_creds("https://api.qidiai.ltd/v1")
+            ..api_key_creds("https://api.x.ai/v1")
         };
         enforce_disable_api_key_auth(&mut creds, true, Some("session-jwt"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
@@ -6126,7 +6251,7 @@ reasoning_effort = "low"
         use cf_chat_state::AuthType;
         let entry = test_model_entry(
             "m",
-            "https://api.qidiai.ltd/v1",
+            "https://api.x.ai/v1",
             Some("xai-model-key"),
             None,
             None,
@@ -6199,6 +6324,12 @@ reasoning_effort = "low"
     }
     #[test]
     fn has_own_credentials_guards_session_vs_external_key() {
+        use cf_test_support::EnvGuard;
+        // Bundled gpt-4o carries env_key=OPENAI_API_KEY; has_own_credentials
+        // probes env at call time, so a developer shell with it set flips
+        // the first assertion.
+        let _byok = EnvGuard::unset("OPENAI_API_KEY");
+        let _byok2 = EnvGuard::unset("ANTHROPIC_API_KEY");
         let endpoints = EndpointsConfig::default();
         for (model_id, entry) in default_model_entries(&endpoints) {
             assert!(
@@ -6239,7 +6370,7 @@ reasoning_effort = "low"
             byok_from_lookup(&ModelLookup::Loaded(Some(&byok))),
             ModelByok::Byok,
         );
-        let session = test_model_entry("m", "https://api.qidiai.ltd/v1", None, None, None);
+        let session = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(Some(&session))),
             ModelByok::NotByok,
@@ -6502,7 +6633,7 @@ reasoning_effort = "low"
     }
     #[test]
     fn sampling_config_context_window_from_entry_or_default() {
-        let model = test_model_entry("any-model", "https://api.qidiai.ltd/v1", None, None, None);
+        let model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
         let config = sampling_config_for_model(
             &model,
             resolve_credentials(&model, None),
@@ -6512,7 +6643,7 @@ reasoning_effort = "low"
             None,
         );
         assert_eq!(config.context_window, 200_000);
-        let mut model = test_model_entry("any-model", "https://api.qidiai.ltd/v1", None, None, None);
+        let mut model = test_model_entry("any-model", "https://api.x.ai/v1", None, None, None);
         model.info.context_window = NonZeroU64::new(256_000).unwrap();
         let config = sampling_config_for_model(
             &model,
@@ -7097,12 +7228,12 @@ reasoning_effort = "low"
             r#"
             [model.visible-model]
             model = "visible-model"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
 
             [model.hidden-model]
             model = "hidden-model"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             hidden = true
             "#,
@@ -7137,7 +7268,7 @@ reasoning_effort = "low"
             disabled_models = ["to-disable"]
             [model.to-disable]
             model = "to-disable"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             "#,
         )
@@ -7154,7 +7285,7 @@ reasoning_effort = "low"
             hidden_models = ["to-hide"]
             [model.to-hide]
             model = "to-hide"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             "#,
         )
@@ -7174,15 +7305,15 @@ reasoning_effort = "low"
             allowed_models = ["keep-*", "explicit-key", "explicit-model-id"]
             [model.to-drop]
             model = "to-drop"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 256000
             [model.keep-one]
             model = "keep-one"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 256000
             [model.explicit-key]
             model = "explicit-model-id"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 256000
             "#,
         )
@@ -7207,7 +7338,7 @@ reasoning_effort = "low"
             allowed_models = []
             [model.foo]
             model = "foo"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 256000
             "#,
         )
@@ -7245,13 +7376,13 @@ reasoning_effort = "low"
             r#"
             [model.oauth-only-model]
             model = "oauth-only-model"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             supported_in_api = false
 
             [model.public-model]
             model = "public-model"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             "#,
         )
@@ -7277,7 +7408,7 @@ reasoning_effort = "low"
             r#"
             [model.slow-model]
             model = "grok-4.5"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             inference_idle_timeout_secs = 600
             "#,
@@ -7294,7 +7425,7 @@ reasoning_effort = "low"
             r#"
             [model.default-model]
             model = "grok-fast"
-            base_url = "https://api.qidiai.ltd/v1"
+            base_url = "https://api.x.ai/v1"
             context_window = 200000
             "#,
         )
@@ -7566,7 +7697,7 @@ reasoning_effort = "low"
         );
         assert_eq!(
             sampling.base_url, "https://inference.example.com/v1",
-            "should route to the user's custom endpoint, not a bare vendor URL"
+            "should route to the user's custom endpoint, not api.x.ai"
         );
         unsafe { std::env::remove_var("ENTERPRISE_AUTH_TOKEN") };
     }
@@ -7687,7 +7818,7 @@ reasoning_effort = "low"
         assert_eq!(sampling.api_key.as_deref(), Some("session-token-123"));
         assert_eq!(
             sampling.base_url, "https://api.qidiai.ltd/v1",
-            "session auth should route to cli-chat-proxy, not a bare vendor URL"
+            "session auth should route to cli-chat-proxy, not api.x.ai"
         );
     }
     #[test]
@@ -7702,7 +7833,7 @@ reasoning_effort = "low"
         assert_eq!(sampling.api_key.as_deref(), Some("xai-external-key"));
         assert_eq!(
             sampling.base_url, "https://api.qidiai.ltd/v1",
-            "external API key should route to api.qidiai.ltd via api_base_url"
+            "external API key should route to api.x.ai via api_base_url"
         );
         unsafe { std::env::remove_var("XAI_API_KEY") };
     }
@@ -7712,7 +7843,7 @@ reasoning_effort = "low"
         let mut prefetched = IndexMap::new();
         prefetched.insert(
             dm.to_string(),
-            test_model_entry(dm, "https://api.qidiai.ltd/v1", None, None, None),
+            test_model_entry(dm, "https://cli-chat-proxy.grok.com/v1", None, None, None),
         );
         let (_, models) = resolve_models_from_toml(
             &format!(
@@ -7765,7 +7896,7 @@ reasoning_effort = "low"
             "https://proxy.api/v1",
             None,
             None,
-            Some("https://api.qidiai.ltd/v1"),
+            Some("https://api.x.ai/v1"),
         );
         let sampling = resolve_sampling(&model_no_key, Some("session-key"));
         assert_eq!(
@@ -7784,7 +7915,7 @@ reasoning_effort = "low"
             "env key should be used when no session and no model credentials"
         );
         assert_eq!(
-            sampling.base_url, "https://api.qidiai.ltd/v1",
+            sampling.base_url, "https://api.x.ai/v1",
             "env key should route to api_base_url"
         );
         unsafe { std::env::remove_var("XAI_API_KEY") };
@@ -7870,10 +8001,10 @@ reasoning_effort = "low"
             "default-grok".to_string(),
             test_model_entry(
                 crate::models::default_model(),
-                "https://api.qidiai.ltd/v1",
+                "https://cli-chat-proxy.grok.com/v1",
                 None,
                 None,
-                Some("https://api.qidiai.ltd/v1"),
+                Some("https://api.x.ai/v1"),
             ),
         );
         models.insert(
@@ -10873,6 +11004,7 @@ default = "grok-4.5"
     ) -> ModelEntry {
         ModelEntry {
             info: ModelInfo {
+                group: None,
                 user_selectable: true,
                 id: None,
                 model: slug.to_owned(),
@@ -11171,11 +11303,11 @@ default = "grok-4.5"
     fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_fallback() {
         let cfg = Config::default();
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let entry = prefetch_model_entry("cf-tools", default_cw, ApiBackend::default());
+        let entry = prefetch_model_entry("grok-build", default_cw, ApiBackend::default());
         let mut prefetched = IndexMap::new();
-        prefetched.insert("cf-tools".to_owned(), entry);
+        prefetched.insert("grok-build".to_owned(), entry);
         let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get("cf-tools").expect("model must exist");
+        let entry = resolved.get("grok-build").expect("model must exist");
         assert_ne!(
             entry.info.context_window.get(),
             default_cw,
@@ -11186,11 +11318,11 @@ default = "grok-4.5"
     fn resolve_model_list_does_not_override_explicitly_set_context_window() {
         let cfg = Config::default();
         let explicit_cw = 65_536;
-        let entry = prefetch_model_entry("cf-tools", explicit_cw, ApiBackend::default());
+        let entry = prefetch_model_entry("grok-build", explicit_cw, ApiBackend::default());
         let mut prefetched = IndexMap::new();
-        prefetched.insert("cf-tools".to_owned(), entry);
+        prefetched.insert("grok-build".to_owned(), entry);
         let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get("cf-tools").expect("model must exist");
+        let entry = resolved.get("grok-build").expect("model must exist");
         assert_eq!(
             entry.info.context_window.get(),
             explicit_cw,
@@ -11201,13 +11333,13 @@ default = "grok-4.5"
     fn resolve_model_list_inherits_agent_type_and_api_backend() {
         let cfg = Config::default();
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let entry = prefetch_model_entry("cf-tools", default_cw, ApiBackend::default());
+        let entry = prefetch_model_entry("grok-build", default_cw, ApiBackend::default());
         let mut prefetched = IndexMap::new();
-        prefetched.insert("cf-tools".to_owned(), entry);
+        prefetched.insert("grok-build".to_owned(), entry);
         let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get("cf-tools").expect("model must exist");
+        let entry = resolved.get("grok-build").expect("model must exist");
         let defaults = default_model_entries(&EndpointsConfig::default());
-        if let Some(default) = defaults.get("cf-tools") {
+        if let Some(default) = defaults.get("grok-build") {
             if default.info.agent_type != DEFAULT_AGENT_TYPE {
                 assert_eq!(
                     entry.info.agent_type, default.info.agent_type,
@@ -11247,21 +11379,21 @@ default = "grok-4.5"
         let cfg = Config::default();
         let mut defs = default_model_entries(&EndpointsConfig::default());
         let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove("cf-tools") {
-            p.insert("cf-tools".to_string(), e);
+        if let Some(e) = defs.shift_remove("grok-build") {
+            p.insert("grok-build".to_string(), e);
         }
         let resolved = resolve_model_list(&cfg, Some(p));
-        assert!(resolved.contains_key("cf-tools"));
+        assert!(resolved.contains_key("grok-build"));
         let no_p = resolve_model_list(&cfg, None);
-        assert!(no_p.contains_key("cf-tools"));
+        assert!(no_p.contains_key("grok-build"));
     }
     #[test]
     fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
         let cfg = Config::default();
         let mut defs = default_model_entries(&EndpointsConfig::default());
         let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove("cf-tools") {
-            p.insert("cf-tools".to_string(), e);
+        if let Some(e) = defs.shift_remove("grok-build") {
+            p.insert("grok-build".to_string(), e);
         }
         let resolved = resolve_model_list(&cfg, Some(p));
         let sess: Vec<_> = resolved
@@ -11283,7 +11415,7 @@ default = "grok-4.5"
         p.insert("secret-xyz".to_string(), e);
         let resolved = resolve_model_list(&cfg, Some(p));
         assert!(resolved.contains_key("secret-xyz"));
-        assert!(!resolved.contains_key("cf-tools"));
+        assert!(!resolved.contains_key("grok-build"));
     }
     #[test]
     fn resolve_model_list_prefetch_replaces_bundled_entirely() {
@@ -11293,7 +11425,7 @@ default = "grok-4.5"
         p.insert("grok-4.5".to_string(), e);
         let resolved = resolve_model_list(&cfg, Some(p));
         assert!(resolved.contains_key("grok-4.5"));
-        assert!(!resolved.contains_key("cf-tools"));
+        assert!(!resolved.contains_key("grok-build"));
     }
     #[test]
     fn resolve_model_list_empty_prefetch_yields_empty_base() {
@@ -11308,7 +11440,7 @@ default = "grok-4.5"
     fn byok_config_overlay_visible_to_api_key_users() {
         let raw: toml::Value = toml::from_str(
             r#"
-            [model.cf-tools]
+            [model.grok-build]
             model = "grok-4.5"
             base_url = "https://inference.company.com/v1"
             env_key = "COMPANY_TOKEN"
@@ -11317,7 +11449,7 @@ default = "grok-4.5"
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
         let resolved = resolve_model_list(&cfg, None);
-        let entry = resolved.get("cf-tools").expect("cf-tools must exist");
+        let entry = resolved.get("grok-build").expect("grok-build must exist");
         assert!(
             entry.visible_for_auth(false),
             "BYOK config entry must be visible to API-key users — \
@@ -11330,14 +11462,14 @@ default = "grok-4.5"
     fn plain_config_overlay_preserves_bundled_visibility() {
         let raw: toml::Value = toml::from_str(
             r#"
-            [model.cf-tools]
+            [model.grok-build]
             context_window = 300000
             "#,
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
         let resolved = resolve_model_list(&cfg, None);
-        let entry = resolved.get("cf-tools").expect("cf-tools must exist");
+        let entry = resolved.get("grok-build").expect("grok-build must exist");
         assert!(
             !entry.visible_for_auth(false),
             "non-BYOK config overlay must preserve bundled supported_in_api=false"

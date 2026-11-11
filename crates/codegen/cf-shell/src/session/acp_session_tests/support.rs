@@ -68,11 +68,51 @@ pub(crate) async fn test_agent_with_tools(
     )
     .await
 }
+/// Agent with backend-hosted search enabled and the local
+/// `web_search` tool registered, so the backend-search
+/// `web_search` drop (shared by `turn_base_tool_specs`,
+/// `build_session_info` and compaction via
+/// `drop_web_search_for_backend_search`) is observable end to end.
+#[cfg(test)]
+pub(crate) async fn test_agent_backend_search() -> cf_agent::Agent {
+    use cf_tools::implementations::qidi_build::web_search::WebSearchTool;
+    use cf_tools::registry::types::ToolConfig;
+    test_agent_from_config_with_search(
+        cf_tools::registry::types::ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<WebSearchTool>(),
+                ToolConfig::for_tool::<cf_tools::implementations::qidi_build::ReadFileTool>(),
+            ],
+            behavior_preset: None,
+        },
+        cf_agent::AgentDefinition::default_qidi_build(),
+        std::sync::Arc::new(cf_tools::computer::local::LocalTerminalBackend::new()),
+        vec![cf_sampling_types::HostedTool::WebSearch {
+            allowed_domains: None,
+        }],
+        true,
+    )
+    .await
+}
 #[cfg(test)]
 async fn test_agent_from_config(
     config: cf_tools::registry::types::ToolServerConfig,
     definition: cf_agent::AgentDefinition,
     backend: std::sync::Arc<dyn cf_tools::computer::types::TerminalBackend>,
+) -> cf_agent::Agent {
+    test_agent_from_config_with_search(config, definition, backend, Vec::new(), false).await
+}
+
+/// Like [`test_agent_from_config`] but with an explicit hosted-tools
+/// set and backend-search toggle, so tests can exercise the
+/// backend-search `web_search` drop.
+#[cfg(test)]
+async fn test_agent_from_config_with_search(
+    config: cf_tools::registry::types::ToolServerConfig,
+    definition: cf_agent::AgentDefinition,
+    backend: std::sync::Arc<dyn cf_tools::computer::types::TerminalBackend>,
+    hosted_tools: Vec<cf_sampling_types::HostedTool>,
+    backend_search_enabled: bool,
 ) -> cf_agent::Agent {
     use cf_tools::computer::local::LocalFs;
     use cf_tools::computer::types::AsyncFileSystem;
@@ -116,8 +156,8 @@ async fn test_agent_from_config(
         tool_bridge,
         cf_agent::ReminderPolicy::default(),
         cf_agent::CompactionPolicy::default(),
-        vec![],
-        false,
+        hosted_tools,
+        backend_search_enabled,
     )
 }
 #[cfg(test)]
@@ -147,7 +187,7 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    let cwd = cf_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = cf_paths::AbsPathBuf::new(std::env::temp_dir()).unwrap();
     let fs = Arc::new(cf_workspace::file_system::MockFs::new(
         cwd.to_path_buf(),
     ));
@@ -224,6 +264,7 @@ pub(crate) async fn create_test_actor_ex(
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        dynamic_tools: false,
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
@@ -326,6 +367,8 @@ pub(crate) async fn create_test_actor_ex(
         mcp_announced_servers: Mutex::new(HashMap::new()),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregen_last_run_end: std::cell::Cell::new(None),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),

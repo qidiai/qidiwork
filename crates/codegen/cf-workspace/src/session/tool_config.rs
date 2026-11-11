@@ -612,12 +612,17 @@ pub mod test_support {
     }
     /// Minimal valid `ToolServerConfig` for finalize-time tests.
     pub fn baseline_config() -> ToolServerConfig {
+        // Registry keys are `{ToolNamespace}:{tool_id}` (e.g. `QidiBuild:read_file`),
+        // as produced by `ToolRegistryBuilder::register_with_params`. The
+        // `cf_tools::xxx` doc-style ids do not exist in the registry and fail
+        // finalize-time lookup (regression from e9bf8c1, which "normalized"
+        // the former `cf_tools:xxx` keys into the wrong format).
         ToolServerConfig {
             tools: vec![
-                tc("cf_tools::read_file", Some(ToolKind::Read)),
-                tc("cf_tools::search_replace", Some(ToolKind::Edit)),
-                tc("cf_tools::grep", Some(ToolKind::Search)),
-                tc("cf_tools::list_dir", Some(ToolKind::ListDir)),
+                tc("QidiBuild:read_file", Some(ToolKind::Read)),
+                tc("QidiBuild:search_replace", Some(ToolKind::Edit)),
+                tc("QidiBuild:grep", Some(ToolKind::Search)),
+                tc("QidiBuild:list_dir", Some(ToolKind::ListDir)),
             ],
             behavior_preset: None,
         }
@@ -672,12 +677,12 @@ mod tests {
         let factory = factory_for_test();
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc(
-                "cf_tools::read_file",
+                "QidiBuild:read_file",
                 Some(ToolKind::Read),
             )],
             behavior_preset: None,
         };
-        let mut mcp_dup = test_support::tc("cf_tools::read_file", Some(ToolKind::Read));
+        let mut mcp_dup = test_support::tc("QidiBuild:read_file", Some(ToolKind::Read));
         mcp_dup.name_override = Some("mcp_read".into());
         let snapshot = vec![mcp_dup];
         let (_eff, ts, _backend) = resolve_session_toolset(
@@ -709,14 +714,14 @@ mod tests {
     #[test]
     fn backfill_tool_kinds_fills_known_kindless_ids_only() {
         let kinds = HashMap::from([
-            ("cf_tools::search_replace".to_owned(), ToolKind::Edit),
-            ("cf_tools::read_file".to_owned(), ToolKind::Read),
+            ("QidiBuild:search_replace".to_owned(), ToolKind::Edit),
+            ("QidiBuild:read_file".to_owned(), ToolKind::Read),
         ]);
         let config = ToolServerConfig {
             tools: vec![
-                test_support::tc("cf_tools::search_replace", None),
+                test_support::tc("QidiBuild:search_replace", None),
                 test_support::tc("adhoc.opaque", None),
-                test_support::tc("cf_tools::read_file", Some(ToolKind::Search)),
+                test_support::tc("QidiBuild:read_file", Some(ToolKind::Search)),
             ],
             behavior_preset: Some("current".to_owned()),
         };
@@ -729,14 +734,14 @@ mod tests {
                 .expect("tool present")
                 .kind
         };
-        assert_eq!(kind_of("cf_tools::search_replace"), Some(ToolKind::Edit));
+        assert_eq!(kind_of("QidiBuild:search_replace"), Some(ToolKind::Edit));
         assert_eq!(
             kind_of("adhoc.opaque"),
             None,
             "ids unknown to the registry stay kind-less"
         );
         assert_eq!(
-            kind_of("cf_tools::read_file"),
+            kind_of("QidiBuild:read_file"),
             Some(ToolKind::Search),
             "an explicit kind wins over the registry's"
         );
@@ -752,11 +757,11 @@ mod tests {
         let factory = factory_for_test();
         let baseline = ToolServerConfig {
             tools: vec![
-                test_support::tc("cf_tools::read_file", None),
-                test_support::tc("cf_tools::grep", None),
-                test_support::tc("cf_tools::list_dir", None),
-                test_support::tc("cf_tools::search_replace", None),
-                test_support::tc("cf_tools::run_terminal_cmd", None),
+                test_support::tc("QidiBuild:read_file", None),
+                test_support::tc("QidiBuild:grep", None),
+                test_support::tc("QidiBuild:list_dir", None),
+                test_support::tc("QidiBuild:search_replace", None),
+                test_support::tc("QidiBuild:run_terminal_cmd", None),
             ],
             behavior_preset: None,
         };
@@ -798,7 +803,7 @@ mod tests {
     fn resolve_session_toolset_mcp_edit_dropped_under_readonly() {
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc(
-                "cf_tools::read_file",
+                "QidiBuild:read_file",
                 Some(ToolKind::Read),
             )],
             behavior_preset: None,
@@ -818,7 +823,7 @@ mod tests {
         let factory = factory_for_test();
         let baseline = ToolServerConfig {
             tools: vec![
-                test_support::tc("cf_tools::read_file", Some(ToolKind::Read)),
+                test_support::tc("QidiBuild:read_file", Some(ToolKind::Read)),
                 test_support::tc("baseline.opaque", None),
             ],
             behavior_preset: None,
@@ -841,7 +846,7 @@ mod tests {
             "MCP kind: None MUST be dropped under ReadOnly: {kept_ids:?}"
         );
         assert!(
-            kept_ids.contains(&"cf_tools::read_file"),
+            kept_ids.contains(&"QidiBuild:read_file"),
             "baseline Read kind must survive ReadOnly: {kept_ids:?}"
         );
         let _ = factory;
@@ -903,7 +908,7 @@ mod tests {
     fn hub_tool_dropped_under_readonly_because_kind_none() {
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc(
-                "cf_tools::read_file",
+                "QidiBuild:read_file",
                 Some(ToolKind::Read),
             )],
             behavior_preset: None,
@@ -957,7 +962,7 @@ mod tests {
     fn hub_tool_name_collision_with_baseline_skipped() {
         let baseline = ToolServerConfig {
             tools: vec![test_support::tc(
-                "cf_tools::read_file",
+                "QidiBuild:read_file",
                 Some(ToolKind::Read),
             )],
             behavior_preset: None,

@@ -19,7 +19,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
         .run_until(async {
             let tmp = tempfile::TempDir::new().unwrap();
             let session_dir = tmp.path().join("session");
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(cf_workspace::file_system::MockFs::new(
                 cwd.to_path_buf(),
             ));
@@ -146,6 +146,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
                 doom_loop_turn_tally: Default::default(),
+                dynamic_tools: false,
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
@@ -250,6 +251,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 mcp_announced_servers: Mutex::new(HashMap::new()),
                 mcp_reminder_mode: McpReminderMode::Delta,
                 mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregen_last_run_end: std::cell::Cell::new(None),
                 mcp_connecting_reminder_injected: std::cell::Cell::new(false),
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -602,6 +605,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
                 doom_loop_turn_tally: Default::default(),
+                dynamic_tools: false,
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
@@ -709,6 +713,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 mcp_announced_servers: Mutex::new(HashMap::new()),
                 mcp_reminder_mode: McpReminderMode::Delta,
                 mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregen_last_run_end: std::cell::Cell::new(None),
                 mcp_connecting_reminder_injected: std::cell::Cell::new(false),
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -792,7 +798,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<
                 PersistenceMsg,
             >();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(
                 cf_workspace::file_system::MockFs::new(cwd.to_path_buf()),
             );
@@ -874,6 +880,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
                 doom_loop_turn_tally: Default::default(),
+                dynamic_tools: false,
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
@@ -991,6 +998,8 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 mcp_announced_servers: Mutex::new(HashMap::new()),
                 mcp_reminder_mode: McpReminderMode::Delta,
                 mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregen_last_run_end: std::cell::Cell::new(None),
                 mcp_connecting_reminder_injected: std::cell::Cell::new(false),
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1838,7 +1847,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<
                 PersistenceMsg,
             >();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(
                 cf_workspace::file_system::MockFs::new(cwd.to_path_buf()),
             );
@@ -1920,6 +1929,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 compaction_at_tokens: std::cell::Cell::new(None),
                 doom_loop_recovery: None,
                 doom_loop_turn_tally: Default::default(),
+                dynamic_tools: false,
                 file_state_tracker: Arc::new(FileStateTracker::new()),
                 rewind_pending_prompt: std::sync::Mutex::new(None),
                 startup_hints: StartupHints::default(),
@@ -2037,6 +2047,8 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 mcp_announced_servers: Mutex::new(HashMap::new()),
                 mcp_reminder_mode: McpReminderMode::Delta,
                 mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reasoning_pregen_last_run_end: std::cell::Cell::new(None),
                 mcp_connecting_reminder_injected: std::cell::Cell::new(false),
                 mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
                 user_input_generation: std::sync::atomic::AtomicU64::new(0),

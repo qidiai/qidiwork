@@ -185,6 +185,39 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
 }
+/// F8: parse `_meta.agentName` — the per-session agent type staged by the
+/// dashboard's `/agent <name>` dispatch — and check it resolves through the
+/// agent discovery chain (built-ins first, then project `.qidi/agents/`,
+/// then `~/.qidi/agents/`).
+///
+/// Returns `Ok(None)` when the key is absent or empty so the default
+/// resolution chain runs exactly as before (byte-identical to pre-F8).
+/// Unknown names return `invalid_params` — never a silent fallback.
+pub(crate) fn parse_custom_agent_name(
+    meta: Option<&acp::Meta>,
+    cwd: &std::path::Path,
+) -> Result<Option<String>, acp::Error> {
+    let Some(name) = meta
+        .and_then(|m| m.get("agentName"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    if cf_agent::discovery::by_name_in_cwd(name, cwd).is_some() {
+        Ok(Some(name.to_string()))
+    } else {
+        Err(
+            acp::Error::invalid_params().data(
+                format!(
+                    "Unknown agent type '{name}' in _meta.agentName: not found in the \
+                     agent discovery chain (built-ins, .qidi/agents/, ~/.qidi/agents/)"
+                ),
+            ),
+        )
+    }
+}
 pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
     pub cwd: AbsPathBuf,
@@ -210,6 +243,13 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_meta: Option<&'a acp::Meta>,
     pub managed_mcp_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     pub model_agent_type: Option<&'a str>,
+    /// F8: explicit per-session agent type requested via `_meta.agentName`
+    /// (dashboard `/agent <name>` dispatch). Validated by the `session/new`
+    /// handler (unknown names fail `invalid_params`) and resolved through
+    /// the same discovery chain here; the resolved definition binds to THIS
+    /// session only. `None` → the resolution chain runs exactly as before
+    /// (byte-identical).
+    pub custom_agent_name: Option<&'a str>,
     pub session_model_id: acp::ModelId,
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
@@ -251,6 +291,43 @@ fn parse_session_kind(
 /// sessions stay on the local Build path.
 fn is_chat_session_kind(_meta: Option<&acp::Meta>) -> bool {
     false
+}
+
+/// Resolve the `session_kind` stamped onto a **newly created** session.
+///
+/// An explicit `_meta.sessionKind` wins; `user` / `normal` / `none` opts back
+/// into the browsable history list. Without an explicit kind, non-interactive
+/// clients (headless one-shot runs — i.e. dispatched tasks) get
+/// `subagent_headless`, so they stay out of history browsing while
+/// `Summary::is_hidden` keeps them discoverable through search.
+pub(crate) fn resolve_created_session_kind(
+    explicit: Option<&str>,
+    init_meta: Option<&acp::Meta>,
+) -> Option<String> {
+    if let Some(kind) = explicit.map(str::trim).filter(|k| !k.is_empty()) {
+        let lowered = kind.to_ascii_lowercase();
+        if matches!(lowered.as_str(), "user" | "normal" | "none") {
+            return None;
+        }
+        // Only `subagent*` kinds are accepted explicitly: they are the
+        // classification the hiding contract understands. Anything else
+        // (e.g. a typo, or a caller trying to forge `worktree`) falls back to
+        // the inferred default instead of poisoning session metadata.
+        if kind.starts_with("subagent")
+            && crate::session::persistence::valid_session_kind(kind)
+        {
+            return Some(kind.to_string());
+        }
+        tracing::warn!(
+            kind,
+            "ignoring unsupported _meta.sessionKind (expected `subagent*`, `user`, `normal`, or `none`)"
+        );
+    }
+    let non_interactive = init_meta
+        .and_then(|m| m.get("startupHints"))
+        .and_then(|v| serde_json::from_value::<crate::session::StartupHints>(v.clone()).ok())
+        .is_some_and(|h| h.non_interactive);
+    non_interactive.then(|| "subagent_headless".to_string())
 }
 fn chat_initial_model(
     is_chat_kind: bool,
@@ -324,6 +401,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
     cwd: AbsPathBuf,
     session_meta: Option<&'a acp::Meta>,
     model_agent_type: Option<&'a str>,
+    custom_agent_name: Option<&'a str>,
     session_model_id: acp::ModelId,
     session_yolo_mode: bool,
 ) -> SessionSpawnOptions<'a> {
@@ -350,6 +428,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_meta,
         managed_mcp_expires_at: None,
         model_agent_type,
+        custom_agent_name,
         session_model_id,
         session_yolo_mode,
         session_auto_mode: false,
@@ -1482,15 +1561,72 @@ impl MvpAgent {
             return Ok((0, 0, Vec::new()));
         };
         let file_size = std::fs::metadata(&updates_path).map(|m| m.len()).unwrap_or(0);
-        let raw_contents = match std::fs::read_to_string(&updates_path) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return Ok((0, 0, Vec::new())),
+        // Memory-mapped read: updates.jsonl is append-only (defensive-patterns
+        // §3.1) and can grow to hundreds of MB; mapping it avoids copying the
+        // whole log into the heap before line filtering. The map is a frozen
+        // prefix — concurrent appends past `frozen_len` are invisible, which
+        // matches the previous `read_to_string` snapshot semantics.
+        let view = match crate::session::storage::jsonl_mmap::JsonlMmapView::open(&updates_path)
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok((0, 0, Vec::new())),
+            Err(e) => {
+                // Legacy read_to_string also returned empty on IO error; keep
+                // the same lenient semantics but leave a trace for debugging
+                // (permission / sharing violation / mapping failure).
+                tracing::warn!(
+                    error = % e, path = % updates_path.display(),
+                    "replay: failed to map updates.jsonl; replaying nothing"
+                );
+                return Ok((0, 0, Vec::new()));
+            }
         };
-        let end_offset = raw_contents.len() as u64;
+        let raw_contents = match view.as_str() {
+            Some(s) if !s.is_empty() => s,
+            Some(_) => return Ok((0, 0, Vec::new())),
+            None => {
+                // Invalid UTF-8: the previous read_to_string path also failed
+                // here and replayed nothing. Torn-line corruption is handled
+                // per-line by prepare_replay_lines, which never sees it.
+                tracing::warn!(
+                    path = % updates_path.display(),
+                    "replay: updates.jsonl is not valid UTF-8; skipping replay"
+                );
+                return Ok((0, 0, Vec::new()));
+            }
+        };
+        let end_offset = view.frozen_len();
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
+            crate::session::storage::prepare_replay_lines(&raw_contents, cursor, Some(&updates_path))
         };
+        tracing::debug!(
+            used_checkpoint = prepared.used_checkpoint,
+            file_bytes = raw_contents.len(),
+            "replay: filter strategy"
+        );
+        // Off-path checkpoint maintenance: a full scan of a large session
+        // (no checkpoint yet — legacy session — or one too stale to help)
+        // just paid the whole scan cost. Refresh the checkpoint on a
+        // background thread so the NEXT resume hits the fast path.
+        // Best-effort: failure just costs speed, never correctness.
+        if !prepared.used_checkpoint
+            && raw_contents.len() as u64
+                >= crate::session::storage::replay_checkpoint::SEED_MIN_BYTES
+        {
+            let path = updates_path.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) =
+                    crate::session::storage::replay_checkpoint::refresh_checkpoint(&path)
+                {
+                    tracing::debug!(
+                        error = %error,
+                        path = %path.display(),
+                        "replay: background checkpoint refresh failed (non-fatal)"
+                    );
+                }
+            });
+        }
         let unfinished_subagents = std::mem::take(&mut prepared.unfinished_subagents);
         if cursor.is_some() {
             let sending = prepared.lines.len();
@@ -1622,14 +1758,13 @@ impl MvpAgent {
         let Some(updates_path) = updates_file_path else {
             return Vec::new();
         };
-        let contents = match std::fs::read_to_string(updates_path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
+        // Memory-mapped read (append-only file): avoids the whole-log heap
+        // copy on every session resume. Lines are slices into the mapping.
+        let view = match crate::session::storage::jsonl_mmap::JsonlMmapView::open(updates_path) {
+            Ok(Some(v)) => v,
+            _ => return Vec::new(),
         };
-        let all_lines: Vec<&str> = contents
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
+        let all_lines: Vec<&str> = view.lines();
         let live_lines = crate::session::storage::filter_rewind_lines(all_lines);
         let mut pending = std::collections::HashMap::<String, OrphanedTask>::new();
         for line in live_lines {
@@ -1996,7 +2131,9 @@ impl MvpAgent {
                     let message = "A subscription is required.".to_string();
                     Some(crate::auth::GateInfo {
                         message,
-                        url: Some("https://www.qidiai.ltd".to_string()),
+                        url: Some(
+                            "https://qidiai.ltd/superqidi?referrer=cf-tools".to_string(),
+                        ),
                         label: Some("Subscribe".to_string()),
                     })
                 } else {

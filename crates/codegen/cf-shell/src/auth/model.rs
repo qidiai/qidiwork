@@ -10,7 +10,7 @@ const DEFAULT_EARLY_INVALIDATION_SECS: u64 = 300; // 5 minutes
 /// Legacy auth.json scope key. Fallback for old devbox auth files.
 pub(super) const LEGACY_SCOPE: &str = "https://accounts.x.ai/sign-in";
 
-/// auth.json scope key for plain API key auth (desktop login, `grok login --api-key`).
+/// auth.json scope key for plain API key auth (desktop login, `qidi login --api-key`).
 pub const API_KEY_SCOPE: &str = "xai::api_key";
 
 const BLOCKED_REASON_NO_LOGS: &str = "BLOCKED_REASON_NO_LOGS";
@@ -28,7 +28,7 @@ pub enum AuthMode {
     Oidc,
     /// External auth provider binary
     External,
-    /// Plain API key (e.g. from grok-desktop login or `grok login --api-key`)
+    /// Plain API key (e.g. from grok-desktop login or `qidi login --api-key`)
     ApiKey,
 }
 
@@ -124,7 +124,7 @@ impl GrokAuth {
     }
 
     /// `true` when the token comes from a first-party xAI account —
-    /// either an OIDC login against https://api.qidiai.ltd (or the local-dev
+    /// either an OIDC login against https://auth.x.ai (or the local-dev
     /// equivalent), or an external auth provider that declared an xAI
     /// issuer for its token.
     ///
@@ -292,14 +292,21 @@ pub(crate) struct UserInfo {
 /// header prefix (`eyJ0eXAiOiJh…`); the tail (signature bytes) is
 /// unique per token and makes `key_changed` / `is_stale_snapshot`
 /// diagnostics meaningful.
+///
+/// The length constant and the (char-boundary-safe) extraction live
+/// in exactly one place: [`cf_auth::bearer_fragment::bearer_suffix`].
+/// The sampler's send-time 401-attribution capture uses the same
+/// function, so "tail" means the same 12 chars on both sides of the
+/// crate boundary (the old in-file copy diverged in *direction* from
+/// the sampler's head-truncate, which made every >12-char token look
+/// like a stale snapshot).
 pub(crate) fn token_suffix(t: &str) -> &str {
-    let len = t.len();
-    if len > 12 { &t[len - 12..] } else { t }
+    cf_auth::bearer_fragment::bearer_suffix(t)
 }
 
 /// Look up auth from the store by scope key.
 ///
-/// Legacy `WebLogin` tokens (from the pre-OIDC `grok login --legacy`
+/// Legacy `WebLogin` tokens (from the pre-OIDC `qidi login --legacy`
 /// flow) are skipped — they are validated via a per-request DB lookup
 /// server-side which fails at high volume.  Skipping them here forces
 /// affected users to re-authenticate via OIDC on next launch.

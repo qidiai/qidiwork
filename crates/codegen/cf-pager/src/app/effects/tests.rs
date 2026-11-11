@@ -134,6 +134,54 @@ fn picker_still_drops_build_row_with_empty_summary() {
     let entries = parse_session_picker_entries(&payload);
     assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
 }
+/// Classification of subagent child sessions: only a `sessionKind` starting
+/// with `subagent` marks a row, and the lane is read from `_meta` (never from
+/// `sessions`, so a browsing client can't pick the rows up by accident).
+///
+/// This flag is what keeps subagent children out of the default list while a
+/// search can still match them, so a `sessionKind` rename must fail here.
+#[test]
+fn picker_classifies_subagent_children_by_session_kind() {
+    // Must stay inside the picker's 30-day recency cutoff.
+    let now = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!(
+        { "sessions" : [
+            { "sessionId" : "user-1", "summary" : "Mine", "cwd" : "/repo",
+              "source" : "local", "updatedAt" : now },
+            { "sessionId" : "wt-1", "summary" : "Worktree", "cwd" : "/repo",
+              "source" : "local", "updatedAt" : now,
+              "sessionKind" : "worktree" } ],
+          "_meta" : { "x.ai/subagentSessions" : [
+            { "sessionId" : "sub-1", "summary" : "Coder result", "cwd" : "/repo",
+              "source" : "local", "updatedAt" : now,
+              "sessionKind" : "subagent" },
+            { "sessionId" : "sub-2", "summary" : "Coder resumed", "cwd" : "/repo",
+              "source" : "local", "updatedAt" : now,
+              "sessionKind" : "subagent_resume" } ] } }
+    );
+
+    let user_rows = parse_session_picker_entries(&payload);
+    assert_eq!(user_rows.len(), 2, "the subagent lane is not in `sessions`");
+    assert!(
+        user_rows.iter().all(|e| !e.is_subagent),
+        "a plain row and a worktree row are not subagent children: {user_rows:?}"
+    );
+
+    let subagents = parse_subagent_session_entries(&payload);
+    assert_eq!(subagents.len(), 2, "both subagent children are decoded");
+    assert!(
+        subagents.iter().all(|e| e.is_subagent),
+        "subagentKind rows must be marked so the default view hides them"
+    );
+    assert_eq!(subagents[0].source, "local");
+
+    // No lane in the payload (older agent, or nothing to hide) ⇒ no rows and
+    // no panic — the picker behaves exactly as before.
+    assert!(
+        parse_subagent_session_entries(&serde_json::json!({ "sessions" : [] })).is_empty(),
+        "a payload without the subagent lane yields no rows"
+    );
+}
 #[test]
 fn session_list_partial_parses_reasons() {
     let payload = |reason: &str| {
@@ -1331,9 +1379,26 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
                     .expect("params JSON");
                 let fail = params.get("query").and_then(|q| q.as_str())
                     == Some("fail-me");
+                let plain_fetch = params.get("query").is_none();
                 captured_for_task.lock().unwrap().push(params);
                 let body = if fail {
                     serde_json::json!({ "error" : "boom" })
+                } else if plain_fetch {
+                    // The plain (unfiltered) fetch is the one that carries the
+                    // subagent lane: a user row plus a subagent child.
+                    let now = chrono::Utc::now().to_rfc3339();
+                    serde_json::json!({ "result" : {
+                        "sessions" : [
+                            { "sessionId" : "user-1", "summary" : "My own session",
+                              "updatedAt" : now, "createdAt" : now,
+                              "cwd" : "/repo", "source" : "local" },
+                        ],
+                        "_meta" : { "x.ai/subagentSessions" : [
+                            { "sessionId" : "sub-1", "summary" : "Coder result",
+                              "updatedAt" : now, "createdAt" : now,
+                              "cwd" : "/repo", "source" : "local",
+                              "sessionKind" : "subagent" },
+                        ] } } })
                 } else {
                     serde_json::json!({ "result" : { "sessions" : [] } })
                 };
@@ -1373,9 +1438,23 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         seq: 8,
     });
     match tasks.join_next().await.expect("task").expect("no panic") {
-        TaskResult::SessionListLoaded { seq, query, .. } => {
+        TaskResult::SessionListLoaded { sessions, seq, query, .. } => {
             assert_eq!(seq, 8);
             assert_eq!(query, None);
+            // The subagent lane is appended to the user rows and marked, so
+            // the picker can hide it unless a query is live.
+            assert_eq!(sessions.len(), 2, "user row + subagent lane row");
+            let user = sessions.iter().find(|s| s.id == "user-1").expect("user row");
+            assert!(!user.is_subagent, "an ordinary session is not a subagent");
+            let sub = sessions
+                .iter()
+                .find(|s| s.id == "sub-1")
+                .expect("subagent lane row must be decoded");
+            assert!(
+                sub.is_subagent,
+                "sessionKind=subagent must mark the row so the default view hides it"
+            );
+            assert_eq!(sub.source, "local", "subagent rows stay in the local lane");
         }
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
@@ -1404,6 +1483,14 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         "plain fetch must not send a query key: {:?}", captured[1]
     );
     assert_eq!(captured[2] ["query"], "fail-me");
+    // Every list fetch opts into the subagent lane: the picker must hold those
+    // rows before the user types anything, or a search could never reach them.
+    for (i, params) in captured.iter().enumerate() {
+        assert_eq!(
+            params["includeSubagents"], true,
+            "fetch {i} must opt into the subagent lane: {params:?}"
+        );
+    }
 }
 /// The debounce arm must echo `query` and `seq` exactly. Awaits the real
 /// 250 ms debounce (tokio's paused clock needs `test-util`, not enabled
@@ -1446,7 +1533,7 @@ fn agent_profile_names_are_valid_builtins() {
                 ask_user: false,
                 ..Default::default()
             },
-            "cf-tools-plan",
+            "qidi-build-plan",
         ),
         (
             SessionFlags {
@@ -1455,7 +1542,7 @@ fn agent_profile_names_are_valid_builtins() {
                 ask_user: false,
                 ..Default::default()
             },
-            "cf-tools-plan-no-subagents",
+            "qidi-build-plan-no-subagents",
         ),
         (
             SessionFlags {
@@ -1464,7 +1551,7 @@ fn agent_profile_names_are_valid_builtins() {
                 ask_user: true,
                 ..Default::default()
             },
-            "cf-tools-plan",
+            "qidi-build-plan",
         ),
         (
             SessionFlags {
@@ -1473,7 +1560,7 @@ fn agent_profile_names_are_valid_builtins() {
                 ask_user: true,
                 ..Default::default()
             },
-            "cf-tools-plan-no-subagents",
+            "qidi-build-plan-no-subagents",
         ),
         (
             SessionFlags {
@@ -1547,7 +1634,7 @@ fn runtime_default_flags_produce_plan_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "cf-tools-plan");
+    assert_eq!(meta["agentProfile"], "qidi-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1564,7 +1651,7 @@ fn plan_only_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "cf-tools-plan-no-subagents");
+    assert_eq!(meta["agentProfile"], "qidi-build-plan-no-subagents");
     assert_eq!(meta["askUserQuestion"], false);
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1580,7 +1667,7 @@ fn plan_with_subagents_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "cf-tools-plan");
+    assert_eq!(meta["agentProfile"], "qidi-build-plan");
     assert_eq!(meta["askUserQuestion"], false);
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1612,7 +1699,7 @@ fn plan_with_ask_user_uses_plan_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "cf-tools-plan-no-subagents");
+    assert_eq!(meta["agentProfile"], "qidi-build-plan-no-subagents");
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1632,7 +1719,7 @@ fn subagents_alone_emits_only_ask_user_question_disable() {
     assert!(meta.get("agentProfile").is_none());
     assert_eq!(meta["askUserQuestion"], false);
 }
-/// All three flags on at the runtime default produce cf-tools-plan
+/// All three flags on at the runtime default produce qidi-build-plan
 /// and no `askUserQuestion` field.
 #[serial_test::serial(QIDI_AGENT)]
 #[test]
@@ -1645,7 +1732,7 @@ fn all_flags_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "cf-tools-plan");
+    assert_eq!(meta["agentProfile"], "qidi-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
     assert_eq!(meta["yoloMode"], false);
 }
@@ -1843,8 +1930,8 @@ fn agent_profile_definitions_have_correct_names() {
     use std::str::FromStr;
     use cf_agent::config::BuiltinAgentName;
     for name in [
-        "cf-tools-plan",
-        "cf-tools-plan-no-subagents",
+        "qidi-build-plan",
+        "qidi-build-plan-no-subagents",
         "cf-tools-ask-user",
     ] {
         let builtin = BuiltinAgentName::from_str(name).unwrap();
@@ -2005,6 +2092,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         branch: None,
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
+        is_subagent: false,
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);
@@ -2018,4 +2106,124 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
     assert_eq!(roster.origin.kind, "local");
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
+}
+
+/// F8: `Effect::CreateSession` with a staged agent type must inject
+/// `_meta.agentName` into the `NewSessionRequest` it sends.
+#[tokio::test]
+async fn create_session_injects_agent_name_meta() {
+    use cf_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    let tmp = tempfile::tempdir().unwrap();
+    execute(
+        Effect::CreateSession {
+            agent_id: AgentId(1),
+            cwd: tmp.path().to_path_buf(),
+            model_id: None,
+            agent_name: Some("explore".to_string()),
+            preferred_session_id: None,
+            chat_kind: false,
+        },
+        &mut tasks,
+        &tx,
+        tmp.path(),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    // Responder: assert the outgoing request's meta, then answer so the
+    // spawned task completes with SessionCreated.
+    let respond = tokio::spawn(async move {
+        let msg = rx.recv().await.expect("session/new request must be sent");
+        match msg {
+            AcpAgentMessage::NewSession(args) => {
+                let agent_name = args
+                    .request
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("agentName"))
+                    .and_then(|v| v.as_str());
+                assert_eq!(
+                    agent_name,
+                    Some("explore"),
+                    "staged agent type must ride _meta.agentName"
+                );
+                let _ = args
+                    .response_tx
+                    .send(Ok(acp::NewSessionResponse::new(acp::SessionId::new(
+                        "test-session",
+                    ))));
+            }
+            other => panic!("expected NewSession, got {other:?}"),
+        }
+    });
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    respond.await.expect("responder must finish");
+    match result {
+        TaskResult::SessionCreated { agent_id, .. } => assert_eq!(agent_id, AgentId(1)),
+        other => panic!("expected SessionCreated, got {other:?}"),
+    }
+}
+
+/// F8: `Effect::CreateSession` without a staged agent type must NOT write
+/// `_meta.agentName` — the no-selection path stays byte-identical.
+#[tokio::test]
+async fn create_session_without_agent_name_omits_meta_key() {
+    use cf_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    let tmp = tempfile::tempdir().unwrap();
+    execute(
+        Effect::CreateSession {
+            agent_id: AgentId(2),
+            cwd: tmp.path().to_path_buf(),
+            model_id: None,
+            agent_name: None,
+            preferred_session_id: None,
+            chat_kind: false,
+        },
+        &mut tasks,
+        &tx,
+        tmp.path(),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let respond = tokio::spawn(async move {
+        let msg = rx.recv().await.expect("session/new request must be sent");
+        match msg {
+            AcpAgentMessage::NewSession(args) => {
+                let has_key = args
+                    .request
+                    .meta
+                    .as_ref()
+                    .is_some_and(|m| m.get("agentName").is_some());
+                assert!(
+                    !has_key,
+                    "agentName key must be absent when no type is staged"
+                );
+                let _ = args
+                    .response_tx
+                    .send(Ok(acp::NewSessionResponse::new(acp::SessionId::new(
+                        "test-session",
+                    ))));
+            }
+            other => panic!("expected NewSession, got {other:?}"),
+        }
+    });
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    respond.await.expect("responder must finish");
+    match result {
+        TaskResult::SessionCreated { agent_id, .. } => assert_eq!(agent_id, AgentId(2)),
+        other => panic!("expected SessionCreated, got {other:?}"),
+    }
 }

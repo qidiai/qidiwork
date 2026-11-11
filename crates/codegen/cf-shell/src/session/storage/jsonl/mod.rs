@@ -1,4 +1,7 @@
-use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter, updates_truncate_for_prompt};
+use super::{
+    PersistedData, SessionUpdateEnvelope, StorageAdapter, replay_checkpoint,
+    updates_truncate_for_prompt,
+};
 use crate::sampling::types::ChatRequestMessage;
 use crate::sampling::{
     ContentPart, ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
@@ -36,6 +39,21 @@ impl Default for JsonlStorageAdapter {
         Self::new()
     }
 }
+/// Whether `summary` belongs in a listing.
+///
+/// `include_hidden == false` (the browsing path) keeps only sessions where
+/// [`Summary::is_hidden`] is false. `include_hidden == true` (the search path)
+/// additionally keeps subagent children, which are hidden by kind rather than
+/// by an explicit flag — but never a session explicitly marked `hidden: true`,
+/// since that is a deliberate "never show this" marker.
+fn summary_listable(summary: &Summary, include_hidden: bool) -> bool {
+    if include_hidden {
+        !summary.hidden.unwrap_or(false)
+    } else {
+        !summary.is_hidden()
+    }
+}
+
 impl JsonlStorageAdapter {
     pub fn new() -> Self {
         Self {
@@ -56,6 +74,55 @@ impl JsonlStorageAdapter {
         Self {
             dir_mode: SessionDirMode::Explicit(session_dir),
         }
+    }
+    /// Replay-checkpoint maintenance for `updates.jsonl`.
+    ///
+    /// A process-local counter of bytes appended since the last refresh; every
+    /// [`replay_checkpoint::TRIGGER_BYTES`] we re-map the file, catch-up-feed
+    /// the (validated) previous checkpoint and atomically rewrite it. The
+    /// counter is per-path (multiple sessions share one adapter) but
+    /// best-effort: a failed refresh is logged and retried once the counter
+    /// re-fills (see below), and two live agents writing the same session is
+    /// not a supported topology — the last rename wins, and any published
+    /// checkpoint is a valid prefix snapshot.
+    ///
+    /// The refresh runs on a blocking thread: it mmaps + re-reads the file,
+    /// and with no valid checkpoint on disk that is a *full scan* of a
+    /// potentially huge log (tens of seconds on a legacy session) — far too
+    /// long to run inline on a tokio worker inside `append_update`.
+    fn maybe_refresh_replay_checkpoint(&self, updates_path: &Path, appended: u64) {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock};
+        static SINCE_REFRESH: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+        let counters = SINCE_REFRESH.get_or_init(|| Mutex::new(HashMap::new()));
+        let trigger = {
+            let Ok(mut guard) = counters.lock() else {
+                return; // poisoned — skip checkpoint maintenance entirely
+            };
+            let counter = guard.entry(updates_path.to_path_buf()).or_insert(0);
+            *counter += appended;
+            *counter >= replay_checkpoint::TRIGGER_BYTES
+        };
+        if !trigger {
+            return;
+        }
+        // Drain the counter *before* spawning: a persistent failure (e.g.
+        // SMB rename conflicts, disk full) must not re-trigger on every
+        // subsequent append — that would retry an ever-growing full re-scan
+        // per line and flood the log with warns. Draining means the next
+        // attempt waits for another full TRIGGER_BYTES of appends.
+        if let Ok(mut guard) = counters.lock() {
+            guard.insert(updates_path.to_path_buf(), 0);
+        }
+        let path = updates_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = replay_checkpoint::refresh_checkpoint(&path) {
+                tracing::warn!(
+                    error = %error, path = %path.display(),
+                    "replay checkpoint refresh failed (non-fatal; next replay full-scans)"
+                );
+            }
+        });
     }
     /// Load chat history from a specific directory.
     /// Used by fork bootstrap to load the copied parent conversation.
@@ -156,6 +223,42 @@ impl JsonlStorageAdapter {
             }
         }
         session_dirs
+    }
+    /// Read every session `summary.json` under `cwd` (all workspaces when
+    /// `None`), newest activity first.
+    ///
+    /// `include_hidden` keeps sessions that [`Summary::is_hidden`] would drop
+    /// for being subagent children; an explicit `hidden: true` always
+    /// excludes. Backs [`StorageAdapter::list_sessions`] (browsing) and
+    /// [`StorageAdapter::list_sessions_including_hidden`] (searching), so both
+    /// order and read the same file set.
+    async fn list_sessions_scoped(
+        &self,
+        cwd: Option<&str>,
+        include_hidden: bool,
+    ) -> io::Result<Vec<Summary>> {
+        let session_dirs = self.scan_session_dirs(cwd);
+        let mut summaries = Vec::new();
+        for session_dir in session_dirs {
+            let summary_path = session_dir.join("summary.json");
+            match std::fs::read(&summary_path) {
+                Ok(bytes) => {
+                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
+                        && summary_listable(&summary, include_hidden)
+                    {
+                        summaries.push(summary);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        summaries.sort_by_cached_key(|s| {
+            (
+                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
+                s.info.id.0.to_string(),
+            )
+        });
+        Ok(summaries)
     }
     /// List the N most recently modified session summaries across all
     /// workspaces.
@@ -302,17 +405,20 @@ impl JsonlStorageAdapter {
         Ok(items)
     }
     /// Append a session update to the updates.jsonl file, wrapping it in an envelope with timestamp.
+    /// Returns the byte length of the appended line (envelope + `\n`).
     async fn append_update_to_file(
         &self,
         path: PathBuf,
         update: &super::SessionUpdate,
-    ) -> io::Result<()> {
+    ) -> io::Result<u64> {
         let envelope = SessionUpdateEnvelope::from_update(update)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut line = serde_json::to_vec(&envelope)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push(b'\n');
-        self.append_jsonl_line(path, line).await
+        let len = line.len() as u64;
+        self.append_jsonl_line(path, line).await?;
+        Ok(len)
     }
     /// Read session updates from an updates.jsonl file, handling both envelope and legacy formats.
     ///
@@ -325,29 +431,61 @@ impl JsonlStorageAdapter {
     /// (session load, fork copy). The live replay path is already lenient;
     /// this keeps the fork path from bricking on the same corruption.
     fn read_updates_jsonl(&self, path: PathBuf) -> io::Result<Vec<super::SessionUpdate>> {
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let contents = std::fs::read(&path)?;
+        // Memory-mapped read (append-only file, defensive-patterns §3.1):
+        // updates.jsonl can grow to hundreds of MB; mapping it avoids the
+        // whole-file heap copy on fork/load. Torn trailing lines are handled
+        // per-line below exactly as before. Mapping can fail on some network
+        // filesystems (CreateFileMappingW over SMB), so fall back to the
+        // legacy full read instead of hard-failing session load / fork copy.
         let mut skipped_lines: usize = 0;
         let mut updates = Vec::new();
-        for line in contents.split(|b| *b == b'\n') {
-            let line = line.trim_ascii();
-            if line.is_empty() {
-                continue;
-            }
-            let parsed = std::str::from_utf8(line)
-                .map_err(|e| e.to_string())
-                .and_then(|s| SessionUpdateEnvelope::from_str(s).map_err(|e| e.to_string()));
-            match parsed {
-                Ok(update) => updates.push(update),
+        // Returns the number of lines skipped in this call; accumulates into
+        // `updates` / logs the first parse failure.
+        fn parse_line(
+            line: &str,
+            path: &Path,
+            updates: &mut Vec<super::SessionUpdate>,
+            skipped_before: usize,
+        ) -> usize {
+            match SessionUpdateEnvelope::from_str(line) {
+                Ok(update) => {
+                    updates.push(update);
+                    skipped_before
+                }
                 Err(error) => {
-                    skipped_lines += 1;
-                    if skipped_lines == 1 {
+                    if skipped_before == 0 {
                         tracing::warn!(
                             error = % error, path = % path.display(),
                             "skipping unparseable updates.jsonl line (torn append?)"
                         );
+                    }
+                    skipped_before + 1
+                }
+            }
+        }
+        match crate::session::storage::jsonl_mmap::JsonlMmapView::open(&path) {
+            Ok(Some(view)) => {
+                for line in view.lines() {
+                    skipped_lines = parse_line(line, &path, &mut updates, skipped_lines);
+                }
+            }
+            Ok(None) => return Ok(Vec::new()),
+            Err(e) => {
+                tracing::warn!(
+                    error = % e, path = % path.display(),
+                    "updates.jsonl mmap failed; falling back to full read"
+                );
+                let contents = std::fs::read(&path)?;
+                for line in contents.split(|b| *b == b'\n') {
+                    let line = line.trim_ascii();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match std::str::from_utf8(line) {
+                        Ok(s) => {
+                            skipped_lines = parse_line(s, &path, &mut updates, skipped_lines);
+                        }
+                        Err(_) => skipped_lines += 1,
                     }
                 }
             }
@@ -946,8 +1084,12 @@ impl StorageAdapter for JsonlStorageAdapter {
         .await
     }
     async fn append_update(&self, info: &Info, update: &super::SessionUpdate) -> io::Result<()> {
-        self.append_update_to_file(self.updates_file(info), update)
-            .await?;
+        let updates_path = self.updates_file(info);
+        let appended = self.append_update_to_file(updates_path.clone(), update).await?;
+        // Replay-checkpoint maintenance: count bytes appended since the last
+        // refresh and rewrite the checkpoint every TRIGGER_BYTES. Never fails
+        // the append (see the method doc).
+        self.maybe_refresh_replay_checkpoint(&updates_path, appended);
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
@@ -1190,28 +1332,14 @@ impl StorageAdapter for JsonlStorageAdapter {
         Ok(summary)
     }
     async fn list_sessions(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
-        let session_dirs = self.scan_session_dirs(cwd);
-        let mut summaries = Vec::new();
-        for session_dir in session_dirs {
-            let summary_path = session_dir.join("summary.json");
-            match std::fs::read(&summary_path) {
-                Ok(bytes) => {
-                    if let Ok(summary) = serde_json::from_slice::<Summary>(&bytes)
-                        && !summary.is_hidden()
-                    {
-                        summaries.push(summary);
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-        summaries.sort_by_cached_key(|s| {
-            (
-                std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
-                s.info.id.0.to_string(),
-            )
-        });
-        Ok(summaries)
+        self.list_sessions_scoped(cwd, false).await
+    }
+
+    async fn list_sessions_including_hidden(
+        &self,
+        cwd: Option<&str>,
+    ) -> io::Result<Vec<Summary>> {
+        self.list_sessions_scoped(cwd, true).await
     }
     async fn delete_session(&self, info: &Info) -> io::Result<()> {
         let dir = self.session_dir(info);

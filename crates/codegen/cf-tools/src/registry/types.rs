@@ -54,10 +54,16 @@ const RESERVED_BUILTIN_TOOL_NAMES: &[&str] = &[
     "monitor",
     "lsp",
     "skill",
+    "deploy_skill",
     "use_tool",
     "memory_search",
     "memory_get",
     "search_tool",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_read",
 ];
 /// Process-global registry of external "tool packs" — functions that
 /// contribute additional tool registrations into every
@@ -470,6 +476,16 @@ struct FinalizedTool {
     /// the client-facing `id` / `client_name`.
     registry_id: String,
     client_name: String,
+    /// Registration-time kind, captured from `ToolEntry::kind` (the
+    /// non-`Option` field `register::<T>()` filled at registration —
+    /// `registry/types.rs` `ToolEntry`) when this tool was moved from
+    /// the builder into the finalized set. This is the **trust source**
+    /// for kind-based queries (design doc Q1 规则 2 / C-8b, v3.2 信任源
+    /// 重构 + v3.3 源落定): `tools_for_kind` and the resident-set
+    /// judgment read `declared_kind`, while C-8b asserts it equals
+    /// `metadata.kind()` — a drift (a forged `metadata.kind()`) trips
+    /// the scan instead of silently reclassifying the tool.
+    declared_kind: ToolKind,
     /// Tool metadata — kind, fingerprinting, doom-loop, reminders.
     metadata: Arc<dyn ToolMetadata>,
     /// Converts `serde_json::Value` (from dispatch) back to `ToolOutput`.
@@ -679,14 +695,69 @@ impl ToolRegistryBuilder {
         );
     }
     /// Whether this registry knows the fully-qualified tool id
-    /// (`"cf_tools::read_file"`).
+    /// (`"QidiBuild:read_file"`).
+    /// Resolve a legacy doc-form tool id (`cf_tools::read_file`) onto its
+    /// canonical registry key (`QidiBuild:read_file`).
+    ///
+    /// Toolset manifests persisted by pre-migration binaries pin the
+    /// legacy form; lookups must keep resolving them instead of stranding
+    /// live tool configs (see `has_tool_id_knows_pinned_tool_config_ids`).
+    /// The concise and hashline toolsets never existed under the legacy
+    /// prefix, so the mapping is unambiguous.
+    fn legacy_lookup(&self, id: &str) -> Option<&ToolEntry> {
+        let short = id
+            .strip_prefix("cf_tools::")
+            .or_else(|| id.strip_prefix("cf_tools:"))?;
+        // Canonical QidiBuild first (the old prefix was namespace-ambiguous
+        // for the concise toolset, so canonical must win), then the
+        // hashline toolset whose short ids are unique to it.
+        self.tools
+            .get(&format!("QidiBuild:{short}"))
+            .or_else(|| self.tools.get(&format!("QidiBuildHashline:{short}")))
+    }
+
     pub fn has_tool_id(&self, id: &str) -> bool {
-        self.tools.contains_key(id)
+        self.tools.contains_key(id) || self.legacy_lookup(id).is_some()
+    }
+
+    /// Registry entry for a tool-config id, with the same legacy-id
+    /// fallback validate_config applies (finalize indexes with this so
+    /// toolsets pinned with pre-migration `cf_tools::X` ids keep
+    /// working end to end, not just at validation).
+    /// The canonical registry key for a (possibly legacy `cf_tools::X`)
+    /// tool-config id: the id itself when present, else the same legacy
+    /// fallback [`Self::lookup_entry`] applies. Used where the entry is
+    /// MOVED out of the registry (`HashMap::remove`) and the borrow
+    /// checker forbids returning the entry.
+    fn canonical_id(&self, id: &str) -> String {
+        if self.tools.contains_key(id) {
+            return id.to_string();
+        }
+        if let Some(short) = id
+            .strip_prefix("cf_tools::")
+            .or_else(|| id.strip_prefix("cf_tools:"))
+        {
+            // MUST stay in lockstep with legacy_lookup's fallback chain.
+            for ns in ["QidiBuild", "QidiBuildHashline"] {
+                let candidate = format!("{ns}:{short}");
+                if self.tools.contains_key(&candidate) {
+                    return candidate;
+                }
+            }
+        }
+        id.to_string()
+    }
+
+    fn lookup_entry(&self, id: &str) -> &ToolEntry {
+        self.tools
+            .get(id)
+            .or_else(|| self.legacy_lookup(id))
+            .unwrap_or_else(|| panic!("registry entry missing for tool id {id:?} (no legacy fallback)"))
     }
     pub fn known_tool_ids(&self) -> std::collections::HashSet<String> {
         self.tools.keys().cloned().collect()
     }
-    /// Fully-qualified tool id (`"cf_tools::read_file"`) → declared
+    /// Fully-qualified tool id (`"QidiBuild:read_file"`) → declared
     /// [`ToolKind`], for every registered tool. Lets consumers that receive
     /// kind-less tool configs (e.g. hub `session.bind` wire entries) backfill
     /// the kind from the binary's own registry before capability filtering.
@@ -766,7 +837,17 @@ impl ToolRegistryBuilder {
         b.register::<opencode::OpenCodeSkillTool>();
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
+        // think: pushed unconditionally in builder.rs for inject_default_tools
+        // agents, but curated toolsets resolve it from this registry too
+        // (sessions reference it as QidiBuild:think). 2026-09-17 fix.
+        b.register::<crate::implementations::think::ThinkImpl>();
+        b.register::<crate::implementations::skills::deploy::DeploySkillTool>();
         b.register::<crate::implementations::search_tool::SearchTool>();
+        b.register::<crate::implementations::browser::NavigateImpl>();
+        b.register::<crate::implementations::browser::SnapshotImpl>();
+        b.register::<crate::implementations::browser::ClickImpl>();
+        b.register::<crate::implementations::browser::TypeImpl>();
+        b.register::<crate::implementations::browser::ReadImpl>();
         b.register_with_params::<
                 crate::implementations::use_tool::UseTool,
                 crate::implementations::use_tool::UseToolParams,
@@ -844,7 +925,11 @@ impl ToolRegistryBuilder {
         }
         let mut resolved: Vec<(&ToolEntry, serde_json::Value)> = Vec::new();
         for tool_config in &config.tools {
-            let Some(entry) = self.tools.get(tool_config.id.as_str()) else {
+            let Some(entry) = self
+                .tools
+                .get(tool_config.id.as_str())
+                .or_else(|| self.legacy_lookup(tool_config.id.as_str()))
+            else {
                 tracing::warn!(
                     tool_id = % tool_config.id, registered_keys = ? self.tools.keys()
                     .collect::< Vec < _ >> (),
@@ -914,14 +999,14 @@ impl ToolRegistryBuilder {
         }
         {
             let standard_file_ids: &[&str] = &[
-                "cf_tools::read_file",
-                "cf_tools::search_replace",
-                "cf_tools::grep",
+                "QidiBuild:read_file",
+                "QidiBuild:search_replace",
+                "QidiBuild:grep",
             ];
             let hashline_file_ids: &[&str] = &[
-                "cf_tools::hashline_read",
-                "cf_tools::hashline_edit",
-                "cf_tools::hashline_grep",
+                "QidiBuildHashline:hashline_read",
+                "QidiBuildHashline:hashline_edit",
+                "QidiBuildHashline:hashline_grep",
             ];
             let has_standard = config
                 .tools
@@ -999,13 +1084,13 @@ impl ToolRegistryBuilder {
         }
         let mut kind_to_name: HashMap<ToolKind, String> = HashMap::new();
         for tool_config in &config.tools {
-            let entry = &self.tools[&tool_config.id];
+            let entry = self.lookup_entry(&tool_config.id);
             let client_name = tool_config.resolve_client_name(&entry.id);
             kind_to_name.entry(entry.kind).or_insert(client_name);
         }
         let mut kind_params: HashMap<ToolKind, HashMap<String, String>> = HashMap::new();
         for tool_config in &config.tools {
-            let entry = &self.tools[&tool_config.id];
+            let entry = self.lookup_entry(&tool_config.id);
             let map = kind_params.entry(entry.kind).or_default();
             if let Some(props) = entry
                 .input_schema
@@ -1137,7 +1222,14 @@ impl ToolRegistryBuilder {
         let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
         for tool_config in &config.tools {
-            let entry = self.tools.remove(&tool_config.id).unwrap();
+            let real_id = self.canonical_id(&tool_config.id);
+            let entry = self.tools.remove(&real_id).unwrap_or_else(|| {
+                panic!(
+                    "registry entry missing for tool id {:?} (canonical {:?}); \
+                     duplicate config entry?",
+                    tool_config.id, real_id
+                )
+            });
             (entry.register_in_local)(&local_registry);
             let contract_version = crate::versions::resolve_version(
                 preset_name,
@@ -1188,6 +1280,7 @@ impl ToolRegistryBuilder {
                 registry_id: entry.id.clone(),
                 id: entry.id,
                 client_name,
+                declared_kind: entry.kind,
                 metadata: Arc::from(entry.metadata),
                 output_converter: Arc::from(entry.output_converter),
                 definition,
@@ -1359,6 +1452,49 @@ impl FinalizedToolset {
             .map(|t| (t.client_name.clone(), t.metadata.kind().as_key().to_owned()))
             .collect()
     }
+    /// Every registered tool of `kind`, as `(registry_id,
+    /// client_name)` pairs — **both domains** (design doc Q1 规则 1,
+    /// v3.2 双域): `client_name` is the relay/lookup domain
+    /// (`use_tool` dispatch resolves by `client_name` —
+    /// `call_raw`), `registry_id` is the gate-judgment domain
+    /// (B-12 corrective triage). Unlike [`Self::tool_name_for_kind`]
+    /// (the single *first* tool of a kind), this returns **every**
+    /// registered instance — a multi-instance kind (`List` carries
+    /// both `list_dir` and `glob`; `Search` carries the grep
+    /// double-implementation) is fully enumerated. Kind matching
+    /// reads the registration-time `declared_kind` (trust source,
+    /// C-8b), not the runtime `metadata.kind()`.
+    pub fn tools_for_kind(&self, kind: ToolKind) -> Vec<(String, String)> {
+        self.tools
+            .read()
+            .iter()
+            .filter(|t| t.declared_kind == kind)
+            .map(|t| (t.registry_id.clone(), t.client_name.clone()))
+            .collect()
+    }
+    /// C-8b full-surface scan support (design doc Q4, kind
+    /// 信任源防线): every registered tool as
+    /// `(client_name, declared_kind, metadata.kind())` — all
+    /// three domains of the trust-source contract in one row.
+    /// The in-crate C-8b test covers a 5-tool fixture only; host
+    /// crates (cf-shell) use this to run the **full
+    /// `default_qidi_build` registration-surface variant** of the
+    /// scan: assert `declared_kind == metadata.kind()` for each
+    /// row — a drift (a forged runtime `metadata.kind()`) trips
+    /// the scan instead of silently reclassifying the tool.
+    pub fn declared_kind_scan(&self) -> Vec<(String, ToolKind, ToolKind)> {
+        self.tools
+            .read()
+            .iter()
+            .map(|t| {
+                (
+                    t.client_name.clone(),
+                    t.declared_kind,
+                    t.metadata.kind(),
+                )
+            })
+            .collect()
+    }
     pub async fn update_resource<T: Send + Sync + 'static>(&self, resource: T) {
         self.resources.lock().await.insert(resource);
     }
@@ -1376,6 +1512,38 @@ impl FinalizedToolset {
             .iter()
             .filter(|t| !t.client_name.contains("__"))
             .map(|t| t.definition.clone())
+            .collect()
+    }
+    /// Registration-time (**declared**) kind of a tool by its client-facing
+    /// name — the trust source (design doc Q1 规则 2 / C-8b), not the runtime
+    /// `metadata.kind()`. `None` for unknown names.
+    pub fn declared_kind_of(&self, client_name: &str) -> Option<ToolKind> {
+        self.tools
+            .read()
+            .iter()
+            .find(|t| t.client_name == client_name)
+            .map(|t| t.declared_kind)
+    }
+    /// `LocalRegistry` key for a client-facing name, if registered. Used to
+    /// build the per-turn defs snapshot's canonical (registry_id) domain
+    /// (design doc Q2.1 B-12 / C-8a).
+    pub fn registry_id_of(&self, client_name: &str) -> Option<String> {
+        self.tools
+            .read()
+            .iter()
+            .find(|t| t.client_name == client_name)
+            .map(|t| t.registry_id.clone())
+    }
+    /// Built-in (non-MCP) tools as `(client_name, declared_kind, definition)`
+    /// in registration order — the segmentation input for the Phase B
+    /// projection (design doc Q1). Mirrors [`Self::tool_definitions_builtins_only`]'s
+    /// filter so the two views enumerate the same set in the same order.
+    pub fn builtin_seg_entries(&self) -> Vec<(String, ToolKind, ToolDefinition)> {
+        self.tools
+            .read()
+            .iter()
+            .filter(|t| !t.client_name.contains("__"))
+            .map(|t| (t.client_name.clone(), t.declared_kind, t.definition.clone()))
             .collect()
     }
     /// Get the resolved contract version for a tool by its client-facing name.
@@ -1398,21 +1566,95 @@ impl FinalizedToolset {
             .find(|t| t.client_name == tool_name)
             .map(|t| t.metadata.clone())
     }
+    /// Look up a tool's metadata by wire name, tolerating the
+    /// colon↔underscore drift relays introduce (`qidi_build_X` vs
+    /// `qidi_build:X`). Exact `client_name` matches win; ambiguous wire
+    /// names resolve to `None` rather than guessing.
+    ///
+    /// Dispatch already uses [`Self::find_for_dispatch`]; this exposes the
+    /// same resolution to kind-based consumers (e.g. the read-only check in
+    /// `tool_calls.rs`).
+    pub fn get_tool_metadata_for_dispatch(
+        &self,
+        tool_name: &str,
+    ) -> Option<Arc<dyn ToolMetadata>> {
+        let tools = self.tools.read();
+        Self::find_for_dispatch(&tools, tool_name).map(|t| t.metadata.clone())
+    }
     /// Resolve canonical [`ToolIdentity`] (kind, namespace, presentation label)
     /// for a tool by its client-facing wire name. Drives the first-party
-    /// `x.ai/*` tool `_meta` contract (tool normalization). Returns `None` for
-    /// unknown tools (e.g. uninitialized MCP, backend-only tools).
+    /// `x.ai/*` tool `_meta` contract (tool normalization). Accepts the
+    /// canonical name or its relay-sanitized underscore form (`:` → `_`), with
+    /// the same ambiguity rules as dispatch. Returns `None` for unknown or
+    /// ambiguous names (e.g. uninitialized MCP, backend-only tools).
     pub fn tool_identity(&self, tool_name: &str) -> Option<crate::normalization::ToolIdentity> {
-        self.tools
-            .read()
-            .iter()
-            .find(|t| t.client_name == tool_name)
-            .map(|t| crate::normalization::tool_identity_of(t.metadata.as_ref()))
+        // Resolve through the same colon↔underscore-tolerant lookup dispatch
+        // uses: relays rewrite `:` to `_`, so a call can arrive as
+        // `qidi_build_SchedulerCreate` while the registered name is
+        // `qidi_build:SchedulerCreate`. Exact names short-circuit inside
+        // `find_for_dispatch` (zero behavior change); ambiguous wire names
+        // resolve to `None` rather than guessing.
+        let tools = self.tools.read();
+        let tool = Self::find_for_dispatch(&tools, tool_name)?;
+        Some(crate::normalization::tool_identity_of(
+            tool.metadata.as_ref(),
+        ))
     }
     fn tool_not_found_error(tool_name: &str) -> cf_tool_runtime::ToolError {
         let tid = cf_tool_protocol::ToolId::new(tool_name)
             .unwrap_or_else(|_| cf_tool_protocol::ToolId::new("unknown").expect("valid"));
         cf_tool_runtime::ToolError::not_found(tid, format!("Tool not found: {tool_name}"))
+    }
+    /// Resolve a tool entry for dispatch, tolerating the colon↔underscore
+    /// drift some API relays introduce: providers commonly reject `:` in
+    /// function names and rewrite it to `_` on the wire, so a call can
+    /// arrive as `qidi_build_SchedulerCreate` while the registered ToolId
+    /// is `qidi_build:SchedulerCreate`. Lookup order: exact `client_name`
+    /// first (zero behavior change for well-formed names), then both the
+    /// wire name and every registered `client_name`/`id` are compared in
+    /// the underscore domain (`:` → `_`). Ambiguous matches (two registry
+    /// entries canonicalizing to the same wire name) resolve to `None`
+    /// rather than guessing a tool. Returns `None` only when no candidate
+    /// matches.
+    fn find_for_dispatch<'a>(
+        tools: &'a [FinalizedTool],
+        name: &str,
+    ) -> Option<&'a FinalizedTool> {
+        if let Some(tool) = tools.iter().find(|t| t.client_name == name) {
+            return Some(tool);
+        }
+        if !name.contains('_') && !name.contains(':') {
+            return None;
+        }
+        let canonical = Self::canonical_dispatch_name(name);
+        let mut hits = tools.iter().filter(|t| {
+            Self::canonical_dispatch_name(&t.client_name) == canonical
+                || Self::canonical_dispatch_name(&t.id) == canonical
+        });
+        let first = hits.next()?;
+        // A second canonical hit means the wire name is ambiguous — better
+        // to report "Tool not found" than to dispatch to the wrong tool.
+        if hits.next().is_some() {
+            tracing::warn!(
+                wire_name = name,
+                resolved = % first.client_name,
+                "ambiguous colon↔underscore tool name; refusing to guess"
+            );
+            return None;
+        }
+        Some(first)
+    }
+    /// Canonical form for colon↔underscore tolerant tool lookup: the wire
+    /// sanitizes `:` → `_`, so compare both sides with colons folded to
+    /// underscores (`qidi_build:SchedulerCreate` and
+    /// `qidi_build_SchedulerCreate` both become `qidi_build_SchedulerCreate`).
+    /// Names without a colon are returned unchanged (no allocation).
+    fn canonical_dispatch_name(name: &str) -> std::borrow::Cow<'_, str> {
+        if name.contains(':') {
+            std::borrow::Cow::Owned(name.replace(':', "_"))
+        } else {
+            std::borrow::Cow::Borrowed(name)
+        }
     }
     pub async fn try_parse(
         &self,
@@ -1421,9 +1663,7 @@ impl FinalizedToolset {
     ) -> Result<ToolInput, cf_tool_runtime::ToolError> {
         let (reverse_params, parse_input) = {
             let tools = self.tools.read();
-            let tool = tools
-                .iter()
-                .find(|t| t.client_name == tool_name)
+            let tool = Self::find_for_dispatch(&tools, tool_name)
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
             (tool.reverse_params.clone(), tool.parse_input.clone())
         };
@@ -1458,9 +1698,7 @@ impl FinalizedToolset {
     ) -> Result<crate::types::output::ToolOutput, cf_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
-            let entry = tools
-                .iter()
-                .find(|t| t.client_name == tool_name)
+            let entry = Self::find_for_dispatch(&tools, tool_name)
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
             (
                 entry.registry_id.clone(),
@@ -1572,16 +1810,20 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
     ) -> Result<DispatchParts, cf_tool_runtime::ToolError> {
-        let (registry_id, output_converter, reverse_params) = {
+        // Read the contract version off the entry `find_for_dispatch` already
+        // resolved. Looking it up again by the raw wire name would miss the
+        // colon↔underscore-tolerant match: a call arriving as
+        // `qidi_build_SchedulerCreate` would silently dispatch without its
+        // `BehaviorVersion` once that colon-family tool is managed.
+        let (registry_id, output_converter, reverse_params, contract_version) = {
             let tools = self.tools.read();
-            let entry = tools
-                .iter()
-                .find(|t| t.client_name == tool_name)
+            let entry = Self::find_for_dispatch(&tools, tool_name)
                 .ok_or_else(|| Self::tool_not_found_error(tool_name))?;
             (
                 entry.registry_id.clone(),
                 entry.output_converter.clone(),
                 entry.reverse_params.clone(),
+                entry.contract_version.clone(),
             )
         };
         let canonical_params = if reverse_params.is_empty() {
@@ -1598,7 +1840,6 @@ impl FinalizedToolset {
         } else {
             None
         };
-        let contract_version = self.get_contract_version(tool_name);
         let rt_call_id = cf_tool_protocol::ToolCallId::new(tool_call_id)
             .unwrap_or_else(|_| cf_tool_protocol::ToolCallId::new_v7());
         let mut ctx = cf_tool_runtime::ToolCallContext::new(rt_call_id);
@@ -1695,9 +1936,7 @@ impl FinalizedToolset {
     pub fn remap_params(&self, tool_name: &str, tool_args: serde_json::Value) -> serde_json::Value {
         let reverse_params = {
             let tools = self.tools.read();
-            tools
-                .iter()
-                .find(|t| t.client_name == tool_name)
+            Self::find_for_dispatch(&tools, tool_name)
                 .map(|t| t.reverse_params.clone())
                 .unwrap_or_default()
         };
@@ -1763,6 +2002,7 @@ impl FinalizedToolset {
             id: name.clone(),
             registry_id,
             client_name: name.clone(),
+            declared_kind: kind,
             metadata: Arc::new(DefaultToolMetadata {
                 kind,
                 description: description.clone(),
@@ -1875,16 +2115,16 @@ fn explain_requirement_failure(
 ) -> RequirementError {
     let fq_tool_id = format!("{}:{}", entry.namespace, entry.id);
     match fq_tool_id.as_str() {
-        "cf_tools::run_terminal_cmd" if params
+        "QidiBuild:run_terminal_cmd" if params
             .get("enabled_background")
             .and_then(|value| value.as_bool())
             .unwrap_or(true) => {
             let mut missing = vec![];
             if !has_tool_kind(proposed, ToolKind::BackgroundTaskAction) {
-                missing.push("cf_tools::get_task_output");
+                missing.push("QidiBuild:get_task_output");
             }
             if !has_tool_kind(proposed, ToolKind::KillTaskAction) {
-                missing.push("cf_tools::kill_task");
+                missing.push("QidiBuild:kill_task");
             }
             let message = if missing.is_empty() {
                 "unsatisfied requirements".to_string()
@@ -1902,13 +2142,13 @@ fn explain_requirement_failure(
                 .with_bad_value(serde_json::Value::Bool(true))
                 .with_category("requirements")
         }
-        "cf_tools::task" => {
+        "QidiBuild:task" => {
             let mut missing = vec![];
             if !has_tool_kind(proposed, ToolKind::BackgroundTaskAction) {
-                missing.push("cf_tools::get_task_output");
+                missing.push("QidiBuild:get_task_output");
             }
             if !has_tool_kind(proposed, ToolKind::KillTaskAction) {
-                missing.push("cf_tools::kill_task");
+                missing.push("QidiBuild:kill_task");
             }
             RequirementError::new(
                     fq_tool_id,
@@ -1921,7 +2161,7 @@ fn explain_requirement_failure(
                 .with_expected("include get_task_output and kill_task")
                 .with_category("requirements")
         }
-        "cf_tools::get_task_output" => {
+        "QidiBuild:get_task_output" => {
             let has_qidi_build_bash = has_tool_with_bool_param(
                 proposed,
                 "QidiBuild",
@@ -1944,7 +2184,7 @@ fn explain_requirement_failure(
             {
                 notes
                     .push(
-                        "cf_tools::run_terminal_cmd is present but enabled_background=false",
+                        "QidiBuild:run_terminal_cmd is present but enabled_background=false",
                     );
             }
             if has_tool(proposed, "QidiBuildConcise", "run_terminal_cmd")
@@ -1952,10 +2192,10 @@ fn explain_requirement_failure(
             {
                 notes
                     .push(
-                        "cf_tools::run_terminal_cmd is present but enabled_background=false",
+                        "QidiBuildConcise:run_terminal_cmd is present but enabled_background=false",
                     );
             }
-            let mut message = "get_task_output requires a background-capable bash tool (cf_tools::run_terminal_cmd or cf_tools::run_terminal_cmd with enabled_background=true), OpenCode:bash, or cf_tools::task"
+            let mut message = "get_task_output requires a background-capable bash tool (QidiBuild:run_terminal_cmd or QidiBuildConcise:run_terminal_cmd with enabled_background=true), OpenCode:bash, or QidiBuild:task"
                 .to_string();
             let has_provider = has_qidi_build_bash || has_qidi_build_concise_bash
                 || has_opencode_bash || has_task;
@@ -1969,7 +2209,7 @@ fn explain_requirement_failure(
                 )
                 .with_category("requirements")
         }
-        "cf_tools::search_replace" if !params
+        "QidiBuild:search_replace" if !params
             .get("skip_read_before_edit")
             .and_then(|value| value.as_bool())
             .unwrap_or(false) && !has_tool_kind(proposed, ToolKind::Read) => {
@@ -1984,7 +2224,7 @@ fn explain_requirement_failure(
                 .with_bad_value(serde_json::Value::Bool(false))
                 .with_category("requirements")
         }
-        "cf_tools::enter_plan_mode" => {
+        "QidiBuild:enter_plan_mode" => {
             RequirementError::new(
                     fq_tool_id,
                     "enter_plan_mode requires cf_tools::exit_plan_mode so plan mode can always be exited",
@@ -1993,7 +2233,7 @@ fn explain_requirement_failure(
                 .with_expected("include cf_tools::exit_plan_mode")
                 .with_category("requirements")
         }
-        "cf_tools::exit_plan_mode" => {
+        "QidiBuild:exit_plan_mode" => {
             RequirementError::new(
                     fq_tool_id,
                     "exit_plan_mode requires cf_tools::enter_plan_mode so plan mode can be entered before exiting",
@@ -2163,7 +2403,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuild:search_replace".to_string(),
                     params: Some(
                         serde_json::json!({
                 "skip_read_before_edit" : true })
@@ -2222,7 +2462,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2231,7 +2471,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuild:search_replace".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2272,10 +2512,6 @@ mod tests {
     /// missing conditional guards.
     #[tokio::test]
     async fn full_toolset_descriptions_render_cleanly() {
-        use crate::implementations::qidi_build::{
-            DEPLOY_APP_TOOL_NAME, IMAGE_GEN_TOOL_NAME, IMAGE_TO_VIDEO_TOOL_NAME,
-            REFERENCE_TO_VIDEO_TOOL_NAME, SCHEDULER_CREATE_TOOL_NAME, SCHEDULER_DELETE_TOOL_NAME,
-        };
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![
@@ -2294,17 +2530,23 @@ mod tests {
                 "web_search",
                 "web_fetch",
                 "lsp",
-                IMAGE_GEN_TOOL_NAME,
-                DEPLOY_APP_TOOL_NAME,
-                IMAGE_TO_VIDEO_TOOL_NAME,
-                REFERENCE_TO_VIDEO_TOOL_NAME,
+                "image_gen",
+                
+                "QidiBuild:qidi_build:ImageToVideo",
+                "reference_to_video",
                 "monitor",
-                SCHEDULER_CREATE_TOOL_NAME,
-                SCHEDULER_DELETE_TOOL_NAME,
+                "QidiBuild:qidi_build:SchedulerCreate",
+                "scheduler_delete",
                 "scheduler_list",
             ]
             .into_iter()
-            .map(|id| ToolConfig::from_id(format!("cf_tools:{id}")))
+            .map(|id| {
+                if id.contains(':') {
+                    ToolConfig::from_id(id.to_owned())
+                } else {
+                    ToolConfig::from_id(format!("QidiBuild:{id}"))
+                }
+            })
             .collect(),
             behavior_preset: None,
         };
@@ -2353,9 +2595,9 @@ mod tests {
             .finalize(
                 ToolServerConfig {
                     tools: vec![
-                        ToolConfig::from_id("cf_tools::run_terminal_cmd".to_string()),
-                        ToolConfig::from_id("cf_tools::get_task_output".to_string()),
-                        ToolConfig::from_id("cf_tools::kill_task".to_string()),
+                        ToolConfig::from_id("QidiBuild:run_terminal_cmd".to_string()),
+                        ToolConfig::from_id("QidiBuild:get_task_output".to_string()),
+                        ToolConfig::from_id("QidiBuild:kill_task".to_string()),
                     ],
                     behavior_preset: None,
                 },
@@ -2377,9 +2619,9 @@ mod tests {
         use crate::types::tool_io::ToolInput;
         let config = ToolServerConfig {
             tools: vec![
-                ToolConfig::from_id("cf_tools::run_terminal_cmd".to_string()),
-                ToolConfig::from_id("cf_tools::get_task_output".to_string()),
-                ToolConfig::from_id("cf_tools::kill_task".to_string()),
+                ToolConfig::from_id("QidiBuild:run_terminal_cmd".to_string()),
+                ToolConfig::from_id("QidiBuild:get_task_output".to_string()),
+                ToolConfig::from_id("QidiBuild:kill_task".to_string()),
             ],
             behavior_preset: None,
         };
@@ -2421,9 +2663,9 @@ mod tests {
     async fn identity_read_only_honors_per_tool_override() {
         let config = ToolServerConfig {
             tools: vec![
-                ToolConfig::from_id("cf_tools::run_terminal_cmd".to_string()),
-                ToolConfig::from_id("cf_tools::get_task_output".to_string()),
-                ToolConfig::from_id("cf_tools::kill_task".to_string()),
+                ToolConfig::from_id("QidiBuild:run_terminal_cmd".to_string()),
+                ToolConfig::from_id("QidiBuild:get_task_output".to_string()),
+                ToolConfig::from_id("QidiBuild:kill_task".to_string()),
             ],
             behavior_preset: None,
         };
@@ -2439,6 +2681,47 @@ mod tests {
             "get_task_output overrides is_read_only to true despite its action kind"
         );
     }
+    /// P1-2 follow-up: `tool_identity` must resolve relay-sanitized wire names
+    /// (`qidi_build_SchedulerCreate`). `merge_tool_meta` is fed wire names, so
+    /// the old exact-match lookup missed the colon-family tool and silently
+    /// skipped the `x.ai/tool` stamp. The resolved identity must agree with
+    /// the canonical colon name.
+    #[tokio::test]
+    async fn tool_identity_resolves_underscored_wire_name() {
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig::for_tool::<qidi_build::SchedulerCreateTool>()],
+            behavior_preset: None,
+        };
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config, test_session_context(&tmp))
+            .expect("scheduler toolset should finalize");
+        let canonical = toolset
+            .tool_identity("qidi_build:SchedulerCreate")
+            .expect("canonical colon name resolves");
+        let wire = toolset
+            .tool_identity("qidi_build_SchedulerCreate")
+            .expect("underscored wire name resolves");
+        assert_eq!(wire.tool_kind, canonical.tool_kind);
+        assert_eq!(wire.namespace, canonical.namespace);
+        assert_eq!(wire.presentation_name, canonical.presentation_name);
+        assert_eq!(wire.read_only, canonical.read_only);
+    }
+    /// Unknown wire names still resolve to `None` (never a guess), so
+    /// `merge_tool_meta` keeps `_meta` untouched for unregistered tools.
+    #[tokio::test]
+    async fn tool_identity_unknown_wire_name_is_none() {
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig::for_tool::<qidi_build::SchedulerCreateTool>()],
+            behavior_preset: None,
+        };
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(config, test_session_context(&tmp))
+            .expect("scheduler toolset should finalize");
+        assert!(toolset.tool_identity("qidi_build_NoSuchTool").is_none());
+        assert!(toolset.tool_identity("not_a_registered_tool").is_none());
+    }
     /// `ToolConfig::kind` parsing: known kinds map, unknown strings sink into
     /// `Other` (with a warn, not an error), absent stays `None`.
     #[test]
@@ -2446,11 +2729,11 @@ mod tests {
         let parse = |v: serde_json::Value| -> ToolConfig {
             serde_json::from_value(v).expect("ToolConfig deserializes")
         };
-        let known = parse(serde_json::json!({ "id" : "cf_tools::read_file", "kind" : "read" }));
+        let known = parse(serde_json::json!({ "id" : "QidiBuild:read_file", "kind" : "read" }));
         assert_eq!(known.kind, Some(ToolKind::Read));
-        let typo = parse(serde_json::json!({ "id" : "cf_tools::read_file", "kind" : "raed" }));
+        let typo = parse(serde_json::json!({ "id" : "QidiBuild:read_file", "kind" : "raed" }));
         assert_eq!(typo.kind, Some(ToolKind::Other));
-        let absent = parse(serde_json::json!({ "id" : "cf_tools::read_file" }));
+        let absent = parse(serde_json::json!({ "id" : "QidiBuild:read_file" }));
         assert_eq!(absent.kind, None);
     }
     /// End-to-end: a `params_name_overrides` rename of `old_string` must flow
@@ -2462,7 +2745,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2471,7 +2754,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuild:search_replace".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: Some(std::collections::HashMap::from([(
@@ -2534,7 +2817,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2543,7 +2826,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuild:search_replace".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2628,7 +2911,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuildConcise:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2637,7 +2920,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuildConcise:search_replace".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2646,7 +2929,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::run_terminal_cmd".to_string(),
+                    id: "QidiBuildConcise:run_terminal_cmd".to_string(),
                     params: Some(
                         serde_json::json!({ "enabled_background" : true })
                             .as_object()
@@ -2662,15 +2945,9 @@ mod tests {
                 ToolConfig::for_tool::<qidi_build::GrepTool>(),
                 ToolConfig::for_tool::<qidi_build::KillTaskTool>(),
                 ToolConfig::for_tool::<qidi_build::TaskOutputTool>(),
-                ToolConfig {
-                    id: "cf_tools::list_dir".to_string(),
-                    params: None,
-                    name_override: None,
-                    params_name_overrides: None,
-                    description_override: None,
-                    behavior_version: None,
-                    kind: None,
-                },
+                // The concise toolset ships only read/search_replace/bash;
+                // list_dir comes from the canonical namespace.
+                ToolConfig::for_tool::<qidi_build::ListDirTool>(),
             ],
             behavior_preset: None,
         };
@@ -2707,13 +2984,13 @@ mod tests {
     fn has_tool_id_knows_pinned_tool_config_ids() {
         let builder = ToolRegistryBuilder::new();
         for id in [
-            "cf_tools::run_terminal_cmd",
-            "cf_tools::read_file",
-            "cf_tools::search_replace",
-            "cf_tools::list_dir",
-            "cf_tools::grep",
-            "cf_tools::get_terminal_command_output",
-            "cf_tools::kill_terminal_command",
+            "QidiBuild:run_terminal_cmd",
+            "QidiBuild:read_file",
+            "QidiBuild:search_replace",
+            "QidiBuild:list_dir",
+            "QidiBuild:grep",
+            "QidiBuild:get_terminal_command_output",
+            "QidiBuild:kill_terminal_command",
         ] {
             assert!(
                 builder.has_tool_id(id),
@@ -2721,7 +2998,7 @@ mod tests {
             );
         }
         assert!(
-            !builder.has_tool_id("cf_tools::does_not_exist"),
+            !builder.has_tool_id("QidiBuild:does_not_exist"),
             "unknown ids must not be reported as known"
         );
         assert!(
@@ -2737,11 +3014,11 @@ mod tests {
     fn known_tool_kinds_maps_pinned_tool_config_ids() {
         let kinds = ToolRegistryBuilder::new().known_tool_kinds();
         for (id, expected) in [
-            ("cf_tools::run_terminal_cmd", ToolKind::Execute),
-            ("cf_tools::read_file", ToolKind::Read),
-            ("cf_tools::search_replace", ToolKind::Edit),
-            ("cf_tools::grep", ToolKind::Search),
-            ("cf_tools::list_dir", ToolKind::List),
+            ("QidiBuild:run_terminal_cmd", ToolKind::Execute),
+            ("QidiBuild:read_file", ToolKind::Read),
+            ("QidiBuild:search_replace", ToolKind::Edit),
+            ("QidiBuild:grep", ToolKind::Search),
+            ("QidiBuild:list_dir", ToolKind::List),
         ] {
             assert_eq!(
                 kinds.get(id),
@@ -2750,7 +3027,7 @@ mod tests {
             );
         }
         assert!(
-            !kinds.contains_key("cf_tools::does_not_exist"),
+            !kinds.contains_key("QidiBuild:does_not_exist"),
             "unknown ids must be absent"
         );
     }
@@ -2768,7 +3045,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2802,7 +3079,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::from_value(serde_json::json!({ "enabled_background" :
                 "yes" }))
@@ -2819,7 +3096,7 @@ mod tests {
         let errors = builder.validate_config(&config);
         assert_eq!(errors.len(), 1);
         let error = &errors[0];
-        assert_eq!(error.tool, "cf_tools::run_terminal_cmd");
+        assert_eq!(error.tool, "QidiBuild:run_terminal_cmd");
         assert_eq!(
             error.field_path.as_deref(),
             Some("params.enabled_background")
@@ -2832,7 +3109,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::hashline_read".to_string(),
+                id: "QidiBuildHashline:hashline_read".to_string(),
                 params: Some(
                     serde_json::from_value(serde_json::json!({ "hash_len" : 0 })).unwrap(),
                 ),
@@ -2860,7 +3137,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -2899,7 +3176,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3302,6 +3579,112 @@ mod tests {
             );
         }
     }
+    /// C-8b (design doc Q4, kind 信任源防线): the registration-time
+    /// `declared_kind` must equal the runtime `metadata.kind()` for
+    /// **every** registered tool — built-ins and MCP alike. A drift
+    /// means a forged `metadata.kind()` (e.g. an MCP tool claiming
+    /// `SearchTool`/`UseTool`/`EnterPlan` to escape the resident
+    /// judgment); the scan is the tripwire. `declared_kind` is
+    /// written once at the registration point (`ToolEntry::kind`
+    /// for builder-registered tools, the registering `ToolMetadata`
+    /// for dynamic MCP tools) and never re-derived, so equality
+    /// here proves the two sources agree.
+    #[tokio::test]
+    async fn c8b_declared_kind_matches_metadata_kind_for_all_tools() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<qidi_build::ReadFileTool>(),
+                ToolConfig::for_tool::<qidi_build::ListDirTool>(),
+                ToolConfig::for_tool::<qidi_build::GrepTool>(),
+                ToolConfig::for_tool::<crate::implementations::use_tool::UseTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = builder.finalize(config, ctx).unwrap();
+        toolset
+            .register_tool(
+                "linear__save_issue".to_string(),
+                FakeMcpTool {
+                    description: "Create or update a Linear issue".into(),
+                },
+                Some(serde_json::json!({ "type" : "object", "properties" : {} })),
+            )
+            .unwrap();
+        let tools = toolset.tools.read();
+        assert!(
+            !tools.is_empty(),
+            "fixture must register tools for the drift scan"
+        );
+        for tool in tools.iter() {
+            assert_eq!(
+                tool.declared_kind,
+                tool.metadata.kind(),
+                "C-8b drift: declared_kind != metadata.kind() for {}",
+                tool.client_name
+            );
+        }
+    }
+
+    /// Design doc Q1 规则 1: the kind→Vec query returns **every**
+    /// registered instance of a kind — not just the first — in
+    /// **both domains** (`registry_id` for the B-12 gate
+    /// judgment, `client_name` for the `use_tool` relay lookup).
+    /// `List` is the multi-instance witness: `list_dir`
+    /// (qidi_build) and `glob` (opencode) share `ToolKind::List`,
+    /// so the single `tool_name_for_kind` cannot enumerate them
+    /// but this query must.
+    #[tokio::test]
+    async fn tools_for_kind_returns_all_instances_in_both_domains() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<qidi_build::ListDirTool>(),
+                ToolConfig::for_tool::<crate::implementations::opencode::OpenCodeGlobTool>(),
+                ToolConfig::for_tool::<qidi_build::ReadFileTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = builder.finalize(config, ctx).unwrap();
+        let list_tools = toolset.tools_for_kind(ToolKind::List);
+        assert_eq!(
+            list_tools.len(),
+            2,
+            "List carries both list_dir and glob; got {list_tools:?}"
+        );
+        // Dual domain: every pair carries a registry_id and a
+        // client_name, and both are non-empty and distinct
+        // fields of the same tool.
+        for (registry_id, client_name) in &list_tools {
+            assert!(!registry_id.is_empty(), "registry_id domain must be populated");
+            assert!(!client_name.is_empty(), "client_name domain must be populated");
+        }
+        let names: Vec<&str> = list_tools
+            .iter()
+            .map(|(_, client)| client.as_str())
+            .collect();
+        assert!(
+            names.contains(&"list_dir"),
+            "list_dir must be enumerated (got {names:?})"
+        );
+        assert!(
+            names.contains(&"glob"),
+            "glob must be enumerated (got {names:?})"
+        );
+        // Single-instance kind: exactly one pair, both domains
+        // populated.
+        let read_tools = toolset.tools_for_kind(ToolKind::Read);
+        assert_eq!(read_tools.len(), 1);
+        assert_eq!(read_tools[0].1, "read_file");
+        // A kind with no registered instance yields an empty
+        // Vec (not an error, not the first-of-another-kind).
+        assert!(toolset.tools_for_kind(ToolKind::Lsp).is_empty());
+    }
+
     /// `task` tool must be rejected when neither `get_task_output` nor
     /// `kill_task` are present in the toolset.
     #[test]
@@ -3309,7 +3692,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::task".to_string(),
+                id: "QidiBuild:task".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3325,9 +3708,9 @@ mod tests {
             "task tool should be rejected without get_task_output and kill_task"
         );
         assert!(
-            errors.iter().any(|e| e.tool == "cf_tools::task"
-                && e.message.contains("cf_tools::get_task_output")
-                && e.message.contains("cf_tools::kill_task")),
+            errors.iter().any(|e| e.tool == "QidiBuild:task"
+                && e.message.contains("QidiBuild:get_task_output")
+                && e.message.contains("QidiBuild:kill_task")),
             "error should mention missing background task tools: {errors:?}",
         );
     }
@@ -3339,7 +3722,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::task".to_string(),
+                    id: "QidiBuild:task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3348,7 +3731,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::get_task_output".to_string(),
+                    id: "QidiBuild:get_task_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3363,7 +3746,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.tool == "cf_tools::task" && e.message.contains("cf_tools::kill_task")),
+                .any(|e| e.tool == "QidiBuild:task" && e.message.contains("QidiBuild:kill_task")),
             "task tool should be rejected without kill_task: {errors:?}",
         );
     }
@@ -3375,7 +3758,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::task".to_string(),
+                    id: "QidiBuild:task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3384,7 +3767,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::kill_task".to_string(),
+                    id: "QidiBuild:kill_task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3399,8 +3782,8 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.tool == "cf_tools::task"
-                    && e.message.contains("cf_tools::get_task_output")),
+                .any(|e| e.tool == "QidiBuild:task"
+                    && e.message.contains("QidiBuild:get_task_output")),
             "task tool should be rejected without get_task_output: {errors:?}",
         );
     }
@@ -3413,7 +3796,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::task".to_string(),
+                    id: "QidiBuild:task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3422,7 +3805,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::get_task_output".to_string(),
+                    id: "QidiBuild:get_task_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3431,7 +3814,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::kill_task".to_string(),
+                    id: "QidiBuild:kill_task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3463,7 +3846,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::json!({ "enabled_background" : false })
                         .as_object()
@@ -3514,7 +3897,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::run_terminal_cmd".to_string(),
+                    id: "QidiBuild:run_terminal_cmd".to_string(),
                     params: Some(
                         serde_json::json!({ "enabled_background" : true })
                             .as_object()
@@ -3528,7 +3911,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::get_task_output".to_string(),
+                    id: "QidiBuild:get_task_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3537,7 +3920,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::kill_task".to_string(),
+                    id: "QidiBuild:kill_task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3600,11 +3983,11 @@ mod tests {
         };
         let config = ToolServerConfig {
             tools: vec![
-                tool("cf_tools::run_terminal_cmd"),
-                tool("cf_tools::task"),
-                tool("cf_tools::get_task_output"),
-                tool("cf_tools::wait_tasks"),
-                tool("cf_tools::kill_task"),
+                tool("QidiBuild:run_terminal_cmd"),
+                tool("QidiBuild:task"),
+                tool("QidiBuild:get_task_output"),
+                tool("QidiBuild:wait_tasks"),
+                tool("QidiBuild:kill_task"),
             ],
             behavior_preset: None,
         };
@@ -3654,7 +4037,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::json!({ "enabled_background" : false,
                 "auto_background_on_timeout" : true })
@@ -3691,7 +4074,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::json!({ "enabled_background" : false,
                 "auto_background_on_timeout" : false })
@@ -3737,7 +4120,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::json!({ "enabled_background" : false,
                 "auto_background_on_timeout" : false })
@@ -3764,7 +4147,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3781,15 +4164,15 @@ mod tests {
             "expected one bash requirement error: {errors:?}"
         );
         let error = &errors[0];
-        assert_eq!(error.tool, "cf_tools::run_terminal_cmd");
+        assert_eq!(error.tool, "QidiBuild:run_terminal_cmd");
         assert_eq!(error.category.as_deref(), Some("requirements"));
         assert_eq!(
             error.field_path.as_deref(),
             Some("params.enabled_background")
         );
         assert_eq!(error.bad_value, Some(serde_json::json!(true)));
-        assert!(error.message.contains("cf_tools::get_task_output"));
-        assert!(error.message.contains("cf_tools::kill_task"));
+        assert!(error.message.contains("QidiBuild:get_task_output"));
+        assert!(error.message.contains("QidiBuild:kill_task"));
         assert!(
             error
                 .expected
@@ -3803,7 +4186,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::task".to_string(),
+                id: "QidiBuild:task".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3820,9 +4203,9 @@ mod tests {
             "expected one task requirement error: {errors:?}"
         );
         let error = &errors[0];
-        assert_eq!(error.tool, "cf_tools::task");
-        assert!(error.message.contains("cf_tools::get_task_output"));
-        assert!(error.message.contains("cf_tools::kill_task"));
+        assert_eq!(error.tool, "QidiBuild:task");
+        assert!(error.message.contains("QidiBuild:get_task_output"));
+        assert!(error.message.contains("QidiBuild:kill_task"));
         assert_eq!(error.field_path.as_deref(), Some("tools"));
     }
     #[test]
@@ -3830,7 +4213,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::get_task_output".to_string(),
+                id: "QidiBuild:get_task_output".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3847,17 +4230,17 @@ mod tests {
             "expected one get_task_output requirement error: {errors:?}"
         );
         let error = &errors[0];
-        assert_eq!(error.tool, "cf_tools::get_task_output");
+        assert_eq!(error.tool, "QidiBuild:get_task_output");
         assert!(error.message.contains("background-capable bash tool"));
         assert!(error.message.contains("OpenCode:bash"));
-        assert!(error.message.contains("cf_tools::task"));
+        assert!(error.message.contains("QidiBuild:task"));
     }
     #[test]
     fn search_replace_requirement_error_mentions_read_tool() {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::search_replace".to_string(),
+                id: "QidiBuild:search_replace".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3874,7 +4257,7 @@ mod tests {
         );
         let error = errors
             .iter()
-            .find(|error| error.tool == "cf_tools::search_replace")
+            .find(|error| error.tool == "QidiBuild:search_replace")
             .expect("search_replace error should be present");
         assert!(error.message.contains("Read tool"));
         assert_eq!(
@@ -3889,7 +4272,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::ask_user_question".to_string(),
+                id: "QidiBuild:ask_user_question".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -3911,7 +4294,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::run_terminal_cmd".to_string(),
+                    id: "QidiBuild:run_terminal_cmd".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3920,7 +4303,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::read_file".to_string(),
+                    id: "QidiBuild:read_file".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3929,7 +4312,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::search_replace".to_string(),
+                    id: "QidiBuild:search_replace".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3938,7 +4321,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::list_dir".to_string(),
+                    id: "QidiBuild:list_dir".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3947,7 +4330,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::grep".to_string(),
+                    id: "QidiBuild:grep".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3956,7 +4339,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::web_search".to_string(),
+                    id: "QidiBuild:web_search".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3965,7 +4348,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::task".to_string(),
+                    id: "QidiBuild:task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3974,7 +4357,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::get_task_output".to_string(),
+                    id: "QidiBuild:get_task_output".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -3983,7 +4366,7 @@ mod tests {
                     kind: None,
                 },
                 ToolConfig {
-                    id: "cf_tools::kill_task".to_string(),
+                    id: "QidiBuild:kill_task".to_string(),
                     params: None,
                     name_override: None,
                     params_name_overrides: None,
@@ -4032,19 +4415,19 @@ mod tests {
         assert!(
             builder
                 .tools
-                .contains_key("cf_tools::hashline_read"),
+                .contains_key("QidiBuildHashline:hashline_read"),
             "hashline_read should be registered"
         );
         assert!(
             builder
                 .tools
-                .contains_key("cf_tools::hashline_edit"),
+                .contains_key("QidiBuildHashline:hashline_edit"),
             "hashline_edit should be registered"
         );
         assert!(
             builder
                 .tools
-                .contains_key("cf_tools::hashline_grep"),
+                .contains_key("QidiBuildHashline:hashline_grep"),
             "hashline_grep should be registered"
         );
     }
@@ -4054,9 +4437,9 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![
-                hashline_tool_config("cf_tools::hashline_read"),
-                hashline_tool_config("cf_tools::hashline_edit"),
-                hashline_tool_config("cf_tools::hashline_grep"),
+                hashline_tool_config("QidiBuildHashline:hashline_read"),
+                hashline_tool_config("QidiBuildHashline:hashline_edit"),
+                hashline_tool_config("QidiBuildHashline:hashline_grep"),
             ],
             behavior_preset: None,
         };
@@ -4079,9 +4462,9 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let standard_config = ToolServerConfig {
             tools: vec![
-                hashline_tool_config("cf_tools::read_file"),
-                hashline_tool_config("cf_tools::search_replace"),
-                hashline_tool_config("cf_tools::grep"),
+                hashline_tool_config("QidiBuild:read_file"),
+                hashline_tool_config("QidiBuild:search_replace"),
+                hashline_tool_config("QidiBuild:grep"),
             ],
             behavior_preset: None,
         };
@@ -4092,9 +4475,9 @@ mod tests {
         let builder2 = ToolRegistryBuilder::new();
         let hashline_config = ToolServerConfig {
             tools: vec![
-                hashline_tool_config("cf_tools::hashline_read"),
-                hashline_tool_config("cf_tools::hashline_edit"),
-                hashline_tool_config("cf_tools::hashline_grep"),
+                hashline_tool_config("QidiBuildHashline:hashline_read"),
+                hashline_tool_config("QidiBuildHashline:hashline_edit"),
+                hashline_tool_config("QidiBuildHashline:hashline_grep"),
             ],
             behavior_preset: None,
         };
@@ -4109,9 +4492,9 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![
-                hashline_tool_config("cf_tools::hashline_read"),
-                hashline_tool_config("cf_tools::hashline_edit"),
-                hashline_tool_config("cf_tools::hashline_grep"),
+                hashline_tool_config("QidiBuildHashline:hashline_read"),
+                hashline_tool_config("QidiBuildHashline:hashline_edit"),
+                hashline_tool_config("QidiBuildHashline:hashline_grep"),
             ],
             behavior_preset: None,
         };
@@ -4131,9 +4514,9 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![
-                hashline_tool_config("cf_tools::read_file"),
-                hashline_tool_config("cf_tools::hashline_edit"),
-                hashline_tool_config("cf_tools::grep"),
+                hashline_tool_config("QidiBuild:read_file"),
+                hashline_tool_config("QidiBuildHashline:hashline_edit"),
+                hashline_tool_config("QidiBuild:grep"),
             ],
             behavior_preset: None,
         };
@@ -4188,7 +4571,7 @@ mod tests {
         let config = ToolServerConfig {
             tools: vec![
                 ToolConfig {
-                    id: "cf_tools::hashline_read".to_owned(),
+                    id: "QidiBuildHashline:hashline_read".to_owned(),
                     params: Some(
                         serde_json::json!({ "scheme" : "chunk", "hash_len" : 2, "chunk_size"
                 : 16 })
@@ -4228,7 +4611,7 @@ mod tests {
     }
     fn bash_config_with_background() -> ToolConfig {
         ToolConfig {
-            id: "cf_tools::run_terminal_cmd".to_owned(),
+            id: "QidiBuild:run_terminal_cmd".to_owned(),
             params: Some(
                 serde_json::json!({ "enabled_background" : true })
                     .as_object()
@@ -4499,7 +4882,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::read_file".to_string(),
+                id: "QidiBuild:read_file".to_string(),
                 params: None,
                 name_override: None,
                 params_name_overrides: None,
@@ -4570,7 +4953,7 @@ mod tests {
         let builder = ToolRegistryBuilder::new();
         let config = ToolServerConfig {
             tools: vec![ToolConfig {
-                id: "cf_tools::run_terminal_cmd".to_string(),
+                id: "QidiBuild:run_terminal_cmd".to_string(),
                 params: Some(
                     serde_json::json!({ "enabled_background" : false })
                         .as_object()
@@ -4623,5 +5006,293 @@ mod tests {
             "gate ON must produce ≥ 1 Progress frame via workspace dispatch, got {progress_count}",
         );
         assert!(got_terminal, "must observe terminal");
+    }
+    /// F1 (2026-10-19 缺陷修复方案): every registered colon-family tool must
+    /// be callable via its relay-sanitized advertised name (`:` → `_`). The
+    /// bug: `qidi_build_SchedulerCreate` 广告即败 `Tool not found` because
+    /// `try_parse` matched `client_name` exactly and the wire name carries
+    /// underscores while the registry id is colon-separated.
+    ///
+    /// `CreateTask` / `CompleteTask` / `LoopSchedule` are slash-command
+    /// constants only — no tool implementation registers them, so there is
+    /// nothing to make callable for those three.
+    #[tokio::test]
+    async fn colon_family_advertised_names_resolve_in_try_parse() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<qidi_build::SchedulerCreateTool>(),
+                ToolConfig::for_tool::<qidi_build::SchedulerDeleteTool>(),
+                ToolConfig::for_tool::<qidi_build::UpdateGoalTool>(),
+                ToolConfig::for_tool::<qidi_build::ImageGenTool>(),
+                ToolConfig::for_tool::<qidi_build::ImageToVideoTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let toolset = builder
+            .finalize(config, test_session_context(&tmp))
+            .expect("colon-family toolset should finalize");
+        // (advertised wire name, params, human-readable contract label)
+        let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+            (
+                "qidi_build_SchedulerCreate",
+                serde_json::json!({ "interval" : "60s", "prompt" : "noop" }),
+                "SchedulerCreate advertised name must parse (R-003)",
+            ),
+            (
+                "scheduler_delete",
+                serde_json::json!({ "id" : "noop" }),
+                "SchedulerDelete advertised name must parse (R-003)",
+            ),
+            (
+                "qidi_build_UpdateGoal",
+                serde_json::json!({ "message" : "progress" }),
+                "UpdateGoal advertised name must parse (R-003)",
+            ),
+            (
+                "image_gen",
+                serde_json::json!({ "prompt" : "a red square" }),
+                "ImageGen advertised name must parse (R-003)",
+            ),
+            (
+                "qidi_build_ImageToVideo",
+                serde_json::json!({ "image" : "https://example.invalid/x.png" }),
+                "ImageToVideo advertised name must parse (R-003)",
+            ),
+        ];
+        for (wire_name, params, label) in cases {
+            let input = toolset
+                .try_parse(wire_name, &params)
+                .await
+                .unwrap_or_else(|e| panic!("{label}: try_parse({wire_name}) failed: {e}"));
+            assert!(
+                !matches!(input, crate::types::tool_io::ToolInput::MCPTool(_)),
+                "{label}: {wire_name} must not fall through to MCP passthrough"
+            );
+        }
+        // Sanity: the canonical colon form (relay converts back) resolves too.
+        let canonical_params = serde_json::json!({ "interval" : "60s", "prompt" : "noop" });
+        toolset
+            .try_parse("qidi_build:SchedulerCreate", &canonical_params)
+            .await
+            .expect("canonical colon form qidi_build:SchedulerCreate must parse (R-003)");
+        // Sanity: a genuinely unknown name still reports Tool not found.
+        let err = toolset
+            .try_parse("qidi_build_NoSuchTool", &serde_json::json!({}))
+            .await
+            .expect_err("unknown tool must still fail");
+        assert!(
+            err.to_string().contains("Tool not found"),
+            "unknown-tool error must say 'Tool not found', got: {err}"
+        );
+    }
+    /// P2-A regression: dispatch must carry the `BehaviorVersion` of the
+    /// tool `find_for_dispatch` resolved, even when the call arrives with the
+    /// relay-sanitized underscore wire name. Before the fix,
+    /// `prepare_dispatch` re-looked-up the contract version by the raw wire
+    /// name (exact match only), so colon-family tools would silently lose
+    /// their behavior version once managed.
+    ///
+    /// The test stamps a contract version directly on the finalized entry —
+    /// it must not mutate the production `MANAGED_TOOLS` table.
+    #[tokio::test]
+    async fn prepare_dispatch_carries_contract_version_for_wire_name() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![ToolConfig::for_tool::<qidi_build::SchedulerCreateTool>()],
+            behavior_preset: None,
+        };
+        let toolset = builder
+            .finalize(config, test_session_context(&tmp))
+            .expect("SchedulerCreate toolset should finalize");
+
+        // Simulate "this colon-family tool is version-managed".
+        {
+            let mut tools = toolset.tools.write();
+            let entry = tools
+                .iter_mut()
+                .find(|t| t.id.ends_with("SchedulerCreate"))
+                .expect("SchedulerCreate must be finalized");
+            entry.contract_version = Some("legacy-contract-test".to_string());
+        }
+
+        let toolset = Arc::new(toolset);
+        let parts = toolset
+            .prepare_dispatch(
+                "qidi_build_SchedulerCreate",
+                serde_json::json!({ "interval" : "60s", "prompt" : "noop" }),
+                "version-call",
+                None,
+            )
+            .expect("underscored wire name must resolve in prepare_dispatch");
+        let version = parts
+            .ctx
+            .extensions
+            .get::<cf_tool_runtime::BehaviorVersion>()
+            .expect("resolved entry's BehaviorVersion must be stamped on the ctx");
+        assert_eq!(
+            version.0, "legacy-contract-test",
+            "BehaviorVersion must come from the dispatch-resolved entry"
+        );
+    }
+
+    /// P2-C: two entries whose client_name/id canonicalize to the same wire
+    /// name must be rejected as ambiguous instead of dispatching to a guess.
+    /// Exact `client_name` matches still win (documented lookup order).
+    #[tokio::test]
+    async fn find_for_dispatch_rejects_ambiguous_normalized_names() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![
+                        ToolConfig::for_tool::<qidi_build::ReadFileTool>(),
+                        ToolConfig::for_tool::<qidi_build::ListDirTool>(),
+                    ],
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("fixture toolset should finalize");
+        // Two entries canonicalize to the same wire name: one via its
+        // client_name (`foo_bar`), one via its id (`foo:bar`). Registration
+        // helpers derive both from one string, so shape the finalized
+        // entries directly.
+        {
+            let mut tools = toolset.tools.write();
+            tools[0].client_name = "foo_bar".to_string();
+            tools[0].id = "foo_bar".to_string();
+            tools[1].client_name = "bar_baz".to_string();
+            tools[1].id = "foo:bar".to_string();
+        }
+
+        let tools = toolset.tools.read();
+        // Not an exact client_name; canonical form matches `foo_bar`
+        // (client_name) and `bar_baz`'s id (`foo:bar`) -> ambiguous.
+        assert!(
+            FinalizedToolset::find_for_dispatch(&tools, "foo:bar").is_none(),
+            "ambiguous wire name must resolve to None (Tool not found), never a guess"
+        );
+        // Exact client_name wins, even though its canonical form collides.
+        let exact = FinalizedToolset::find_for_dispatch(&tools, "foo_bar")
+            .expect("exact client_name must still resolve");
+        assert_eq!(
+            exact.client_name, "foo_bar",
+            "exact match must win over canonical collisions"
+        );
+    }
+
+    /// F1: end-to-end dispatch with the advertised (underscored) name —
+    /// SchedulerCreate with harmless params (no fire_immediately, 60s
+    /// interval) then SchedulerDelete cleans it up. Asserts the full
+    /// `call` path, not just parsing, no longer returns Tool not found.
+    #[tokio::test]
+    async fn scheduler_create_delete_roundtrip_via_advertised_name() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<qidi_build::SchedulerCreateTool>(),
+                ToolConfig::for_tool::<qidi_build::SchedulerDeleteTool>(),
+                ToolConfig::for_tool::<qidi_build::SchedulerListTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let toolset = Arc::new(
+            builder
+                .finalize(config, test_session_context(&tmp))
+                .expect("scheduler toolset should finalize"),
+        );
+        let created = toolset
+            .call(
+                "qidi_build_SchedulerCreate",
+                serde_json::json!({ "interval" : "60s", "prompt" : "noop contract probe",
+                    "recurring" : false, "fire_immediately" : false }),
+                "contract-call-1",
+                None,
+            )
+            .await
+            .expect("qidi_build_SchedulerCreate must dispatch (R-003: no Tool not found)");
+        let job_id = match created.output {
+            crate::types::output::ToolOutput::SchedulerCreate(o) => o.id,
+            other => panic!(
+                "create output must be SchedulerCreate, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        };
+        assert!(!job_id.is_empty(), "create output must carry the job id");
+        // The task must be listed (proves it landed in the actor) ...
+        let listed = toolset
+            .call("scheduler_list", serde_json::json!({}), "contract-call-2", None)
+            .await
+            .expect("qidi_build_scheduler_list must dispatch");
+        let listed_ids: Vec<String> = match listed.output {
+            crate::types::output::ToolOutput::SchedulerList(o) => {
+                o.tasks.into_iter().map(|t| t.id).collect()
+            }
+            _ => panic!("list output must be SchedulerList"),
+        };
+        assert!(
+            listed_ids.contains(&job_id),
+            "scheduler_list must contain the created job id {job_id}, got: {listed_ids:?}"
+        );
+        // ... and immediately removable, so the probe leaves no scheduled work.
+        toolset
+            .call(
+                "scheduler_delete",
+                serde_json::json!({ "id" : job_id }),
+                "contract-call-3",
+                None,
+            )
+            .await
+            .expect("qidi_build_scheduler_delete must dispatch");
+    }
+    /// F1 prerequisite (修复方案要求): prove the `_`→`:` fallback cannot
+    /// cross-resolve two different tools. Enumerate the ENTIRE built-in
+    /// registry, finalize it, and assert that for every colon-form derived
+    /// from any registered `client_name`/`id`, at most one tool matches.
+    #[tokio::test]
+    async fn dispatch_normalization_collision_free_across_full_registry() {
+        let builder = ToolRegistryBuilder::new();
+        let ids: Vec<String> = builder.tools.keys().cloned().collect();
+        assert!(
+            ids.len() >= 30,
+            "expected the full built-in registry, got only {} entries",
+            ids.len()
+        );
+        // Enumerate the registry instead of a finalized toolset: the
+        // registry deliberately holds namespace variants that share a
+        // client-facing name (`QidiBuild:read_file` vs `Codex:read_file`),
+        // which `finalize` rejects by design when both are requested. What
+        // matters for the dispatch fallback is that no two DIFFERENT
+        // registered ids canonicalize to the same wire name.
+        let mut canonical_owner: std::collections::HashMap<String, String> = Default::default();
+        for (registered_id, entry) in builder.tools.iter() {
+            let mut forms = vec![
+                registered_id.clone(),
+                format!("{}:{}", entry.namespace, entry.id),
+            ];
+            forms.sort();
+            forms.dedup();
+            for form in forms {
+                let canonical = form.replace(':', "_");
+                if let Some(prev) = canonical_owner.get(&canonical) {
+                    assert!(
+                        prev == &form,
+                        "normalization collision: {prev:?} and {form:?} both canonicalize \
+                         to {canonical:?}"
+                    );
+                } else {
+                    canonical_owner.insert(canonical, form);
+                }
+            }
+        }
+        assert!(
+            canonical_owner.len() >= 30,
+            "expected the full built-in registry, got only {} canonical names",
+            canonical_owner.len()
+        );
     }
 }

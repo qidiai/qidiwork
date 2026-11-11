@@ -1,4 +1,4 @@
-﻿use super::support::*;
+use super::support::*;
 use super::*;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
@@ -50,7 +50,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         }
     });
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-    let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -103,6 +103,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        dynamic_tools: false,
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
@@ -209,6 +210,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         mcp_announced_servers: Mutex::new(HashMap::new()),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregen_last_run_end: std::cell::Cell::new(None),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),

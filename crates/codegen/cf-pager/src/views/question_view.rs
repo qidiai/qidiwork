@@ -1139,7 +1139,6 @@ fn rendered_option_description_lines(option: &QuestionOption, width: usize) -> V
     }
 
     let mut renderer = StreamingMarkdownRenderer::new(md_style::style(), true);
-    renderer.set_max_table_width(Some(width));
     renderer.push(&option.description);
     // finish() (not render()) so the LaTeX-delimiter normalizer flushes any
     // trailing held-back bytes for this complete, one-shot description.

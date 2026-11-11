@@ -23,24 +23,24 @@ pub enum UpdateRunMode {
     NonBlocking,
 }
 
-const PROMPT_UPDATE_NOW: &str = "立即更新？[Y/n/d]";
-const MSG_AUTO_UPDATE_BACKGROUND: &str = "正在后台自动更新。";
-const MSG_RUN_UPDATE_MANUAL: &str = "请运行 `qidiwork update` 获取最新版本。";
+const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
+const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
+const MSG_RUN_UPDATE_MANUAL: &str = "Run `qidi update` to get the latest version.";
 /// Manual-install one-liner for this platform's bootstrap installer.
 fn manual_install_cmd() -> &'static str {
     if cfg!(windows) {
-        "irm https://qidiwork.qidiai.ltd/cli/install.ps1 | iex"
+        "irm https://x.ai/cli/install.ps1 | iex"
     } else {
-        "curl -fsSL https://qidiwork.qidiai.ltd/cli/install.sh | bash"
+        "curl -fsSL https://x.ai/cli/install.sh | bash"
     }
 }
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
     match installer {
-        "npm" => "请通过 npm 重新安装：\n  npm i -g @qidi/qidiwork".to_string(),
-        "gh-release" => "请通过 GitHub Releases 重新安装：\n  gh release download --repo qidiai/qidiwork --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
-        _ => format!("请通过以下命令重新安装：\n  {}", manual_install_cmd()),
+        "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
+        "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/cf-tools --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
+        _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
     }
 }
 
@@ -203,7 +203,7 @@ pub struct EnsureLatestOutcome {
 ///
 /// Unlike [`run_update`] this never uses the compiled-in version for the
 /// download decision — a binary already installed by another process (TUI
-/// background download, explicit `grok update`) is reused as-is. This both
+/// background download, explicit `qidi update`) is reused as-is. This both
 /// removes the duplicate download in leader mode and stops the pre-fix
 /// hourly re-download while a busy leader keeps deferring its relaunch.
 ///
@@ -360,7 +360,7 @@ pub struct BackgroundUpdateCheck {
     /// `Some` when the *running* binary is older than the channel pointer —
     /// drives the in-TUI restart hint regardless of who downloads the binary.
     pub update: Option<UpdateAvailable>,
-    /// Handle to the background `grok update` child, `Some` only when a
+    /// Handle to the background `qidi update` child, `Some` only when a
     /// download was actually started (the on-disk install was behind the
     /// pointer). The TUI parks this and `wait()`s on it at quit-for-update
     /// time instead of spawning a second downloader.
@@ -381,7 +381,7 @@ impl BackgroundUpdateCheck {
 /// Sets [`BackgroundUpdateCheck::update`] when the running binary is older
 /// than the channel pointer. If `auto_update` is enabled **and the on-disk
 /// install is also behind the pointer**, kicks off a non-blocking download
-/// (spawns `grok update` as a detached child process) so the new binary is
+/// (spawns `qidi update` as a detached child process) so the new binary is
 /// ready when the user quits and relaunches. When another process (an earlier
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
@@ -421,7 +421,7 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
 
     // Only download when the on-disk install is behind the pointer; the
     // running process being stale (checked above) just means "show the
-    // restart hint". The quit-for-update path's `grok update` child resolves
+    // restart hint". The quit-for-update path's `qidi update` child resolves
     // to "Already up to date" against the same disk state. Gated on the
     // installer maintaining the managed symlink — for npm a leftover symlink
     // would wrongly suppress the download (see `disk_version_for_installer`).
@@ -586,7 +586,7 @@ pub async fn run_update_if_available(
     Ok(false)
 }
 
-/// Launch "grok update" in blocking or non-blocking mode.
+/// Launch "qidi update" in blocking or non-blocking mode.
 ///
 /// In `NonBlocking` mode the spawned child's handle is returned so the caller
 /// can later `wait()` on the in-flight download (e.g. the TUI's
@@ -617,7 +617,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // No detach: the child must stay in the foreground process group so Ctrl+C cancels it with the parent; the atomic install protocol makes mid-download kills safe.
             let status = cmd.status().await?;
             if !status.success() {
-                anyhow::bail!("qidiwork update 失败，退出状态 {}", status);
+                anyhow::bail!("qidi update failed with {}", status);
             }
             Ok(None)
         }
@@ -656,7 +656,7 @@ pub fn restart_grok() -> Result<()> {
     }
     cmd.env_clear();
     cmd.envs(std::env::vars_os().filter(|(k, _)| k != "QIDI_AUTO_UPDATE"));
-    eprintln!("正在重启 QIDI…");
+    eprintln!("Restarting Grok...");
 
     // Use exec on Unix to replace the current process, avoiding stdio issues
     // when the parent exits. On Windows, fall back to spawn + exit.
@@ -1194,7 +1194,7 @@ async fn download_verified_from_base(
     let binary_name = format!("grok-{}-{}", version, platform);
     let binary_path = download_dir.join(&binary_name);
 
-    eprintln!("  正在下载 QIDI v{}（{}）...", version, platform);
+    eprintln!("  Downloading grok v{} ({})...", version, platform);
 
     // Published already +x (see `publish_downloaded_artifact`).
     download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
@@ -1386,7 +1386,7 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
 ///
 /// `grok` and `agent` are first-class entry points that the bootstrap
 /// installers (`install.sh`, `install.ps1`, `install-enterprise.sh`)
-/// maintain in lockstep, and so must the updater — otherwise `grok update`
+/// maintain in lockstep, and so must the updater — otherwise `qidi update`
 /// leaves `agent` pinned at the previous version.
 ///
 /// Unix: atomic symlink swap with relative target (survives Docker
@@ -1745,8 +1745,8 @@ async fn windows_replace_exe(src: &std::path::Path, dest: &std::path::Path) -> R
     }
     rename_result.map_err(|e| {
         anyhow::anyhow!(
-            "无法重命名被锁定的可执行文件 {}：{e}\n\
-             请关闭所有正在运行的 QIDI 会话后重试。",
+            "cannot rename locked executable {}: {e}\n\
+             Close all running qidi sessions and retry.",
             dest.display(),
         )
     })?;
@@ -1962,7 +1962,7 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     Ok(())
 }
 
-/// Download and install grok from GitHub Releases (qidiai/qidiwork).
+/// Download and install grok from GitHub Releases (xai-org-shared/cf-tools).
 ///
 /// Uses `gh release download` to fetch the binary matching the current platform.
 /// This works anywhere the `gh` CLI is authenticated, without needing npm or
@@ -1987,7 +1987,7 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
     let tag = format!("v{}", version);
 
     eprintln!(
-        "  正在从 GitHub Releases 下载 QIDI v{}（{}）...",
+        "  Downloading grok v{} ({}) from GitHub Releases...",
         version, platform
     );
 
@@ -2105,12 +2105,12 @@ fn warn_if_other_grok_processes_running() {
             .collect();
         if !other_pids.is_empty() {
             eprintln!(
-                "  ⚠ 警告：检测到 {} 个其他 QIDI 进程。",
+                "  ⚠ Warning: {} other grok process(es) detected.",
                 other_pids.len()
             );
-            eprintln!("    从 npm 内置二进制路径运行的进程，可能会在");
-            eprintln!("    npm 替换包文件时被 macOS 终止。");
-            eprintln!("    建议在更新前关闭其他 QIDI 会话。");
+            eprintln!("    Processes running from the npm vendored binary path may be");
+            eprintln!("    killed by macOS when npm replaces the package files.");
+            eprintln!("    Consider closing other qidi sessions before updating.");
             eprintln!();
         }
     }
@@ -2133,7 +2133,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
     warn_if_other_grok_processes_running();
 
     let version_arg = match target {
-        Some(ver) => format!("@qidi/qidiwork@{ver}"),
+        Some(ver) => format!("@xai-official/grok@{ver}"),
         None => {
             // All current callers resolve the version via get_latest_version
             // (which applies max(stable, alpha) for the alpha channel) before
@@ -2144,7 +2144,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
                 "install_npm called without a resolved version, falling back to dist-tag"
             );
             format!(
-                "@qidi/qidiwork@{}",
+                "@xai-official/grok@{}",
                 if channel == "alpha" {
                     "alpha"
                 } else {
@@ -2209,7 +2209,7 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
     }
 }
 
-/// Run the `grok update` command. Returns `Ok(Some(version))` when the target
+/// Run the `qidi update` command. Returns `Ok(Some(version))` when the target
 /// version is present on disk afterwards — either installed by this call or
 /// found already installed (e.g. by a concurrent background download); returns
 /// `Ok(None)` when there is no installer or no applicable target. Callers use
@@ -2249,7 +2249,7 @@ pub async fn run_update(
             anyhow::bail!("{e}");
         }
         eprintln!(
-            "正在安装 QIDI {}（当前：{}）...",
+            "Installing Grok {} (current: {})...",
             version, current_version
         );
         eprintln!();
@@ -2262,8 +2262,8 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        eprintln!("  ✓ QIDI v{} 安装成功！", version);
-        eprintln!("  请重启 QIDI。");
+        eprintln!("  ✓ grok v{} installed successfully!", version);
+        eprintln!("  Please restart Grok.");
         return Ok(Some(version.to_string()));
     }
 
@@ -2360,12 +2360,12 @@ pub async fn run_update(
         .unwrap_or(true)
     {
         eprintln!(
-            "强制重新安装 QIDI {}（已是最新版本）",
+            "Forcing reinstall of Grok {} (already up to date)",
             effective_current
         );
         &effective_current
     } else {
-        eprintln!("正在更新 QIDI {} → {}", effective_current, install_target);
+        eprintln!("Updating Grok {} → {}", effective_current, install_target);
         &install_target
     };
 
@@ -2377,10 +2377,10 @@ pub async fn run_update(
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    eprintln!("  ✓ QIDI v{} 安装成功！", target_version);
+    eprintln!("  ✓ grok v{} installed successfully!", target_version);
 
     if !force && std::env::var_os("QIDI_AUTO_UPDATE").is_none() {
-        eprintln!("  请重启 QIDI。");
+        eprintln!("  Please restart Grok.");
     }
     Ok(Some(target_version.to_string()))
 }
@@ -2402,15 +2402,15 @@ async fn refresh_deployment_config() {
         return;
     }
     match cf_shell::managed_config::sync().await {
-        Ok(true) => eprintln!("  已应用受管配置。"),
+        Ok(true) => eprintln!("  Applied managed configuration."),
         Ok(false) => tracing::debug!("no managed configuration to apply"),
-        // Auth issues aren't actionable mid-update: quiet here, loud on `qidiwork setup`.
+        // Auth issues aren't actionable mid-update: quiet here, loud on `qidi setup`.
         Err(e) if e.is_auth_rejection() => tracing::debug!("managed config not applied: {e}"),
         Err(e) if e.is_retryable() => {
             tracing::debug!("managed config refresh failed: {e}");
-            eprintln!("  无法应用受管配置。请运行 `qidiwork setup` 重试。");
+            eprintln!("  Couldn't apply managed configuration. Run `qidi setup` to retry.");
         }
-        Err(e) => eprintln!("  无法应用受管配置。{e}"),
+        Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
     }
 }
 
@@ -2780,7 +2780,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // Create alice's layout
-        let alice = dir.path().join("alice").join(".grok");
+        let alice = dir.path().join("alice").join(".qidi");
         let alice_downloads = alice.join("downloads");
         let alice_bin = alice.join("bin");
         std::fs::create_dir_all(&alice_downloads).unwrap();
@@ -2798,7 +2798,7 @@ mod tests {
         // "Bind-mount" to bob: copy the entire .grok tree
         let bob_home = dir.path().join("bob");
         std::fs::create_dir_all(&bob_home).unwrap();
-        let bob = bob_home.join(".grok");
+        let bob = bob_home.join(".qidi");
         let copy_status = std::process::Command::new("cp")
             .args(["-a", alice.to_str().unwrap(), bob.to_str().unwrap()])
             .status()
@@ -3275,7 +3275,7 @@ mod tests {
         let hint = reinstall_hint("npm");
         assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
         assert!(
-            hint.contains("@qidi/qidiwork"),
+            hint.contains("@xai-official/grok"),
             "should name the package: {hint}"
         );
     }
@@ -3288,7 +3288,7 @@ mod tests {
             "should suggest gh release download: {hint}"
         );
         assert!(
-            hint.contains("qidiai/qidiwork"),
+            hint.contains("xai-org-shared/cf-tools"),
             "should name the repo: {hint}"
         );
     }
@@ -4021,14 +4021,14 @@ mod tests {
 
     #[test]
     fn test_user_facing_constants_are_stable() {
-        assert_eq!(PROMPT_UPDATE_NOW, "立即更新？[Y/n/d]");
+        assert_eq!(PROMPT_UPDATE_NOW, "Update now? [Y/n/d]");
         assert_eq!(
             MSG_AUTO_UPDATE_BACKGROUND,
-            "正在后台自动更新。"
+            "Auto-update running in background."
         );
         assert_eq!(
             MSG_RUN_UPDATE_MANUAL,
-            "请运行 `qidiwork update` 获取最新版本。"
+            "Run `qidi update` to get the latest version."
         );
     }
 

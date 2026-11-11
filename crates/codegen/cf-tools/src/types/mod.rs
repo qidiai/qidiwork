@@ -4,6 +4,7 @@
 //! from submodules for convenient access.
 
 // --- Submodule declarations ---
+pub mod claude_alias;
 pub mod config_validation;
 pub mod slash_commands;
 pub mod tool;
@@ -32,6 +33,7 @@ pub mod params_validation;
 // --- Re-exports from the deleted types.rs ---
 pub use config_validation::{
     ToolConfigEntryError, ToolConfigEntryErrorKind, parse_params_json, validate_name_override,
+    validate_wire_name_collisions,
 };
 pub use slash_commands::UPDATE_GOAL_TOOL_NAME;
 pub use tool::{ToolNamespace, ToolKind, claude_names_for, qidi_names_for, kind_for};

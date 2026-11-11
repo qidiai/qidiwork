@@ -1454,7 +1454,7 @@ impl MvpAgent {
             tracing::info!("[grok] Relay sync: ENABLED");
         } else if tui_mode && relay_config_enabled && !has_xai_auth {
             tracing::info!(
-                "[grok] Relay sync: DISABLED (no auth - run 'grok login' first)"
+                "[grok] Relay sync: DISABLED (no auth - run 'qidi login' first)"
             );
         } else if tui_mode && !relay_config_enabled {
             tracing::debug!(
@@ -2705,6 +2705,9 @@ impl MvpAgent {
     ///
     /// Priority (highest to lowest):
     /// 1. Model `agent_type` if it names a strict harness (codex, …).
+    /// 1.5 F8: `requested_agent` — the per-session type the client staged
+    ///    via `_meta.agentName` (dashboard `/agent <name>` dispatch),
+    ///    already resolved + validated by the `session/new` handler.
     /// 2. `acp_agent_profile` from ACP `_meta.agentProfile` (remote clients).
     /// 3. `agent_profile_path` from CLI `--agent-profile`.
     /// 4. `agent_config` from config.toml `[agent]`.
@@ -2723,6 +2726,7 @@ impl MvpAgent {
         agent_config: &config::AgentSelectionConfig,
         acp_agent_profile: Option<cf_agent::AgentDefinition>,
         model_agent_type: Option<&str>,
+        requested_agent: Option<cf_agent::AgentDefinition>,
     ) -> cf_agent::AgentDefinition {
         use cf_agent::AgentDefinition;
         let grok_agent_env_set = std::env::var("QIDI_AGENT")
@@ -2737,6 +2741,18 @@ impl MvpAgent {
         {
             tracing::info!(
                 agent_name = % def.name, "Using agent definition from model agent_type"
+            );
+            return def;
+        }
+        // F8: an explicit per-session type picked by the user for THIS
+        // dispatch wins over every process-wide source below (config
+        // `[agent]`, env, default) and over `_meta.agentProfile`. A model
+        // that structurally requires a strict harness (step 1 above, and
+        // the re-resolve at the tail) still wins — such a model cannot run
+        // on a stock harness regardless of user intent.
+        if let Some(def) = requested_agent {
+            tracing::info!(
+                agent_name = % def.name, "Using agent definition from _meta.agentName"
             );
             return def;
         }
@@ -2891,6 +2907,7 @@ impl MvpAgent {
             session_meta,
             managed_mcp_expires_at,
             model_agent_type,
+            custom_agent_name,
             session_model_id,
             session_yolo_mode,
             session_auto_mode,
@@ -3185,6 +3202,13 @@ impl MvpAgent {
         let session_default_agent_profile = acp_agent_profile
             .as_ref()
             .map(|d| d.name.clone());
+        // F8: `_meta.agentName` (dashboard dispatch) was validated by the
+        // `session/new` handler; re-resolve through the same discovery chain
+        // to bind the definition to THIS session. A mismatch here (file
+        // removed between validation and spawn) falls through to the normal
+        // chain — no crash, just the default resolution.
+        let requested_agent = custom_agent_name
+            .and_then(|name| cf_agent::discovery::by_name_in_cwd(name, cwd.as_path()));
         let mut agent_definition = {
             let cfg = self.cfg.borrow();
             Self::resolve_agent_definition(
@@ -3193,6 +3217,7 @@ impl MvpAgent {
                 &cfg.agent,
                 acp_agent_profile,
                 model_agent_type,
+                requested_agent,
             )
         };
         {
@@ -3302,7 +3327,7 @@ impl MvpAgent {
             if servers.is_empty() {
                 let user_path = cf_tools::util::grok_home::grok_home()
                     .join("lsp.json");
-                let project_path = tool_ctx.cwd.as_path().join(".grok").join("lsp.json");
+                let project_path = tool_ctx.cwd.as_path().join(".qidi").join("lsp.json");
                 tracing::warn!(
                     cwd = % tool_ctx.cwd, user_lsp_path = % user_path.display(),
                     project_lsp_path = % project_path.display(),

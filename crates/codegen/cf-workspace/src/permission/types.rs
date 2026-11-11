@@ -159,6 +159,11 @@ pub enum AccessKind {
     },
     WebFetch(String),
     WebSearch(String),
+    /// A browser act on the live page (click / type+submit). Carries a short
+    /// human-readable detail of what would be acted on. Prompts under the
+    /// default ask policy: clicking the live web can submit forms and place
+    /// orders -- the same gravity as shell execution.
+    BrowserAct(String),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -278,6 +283,23 @@ impl From<&cf_tools::types::ToolInput> for AccessKind {
                 input: u.tool_input.clone(),
             },
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
+            // Browser navigate rides the web-fetch gate (same external-origin
+            // trust question, so the same domain rules and prompt treatment
+            // apply). Click/type act on the live page and must prompt.
+            ToolInput::BrowserNavigate(bn) => AccessKind::WebFetch(bn.url.clone()),
+            ToolInput::BrowserClick(bc) => {
+                AccessKind::BrowserAct(format!("click `{}`", bc.selector))
+            }
+            ToolInput::BrowserType(bt) => {
+                AccessKind::BrowserAct(format!("type into `{}`", bt.selector))
+            }
+            // B1: `deploy_skill` is the sanctioned channel that installs a user
+            // skill. It maps to an `Edit` on the conceptual target path so it
+            // rides the same permission gate as any other skills write (the
+            // injected skills `Ask` rule, plus the default edit prompt).
+            ToolInput::DeploySkill(d) => {
+                AccessKind::Edit(format!("~/.qidi/skills/user-{}", d.name))
+            }
             ToolInput::Dynamic(_) => AccessKind::Read(None),
             #[allow(unreachable_patterns)]
             _ => AccessKind::Read(None),
@@ -624,6 +646,23 @@ mod tests {
         assert!(
             matches!(access, AccessKind::Edit(ref p) if p == "/tmp/secret.txt"),
             "Write should produce AccessKind::Edit with the file path, got {access:?}"
+        );
+    }
+
+    #[test]
+    fn deploy_skill_maps_to_edit_access_on_skills_path() {
+        use cf_tools::implementations::skills::deploy::DeploySkillInput;
+        use cf_tools::types::ToolInput;
+        let input = ToolInput::DeploySkill(DeploySkillInput {
+            staging_dir: "/tmp/stage".into(),
+            name: "demo".into(),
+            force: false,
+            approval_note: "approved in chat".into(),
+        });
+        let access = AccessKind::from(&input);
+        assert!(
+            matches!(access, AccessKind::Edit(ref p) if p == "~/.qidi/skills/user-demo"),
+            "DeploySkill must map to Edit on the skills path (so the injected gate applies), got {access:?}"
         );
     }
     #[test]

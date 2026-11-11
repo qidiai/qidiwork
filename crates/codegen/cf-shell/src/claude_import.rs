@@ -733,7 +733,7 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
 
     if !plan.project_items.is_empty() {
         let project_root = find_project_root(cwd);
-        let project_path = project_root.join(".grok").join("config.toml");
+        let project_path = project_root.join(".qidi").join("config.toml");
         let count = apply_items_to_config(&project_path, &plan.project_items)?;
         result.project_count = count;
         if count > 0 {
@@ -742,7 +742,7 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
                 .push(project_path.to_string_lossy().to_string());
         }
 
-        let hooks_dir = project_root.join(".grok").join("hooks");
+        let hooks_dir = project_root.join(".qidi").join("hooks");
         let hook_count = apply_hooks_to_dir(&hooks_dir, &plan.project_items)?;
         result.project_count += hook_count;
         if hook_count > 0 {
@@ -1644,6 +1644,10 @@ mod tests {
     #[serial]
     fn gate_load_claude_env_returns_empty_when_marker_set() {
         let _g = MarkerGuard;
+        // The workspace-side gate reads this env override before touching
+        // the real user config.toml; without it the test depends on the
+        // developer host not having [claude_compat] imported.
+        unsafe { std::env::set_var("_QIDI_CLAUDE_MARKER_OVERRIDE", "1") };
         refresh_marker_cache(true);
         let dir = tempfile::tempdir().unwrap();
         let env = cf_workspace::permission::claude_settings::load_claude_env_with_project(

@@ -93,7 +93,7 @@ fn auth_scope_uses_oauth2_when_present() {
         format!(
             "{}::{}",
             crate::auth::config::XAI_OAUTH2_ISSUER,
-            obfstr::obfstr!("qidi-code"),
+            obfstr::obfstr!("b1a00492-073a-47ea-816f-4c329264a828"),
         )
     );
 }
@@ -1101,7 +1101,7 @@ async fn auth_returns_expired_api_key_consistently_with_current() {
 
     // Async path: must NOT clone the stale key for downstream
     // consumers. Surface `TokenExpiredNoRefresh` so callers can
-    // funnel the user back through `grok login`.
+    // funnel the user back through `qidi login`.
     let err = mgr.auth().await.unwrap_err();
     assert!(
         matches!(err, AuthError::TokenExpiredNoRefresh),
@@ -1485,11 +1485,11 @@ async fn permanent_failure_reads_absent_after_clear_so_auth_reports_not_logged_i
     );
     assert!(mgr.permanent_failure().is_some());
 
-    // User runs `grok logout` which calls clear().
+    // User runs `qidi logout` which calls clear().
     mgr.clear().unwrap();
 
     // The diagnostic the user now sees on the next request should be
-    // "Not logged in. Run `grok login`.", not the stale invalid_grant.
+    // "Not logged in. Run `qidi login`.", not the stale invalid_grant.
     let err = mgr.auth().await.unwrap_err();
     assert!(
         matches!(err, AuthError::NotLoggedIn),

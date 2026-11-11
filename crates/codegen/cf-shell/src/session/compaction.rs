@@ -6,6 +6,7 @@
 //! persistence. These methods form a second `impl SessionActor` block that
 //! lives alongside the primary one in `acp_session.rs`.
 use super::SessionActor;
+use super::drop_web_search_for_backend_search;
 use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
@@ -932,12 +933,13 @@ impl SessionActor {
         let sampling_client = self.prepare_chat_completion(false).await?;
         let use_backend_search =
             self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
-        let effective_tool_defs: Vec<cf_sampling_types::ToolDefinition> = self
-            .prepare_tool_definitions()
-            .await
-            .into_iter()
-            .filter(|td| !use_backend_search || td.function.name != "web_search")
-            .collect();
+        // Same `web_search` drop as the per-turn tool list
+        // (`turn_base_tool_specs`) — shared via
+        // `drop_web_search_for_backend_search`.
+        let effective_tool_defs = drop_web_search_for_backend_search(
+            self.prepare_tool_definitions().await,
+            use_backend_search,
+        );
         let compaction_tool_tokens =
             cf_chat_state::estimate_tool_definitions_tokens(&effective_tool_defs);
         let compaction_tools: Vec<cf_sampling_types::ToolSpec> = effective_tool_defs
@@ -2150,7 +2152,7 @@ mod inline_auto_compact_flow_tests {
         gateway_tx: mpsc::UnboundedSender<cf_acp_lib::AcpClientMessage>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     ) -> SessionActor {
-        let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+        let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let terminal = Arc::new(DummyTerminal {});
         let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2226,6 +2228,7 @@ mod inline_auto_compact_flow_tests {
             compaction_at_tokens: std::cell::Cell::new(None),
             doom_loop_recovery: None,
             doom_loop_turn_tally: Default::default(),
+            dynamic_tools: false,
             file_state_tracker: Arc::new(FileStateTracker::new()),
             rewind_pending_prompt: std::sync::Mutex::new(None),
             startup_hints: StartupHints::default(),
@@ -2333,6 +2336,8 @@ mod inline_auto_compact_flow_tests {
             mcp_announced_servers: parking_lot::Mutex::new(std::collections::HashMap::new()),
             mcp_reminder_mode: McpReminderMode::Delta,
             mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reasoning_pregen_last_run_end: std::cell::Cell::new(None),
             mcp_connecting_reminder_injected: std::cell::Cell::new(false),
             mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
             user_input_generation: std::sync::atomic::AtomicU64::new(0),
@@ -2655,8 +2660,38 @@ mod inline_auto_compact_flow_tests {
                 };
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = [0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
+                    // Drain the FULL request before responding: replying while
+                    // the client is still writing gets the socket RST'd on
+                    // Windows, which the client classifies as a transient
+                    // transport error instead of the deterministic 400.
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let n = stream.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&chunk[..n]);
+                        let head_end = request
+                            .windows(4)
+                            .position(|w| w == b"\r\n\r\n")
+                            .map(|i| i + 4);
+                        if let Some(h) = head_end {
+                            let headers = String::from_utf8_lossy(&request[..h]);
+                            let content_len = headers
+                                .lines()
+                                .find(|l| {
+                                    l.to_ascii_lowercase().starts_with("content-length:")
+                                })
+                                .and_then(|l| {
+                                    l.split(':' ).nth(1).and_then(|v| v.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            if request.len() >= h + content_len {
+                                break;
+                            }
+                        }
+                    }
                     let body =
                         r#"{"error":{"type":"invalid_request_error","message":"bad schema"}}"#;
                     let resp = format!(

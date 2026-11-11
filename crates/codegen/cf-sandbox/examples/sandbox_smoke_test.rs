@@ -16,6 +16,10 @@
 
 #[cfg(unix)]
 use std::path::Path;
+// The unix main() below drives the real sandbox API; gated so the
+// Windows stub main never sees these imports unused.
+#[cfg(unix)]
+use cf_sandbox::{ProfileName, SandboxManager};
 
 // Kernel-enforcement smoke test is unix-only (Landlock/Seatbelt via nono).
 // Windows sandboxing uses Job Objects and is exercised by the unit tests.
@@ -98,7 +102,7 @@ fn main() {
     let _ = std::fs::remove_file(&test_file);
 
     // Test 5: Write to /tmp (should work for workspace/strict, blocked for read-only)
-    let tmp_test = Path::new("/tmp/.grok-sandbox-test");
+    let tmp_test = Path::new("/tmp/.qidi-sandbox-test");
     test_write("Write to /tmp", tmp_test);
     let _ = std::fs::remove_file(tmp_test);
 

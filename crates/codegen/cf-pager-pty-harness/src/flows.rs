@@ -85,13 +85,13 @@ pub fn inference_request_count(content: &ContentController) -> usize {
 /// `expires_at` must be far-future so no network refresh is attempted; the
 /// mock server accepts any bearer. Pair with [`oauth_env_for_pager`].
 pub fn seed_fake_oauth(content: &ContentController, user: &str) {
-    let grok_home = content.home().join(".grok");
-    std::fs::create_dir_all(&grok_home).expect("create temp .grok");
+    let grok_home = content.home().join(".qidi");
+    std::fs::create_dir_all(&grok_home).expect("create temp .qidi");
     std::fs::write(
         grok_home.join("auth.json"),
         format!(
             r#"{{
-  "https://api.qidiai.ltd::qidi-code": {{
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {{
     "key": "pty-test-oauth-token",
     "auth_mode": "oidc",
     "create_time": "2026-01-01T00:00:00Z",
@@ -99,8 +99,8 @@ pub fn seed_fake_oauth(content: &ContentController, user: &str) {
     "email": "{user}@test.invalid",
     "expires_at": "2030-01-01T00:00:00Z",
     "refresh_token": "pty-test-refresh-token",
-    "oidc_issuer": "https://api.qidiai.ltd",
-    "oidc_client_id": "qidi-code"
+    "oidc_issuer": "https://auth.x.ai",
+    "oidc_client_id": "b1a00492-073a-47ea-816f-4c329264a828"
   }}
 }}"#
         ),

@@ -1938,7 +1938,7 @@ fn render_welcome_done(
         let gate_text = p
             .gate
             .map(|g| g.message.as_str())
-            .unwrap_or("需要升级到 pro 订阅 / Upgrade to a pro plan");
+            .unwrap_or("SuperQIDI subscription required");
         let msg = Line::from(Span::styled(
             gate_text,
             Style::default().fg(theme.gray_bright),
@@ -1962,7 +1962,7 @@ fn render_welcome_done(
             let gate_link = p
                 .gate
                 .and_then(|g| g.url.as_deref())
-                .unwrap_or("https://www.qidiai.ltd");
+                .unwrap_or("https://qidiai.ltd/superqidi?referrer=cf-tools");
             let url = Line::from(Span::styled(
                 gate_link,
                 Style::default()
@@ -2188,8 +2188,12 @@ pub(crate) fn render_session_picker(
     // (which receives the effective query) on row indices.
     let filter_query =
         crate::views::session_picker::effective_filter_query(&ctx.state.query, ctx.entries_query);
-    let filtered_indices =
-        crate::app::app_view::filter_session_entries(ctx.sessions, filter_query, ctx.source_filter);
+    let filtered_indices = crate::app::app_view::filter_session_entries(
+        ctx.sessions,
+        filter_query,
+        ctx.source_filter,
+        !ctx.state.query.trim().is_empty(),
+    );
 
     let content_width = area.width; // approximate for truncation
     let built = build_session_entry_data(entries_data, &filtered_indices, ctx.state, content_width);
@@ -2521,6 +2525,7 @@ mod tests {
             branch: None,
             repo_name: repo_name.into(),
             worktree_label: None,
+            is_subagent: false,
             card_detail: None,
         }
     }

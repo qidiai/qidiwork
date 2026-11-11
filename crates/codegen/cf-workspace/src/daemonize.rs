@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::{FromRawFd as _, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::{process, thread};
 #[cfg(windows)]
@@ -235,8 +235,21 @@ impl PidFile {
         // PID contents are advisory diagnostics; the flock provides exclusion.
         // `set_len(0)` clears any stale (possibly longer) value first.
         file.set_len(0)?;
-        file.write_all(process::id().to_string().as_bytes())?;
+        let pid_text = process::id().to_string();
+        file.write_all(pid_text.as_bytes())?;
         file.flush()?;
+        // The flock blocks cross-handle reads of the locked file on
+        // Windows (LockFileEx semantics), which used to make
+        // `read_pidfile_pid` always fail during contention and made
+        // takeover silently decline against a live holder. Keep an
+        // unlocked readable copy next to the lock; best-effort only.
+        // tmp + rename so a concurrent takeover can never read a torn
+        // sidecar mid-write.
+        let sidecar = pid_sidecar_path(path);
+        let tmp_sidecar = pid_sidecar_path(path).with_extension("tmp");
+        if fs::write(&tmp_sidecar, &pid_text).is_ok() {
+            let _ = fs::rename(&tmp_sidecar, &sidecar);
+        }
 
         Ok(Some(Self { _file: file }))
     }
@@ -316,13 +329,35 @@ impl PidFile {
 
 /// Advisory pid recorded in the pidfile by its holder; `None` if unreadable
 /// or not a positive integer.
+///
+/// Reads the unlocked sidecar copy written at acquire time: the main
+/// file is unreadable through the held flock on Windows.
 fn read_pidfile_pid(path: &Path) -> Option<u32> {
-    fs::read_to_string(path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
+    let parse = |s: String| -> Option<u32> {
+        s.trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|&pid| pid > 0)
+    };
+    // Primary source: the unlocked sidecar copy (the locked main file
+    // is unreadable on Windows while held). Fallback: the main file,
+    // which IS readable on Unix and covers holders written by versions
+    // predating the sidecar.
+    if let Some(pid) = fs::read_to_string(pid_sidecar_path(path))
         .ok()
-        .filter(|&pid| pid > 0)
+        .and_then(parse)
+    {
+        return Some(pid);
+    }
+    fs::read_to_string(path).ok().and_then(parse)
+}
+
+/// Sibling file holding the readable pid copy (the lock file itself is
+/// unreadable on Windows while held).
+fn pid_sidecar_path(path: &Path) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(".pid");
+    PathBuf::from(sidecar)
 }
 
 /// True if the basename of `name` (path separators `/` and `\` both count)
@@ -573,9 +608,11 @@ mod tests {
         let path = dir.path().join("ws.pid");
 
         let guard = PidFile::acquire(&path).unwrap().unwrap();
+        drop(guard);
+        // Read after release: the held flock blocks cross-handle reads
+        // on Windows.
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(contents.trim().parse::<u32>().unwrap(), process::id());
-        drop(guard);
     }
 
     #[test]
@@ -610,13 +647,15 @@ mod tests {
         fs::write(&path, "999999999999 stale junk\n").unwrap();
 
         let guard = PidFile::acquire(&path).unwrap().unwrap();
+        drop(guard);
+        // Read after release: the held flock blocks cross-handle reads
+        // on Windows.
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents,
             process::id().to_string(),
             "stale content must be fully truncated, no trailing bytes"
         );
-        drop(guard);
     }
 
     #[test]
@@ -625,13 +664,16 @@ mod tests {
         let path = dir.path().join("ws.pid");
 
         let holder = PidFile::acquire(&path).unwrap().unwrap();
-        let before = fs::read_to_string(&path).unwrap();
+        let before = fs::read_to_string(pid_sidecar_path(&path)).unwrap();
 
         let contended = PidFile::acquire(&path).unwrap();
         assert!(contended.is_none());
 
-        let after = fs::read_to_string(&path).unwrap();
-        assert_eq!(before, after, "contended acquire must not rewrite the file");
+        let after = fs::read_to_string(pid_sidecar_path(&path)).unwrap();
+        assert_eq!(
+            before, after,
+            "contended acquire must not rewrite the pid copy"
+        );
         drop(holder);
     }
 
@@ -761,6 +803,9 @@ mod tests {
 
         let guard = PidFile::acquire_or_take_over(&path, Duration::from_millis(100)).unwrap();
         assert!(guard.is_some());
+        drop(guard);
+        // Read after release: the held flock blocks cross-handle reads
+        // on Windows.
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             process::id().to_string()
@@ -773,7 +818,9 @@ mod tests {
         let path = dir.path().join("ws.pid");
 
         let _holder = PidFile::acquire(&path).unwrap().unwrap();
-        fs::write(&path, "not a pid").unwrap();
+        // The takeover path reads the sidecar pid copy; poison it (the
+        // main file is unwritable on Windows while held).
+        fs::write(pid_sidecar_path(&path), "not a pid").unwrap();
 
         let taken =
             PidFile::acquire_or_take_over_matching(&path, Duration::from_millis(100), "sleep")
@@ -1065,14 +1112,16 @@ mod tests {
     fn read_pidfile_pid_parses_and_rejects() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("ws.pid");
+        // read_pidfile_pid reads the sidecar copy (see pid_sidecar_path).
+        let sidecar = pid_sidecar_path(&path);
 
-        fs::write(&path, "1234\n").unwrap();
+        fs::write(&sidecar, "1234\n").unwrap();
         assert_eq!(read_pidfile_pid(&path), Some(1234));
 
-        fs::write(&path, "0").unwrap();
+        fs::write(&sidecar, "0").unwrap();
         assert_eq!(read_pidfile_pid(&path), None, "pid 0 is not a process");
 
-        fs::write(&path, "garbage").unwrap();
+        fs::write(&sidecar, "garbage").unwrap();
         assert_eq!(read_pidfile_pid(&path), None);
 
         assert_eq!(read_pidfile_pid(&dir.path().join("missing")), None);

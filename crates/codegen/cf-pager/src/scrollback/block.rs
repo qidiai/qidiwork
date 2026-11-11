@@ -1,4 +1,4 @@
-//! BlockContent trait, RenderBlock enum, and shared bullet rendering.
+﻿//! BlockContent trait, RenderBlock enum, and shared bullet rendering.
 
 use ratatui::style::Style;
 use ratatui::text::{Span, Text};
@@ -13,7 +13,7 @@ use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef, ScrollbackVideoR
 
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
-    AgentMessageBlock, ArtifactBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
+    AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, CreditLimitBlock,
     EditToolCallBlock, ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, OtherToolCallBlock,
     ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent, SessionEventBlock,
     SubagentBlock, SubagentBlockKind, SystemMessageBlock, ThinkingBlock, ToolCallBlock,
@@ -385,8 +385,6 @@ pub enum RenderBlock {
     ContextInfo(ContextInfoBlock),
     /// Credit-limit card for max-tier users (red accent, single action).
     CreditLimit(CreditLimitBlock),
-    /// Office artifact cards registered via office-artifact (manifest.json).
-    Artifact(ArtifactBlock),
 }
 
 /// Delegate a method call to the inner block variant.
@@ -405,7 +403,6 @@ macro_rules! delegate_block {
             RenderBlock::Btw(b) => b.$method($($arg),*),
             RenderBlock::ContextInfo(b) => b.$method($($arg),*),
             RenderBlock::CreditLimit(b) => b.$method($($arg),*),
-            RenderBlock::Artifact(b) => b.$method($($arg),*),
         }
     };
 }
@@ -1023,7 +1020,6 @@ impl RenderBlock {
             | RenderBlock::CreditLimit(_) => None,
             RenderBlock::Btw(_) => Some(theme.accent_plan),
             RenderBlock::Stub(block) => Some(block.accent_color),
-            RenderBlock::Artifact(_) => Some(theme.accent_skill),
         }
     }
 
@@ -1044,7 +1040,6 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::ListDir(b)) => {
                 b.error.is_none() && !b.output.is_empty()
             }
-            RenderBlock::Artifact(_) => true,
             _ => false,
         }
     }
@@ -1170,11 +1165,6 @@ impl RenderBlock {
                 join_searchable([Some(b.heading.clone()), Some(b.url.clone())])
             }
             RenderBlock::ToolCall(tc) => tc.searchable_text(),
-            RenderBlock::Artifact(b) => join_searchable(
-                b.cards
-                    .iter()
-                    .map(|c| Some(format!("{} {} {}", c.name, c.path, c.note))),
-            ),
         }
     }
 

@@ -5,10 +5,10 @@
     unreachable_code,
     dead_code
 )]
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-#[cfg(all(feature = "jemalloc", feature = "release-dist", unix))]
+#[cfg(all(feature = "jemalloc", feature = "release-dist", unix, not(target_os = "android")))]
 mod jemalloc_malloc_conf {
     /// jemalloc looks up `extern const char *malloc_conf` — a thin pointer,
     /// not a Rust `&[u8]` fat pointer.
@@ -99,7 +99,7 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     );
     eprintln!();
 }
-/// Entrypoint tag for `grok -p`; keys the quiet stderr default in `init_tracing_simple`.
+/// Entrypoint tag for `qidi -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
 /// Initialize simple tracing for non-TUI agent modes.
 fn init_tracing_simple(app_entrypoint: &'static str) {
@@ -146,31 +146,35 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
             },
         ),
     );
+    // F2b: probe ripgrep once at startup. Its absence makes the built-in
+    // grep return no matches, which reads as "nothing found" unless we say
+    // otherwise up front.
+    cf_shell::tools::warn_if_ripgrep_unavailable();
 }
-/// `grok setup`: rendering + exit codes only; fetch logic lives in `cf_shell::managed_config`.
+/// `qidi setup`: rendering + exit codes only; fetch logic lives in `cf_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
 async fn run_setup_command(json: bool) {
     use cf_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
-        eprintln!("未找到 deployment key 或团队登录。");
+        eprintln!("No deployment key or team sign-in found.");
         eprintln!();
-        eprintln!("如需安装受管配置，请先使用团队账户登录：运行 `qidiwork login`，");
-        eprintln!("或设置一个 deployment key：");
+        eprintln!("To install managed configuration, sign in with a team using `qidi login`,");
+        eprintln!("or set a deployment key:");
         eprintln!();
         if cfg!(unix) {
             eprintln!("  export QIDI_DEPLOYMENT_KEY=<your-key>");
         } else {
             eprintln!("  $env:QIDI_DEPLOYMENT_KEY=\"<your-key>\"");
         }
-        eprintln!("  qidiwork setup");
+        eprintln!("  qidi setup");
         eprintln!();
-        eprintln!("或者把该 key 写入 ~/.qidi/config.toml：");
+        eprintln!("Or add the key to ~/.qidi/config.toml:");
         eprintln!();
         eprintln!("  [endpoints]");
         eprintln!("  deployment_key = \"<your-key>\"");
         eprintln!();
         eprintln!(
-            "如果你没有 deployment key，请联系你组织的 QIDI Code 管理员。"
+            "If you don't have a deployment key, contact your organization's QIDI Code administrator."
         );
         std::process::exit(1);
     }
@@ -182,26 +186,26 @@ async fn run_setup_command(json: bool) {
                 println!("{out}");
                 if !report.configured {
                     eprintln!(
-                        "你的团队尚未配置受管配置。请让团队管理员在 QIDI 控制台进行设置。"
+                        "Your team doesn't have a managed configuration yet. A team admin can set one up at console.qidiai.ltd."
                     );
                 }
             }
             Err(e) => {
-                eprintln!("无法获取受管配置。{e}");
+                eprintln!("Couldn't fetch managed configuration. {e}");
                 std::process::exit(1);
             }
         }
         return;
     }
     match managed_config::run_setup().await {
-        SetupOutcome::Installed => eprintln!("已应用受管配置。"),
+        SetupOutcome::Installed => eprintln!("Applied managed configuration."),
         SetupOutcome::NothingConfigured => {
             eprintln!(
-                "你的团队尚未配置受管配置。请让团队管理员在 QIDI 控制台进行设置。"
+                "Your team doesn't have a managed configuration yet. A team admin can set one up at console.qidiai.ltd."
             );
         }
         SetupOutcome::Failed(e) => {
-            eprintln!("无法应用受管配置。{e}");
+            eprintln!("Couldn't apply managed configuration. {e}");
             std::process::exit(1);
         }
     }
@@ -236,10 +240,10 @@ fn ensure_control_caps(reg: &LeaderRegistration) -> Result<&LeaderCapabilities> 
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Leader does not advertise capabilities (legacy version)"))
 }
-/// Env override for the `grok workspace` gate: any truthy value enables the
+/// Env override for the `qidi workspace` gate: any truthy value enables the
 /// command locally, a falsy one disables it — bypassing the remote settings flag.
 const WORKSPACE_COMMAND_ENV: &str = "QIDI_WORKSPACE_COMMAND";
-/// Resolution of the `grok workspace` gate. `Unknown` is kept separate from
+/// Resolution of the `qidi workspace` gate. `Unknown` is kept separate from
 /// `Disabled` so we don't tell the user the flag is off when the settings were
 /// simply never read (both fail closed, but `Unknown` earns an honest message).
 #[derive(Debug, PartialEq, Eq)]
@@ -297,15 +301,15 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Enabled => {}
         WorkspaceGate::Disabled => {
             anyhow::bail!(
-                "此账户未启用 `qidiwork workspace` \
-             （由服务端功能开关控制，当前处于关闭状态）。"
+                "`qidi workspace` is not enabled for this account \
+             (gated by a server-side feature flag that is currently off)."
             )
         }
         WorkspaceGate::Unknown => {
             anyhow::bail!(
-                "无法加载 `qidiwork workspace` 的你的设置。请检查你的\
-             网络连接（若已登出请运行 `qidiwork login`），然后\
-             重试。"
+                "Could not load your settings for `qidi workspace`. Check your \
+             network connection (run `qidi login` if you are signed out), then \
+             try again."
             )
         }
     }
@@ -334,8 +338,8 @@ fn ensure_workspace_caps(reg: &LeaderRegistration) -> Result<()> {
     let caps = ensure_control_caps(reg)?;
     if !caps.workspace_exposure {
         anyhow::bail!(
-            "当前运行的 leader 不支持 workspace 暴露——请停止 \
-             leader 进程并重新运行以加载新版本"
+            "the running leader does not support workspace exposure — stop the \
+             leader process and re-run to pick up the new version"
         );
     }
     Ok(())
@@ -359,8 +363,8 @@ async fn connect_workspace_control(
     .await
     .map_err(|e| {
         anyhow::anyhow!(
-            "此环境没有正在运行的 leader（{e}）。\
-             请启动一个 QIDI 会话，或运行 `qidiwork workspace start`。"
+            "no running leader for this environment ({e}). \
+             Start a qidi session, or run `qidi workspace start`."
         )
     })
 }
@@ -400,14 +404,14 @@ async fn workspace_start(
     );
     if !use_leader {
         anyhow::bail!(
-            "`qidiwork workspace` 需要 leader 模式（workspace 通过 leader 共享）。\n\
-             请在 ~/.qidi/config.toml 中设置 `[cli] use_leader = true`，或传入 --leader。"
+            "`qidi workspace` requires leader mode (the workspace is shared via the leader).\n\
+             Enable it with `[cli] use_leader = true` in ~/.qidi/config.toml, or pass --leader."
         );
     }
     ensure_authenticated(
         &agent_config.grok_com_config,
         false,
-        Some("未找到缓存的凭据。请先运行 `qidiwork login`。"),
+        Some("No cached credentials found. Run `qidi login` first."),
     )
     .await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
@@ -825,8 +829,8 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
-const PLUGIN_DIR_LEADER_WARNING: &str = "qidiwork: --plugin-dir 在 leader 模式下会被忽略；请使用 --no-leader \
-     以加载按进程的插件";
+const PLUGIN_DIR_LEADER_WARNING: &str = "qidi: --plugin-dir is ignored in leader mode; run with --no-leader to \
+     load per-process plugins";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 async fn run_agent_command(
     agent_args: Box<cf_pager::app::AgentArgs>,
@@ -911,7 +915,7 @@ async fn run_agent_command(
         None,
     );
     if let Some(warning) = launch_yolo.blocked_warning {
-        eprintln!("qidiwork: {warning}");
+        eprintln!("qidi: {warning}");
     }
     agent_config.default_yolo_mode = launch_yolo.yolo;
     // B5: seed the launch-scoped YOLO tool allowlist (`--yolo-tools`) so every
@@ -923,7 +927,7 @@ async fn run_agent_command(
     if let Some(msg) =
         cf_shell::util::config::yolo_launch_refusal(launch_yolo.yolo, agent_args.ack_no_sandbox)
     {
-        eprintln!("qidiwork: {msg}");
+        eprintln!("qidi: {msg}");
         std::process::exit(1);
     }
     agent_config.default_auto_mode = cf_shell::util::config::effective_auto_for_launch(
@@ -1304,12 +1308,12 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 /// Single audit point for the `Command::Dashboard` soft-subcommand.
 /// Sets `QIDI_OPEN_DASHBOARD_AT_STARTUP=1` if the user asked for
-/// `grok dashboard`, and clears `args.command` so the regular
+/// `qidi dashboard`, and clears `args.command` so the regular
 /// subcommand match doesn't try to handle it.
 ///
 /// The dashboard is independent of leader mode — it renders local
 /// sessions and, when a leader happens to be present, additionally shows
-/// the leader roster — so `grok dashboard` does NOT force leader mode and
+/// the leader roster — so `qidi dashboard` does NOT force leader mode and
 /// is compatible with `--no-leader`.
 ///
 /// The only gate is the feature flag: a disabled dashboard
@@ -1351,7 +1355,7 @@ fn run_and_shutdown<F: std::future::Future>(
 /// transient — so a long-session resume doesn't leave hundreds of MB of dead
 /// pages counted against the process for its lifetime (macOS keeps
 /// `MADV_FREE`d pages in RSS until systemwide pressure).
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn purge_jemalloc_retained_pages() {
     static NAME: &[u8] = b"arena.4096.purge\0";
     let ret = unsafe {
@@ -1378,7 +1382,7 @@ fn purge_jemalloc_retained_pages() {
 /// Returns `None` if any mallctl fails (trace records the absence). Rides
 /// the `tikv-jemalloc-ctl` raw helpers (introduced by the heap-profile
 /// hooks below) instead of hand-rolled mallctl.
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_allocator_stats() -> Option<cf_pager::memory_trace::AllocatorStats> {
     /// SAFETY: callers pass fixed NUL-terminated `stats.*` size_t ctl names.
     unsafe fn gauge(name: &[u8]) -> Option<u64> {
@@ -1405,7 +1409,7 @@ fn jemalloc_allocator_stats() -> Option<cf_pager::memory_trace::AllocatorStats> 
 /// included) — the artifact the GCS memory-trace upload ships for offline
 /// analysis. Raw `tikv_jemalloc_sys` because jemalloc-ctl has no
 /// callback-form stats_print.
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_stats_dump() -> String {
     unsafe extern "C" fn append(opaque: *mut std::ffi::c_void, msg: *const std::ffi::c_char) {
         unsafe {
@@ -1423,7 +1427,7 @@ fn jemalloc_stats_dump() -> String {
     }
     out
 }
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_heap_stats() -> Option<cf_shell::heap_profile::JemallocStats> {
     unsafe {
         tikv_jemalloc_ctl::raw::write(b"epoch\0", 1u64).ok()?;
@@ -1435,19 +1439,19 @@ fn jemalloc_heap_stats() -> Option<cf_shell::heap_profile::JemallocStats> {
         })
     }
 }
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_set_prof_active(active: bool) -> bool {
     unsafe { tikv_jemalloc_ctl::raw::write(b"prof.active\0", active).is_ok() }
 }
-#[cfg(all(test, feature = "jemalloc", unix))]
+#[cfg(all(test, feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_read_prof_active() -> Option<bool> {
     unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"prof.active\0").ok() }
 }
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_prof_available() -> bool {
     unsafe { tikv_jemalloc_ctl::raw::read::<bool>(b"opt.prof\0").unwrap_or(false) }
 }
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     if !jemalloc_prof_available() {
@@ -1456,7 +1460,7 @@ fn jemalloc_dump_to_path(path: &std::path::Path) -> Result<(), String> {
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     unsafe { tikv_jemalloc_ctl::raw::write(b"prof.dump\0", c.as_ptr()) }.map_err(|e| e.to_string())
 }
-#[cfg(all(feature = "jemalloc", unix))]
+#[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
 fn install_heap_profile_hooks() {
     cf_shell::heap_profile::install(cf_shell::heap_profile::HeapProfileHooks {
         stats: jemalloc_heap_stats,
@@ -1464,6 +1468,56 @@ fn install_heap_profile_hooks() {
         dump_to_path: jemalloc_dump_to_path,
         prof_available: jemalloc_prof_available,
     });
+}
+/// Count orphaned `.json` proposals in `proposals_dir` that have not been
+/// modified in over 7 days.
+///
+/// Side-effect free (no printing), so unit tests can assert the count
+/// directly. A missing or unreadable directory counts as zero — fresh installs
+/// have no `~/.qidi/evolution/`, which is normal and not an error.
+fn count_stale_proposals(proposals_dir: &std::path::Path) -> usize {
+    const STALE_AFTER: std::time::Duration =
+        std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+    let Ok(entries) = std::fs::read_dir(proposals_dir) else {
+        // Missing or unreadable directory: nothing to count, not an error.
+        return 0;
+    };
+    let Some(cutoff) = std::time::SystemTime::now().checked_sub(STALE_AFTER) else {
+        return 0;
+    };
+
+    let mut stale = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
+            continue;
+        }
+        if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+            if modified < cutoff {
+                stale += 1;
+            }
+        }
+    }
+    stale
+}
+
+/// Read-only startup hint: count orphaned `.json` proposals under
+/// `~/.qidi/evolution/proposals/` that have not been modified in over 7 days.
+///
+/// Counting only — removing them is a separate concern. A missing directory
+/// (fresh installs have no `~/.qidi/evolution/`) is normal and prints nothing.
+fn report_stale_evolution_proposals(evolution_dir: &std::path::Path) {
+    let proposals_dir = evolution_dir.join("proposals");
+    let stale = count_stale_proposals(&proposals_dir);
+    if stale > 0 {
+        eprintln!(
+            "QIDI Code found {stale} stale evolution proposal(s) in {}.",
+            proposals_dir.display()
+        );
+        eprintln!("  These are orphaned drafts older than 7 days; safe to ignore for now.");
+        eprintln!();
+    }
 }
 fn main() {
     // Debug builds use significantly more stack space than release builds.
@@ -1485,14 +1539,14 @@ fn main() {
 
 fn real_main() -> i32 {
     cf_pager_minimal::install();
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     cf_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     {
         cf_pager::memory_trace::install_allocator_stats_provider(jemalloc_allocator_stats);
         cf_pager::memory_trace::install_allocator_dump_provider(jemalloc_stats_dump);
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     install_heap_profile_hooks();
     if let Some(code) = cf_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
@@ -1524,7 +1578,9 @@ fn real_main() -> i32 {
             eprintln!("QIDI Code crashed during your last session.");
             eprintln!("  Signal:  {}", report.signal_name);
             eprintln!("  Version: {}", report.app_version);
-            eprintln!("  Report:  {}", report.report_path.display());
+            if let Some(path) = &report.report_path {
+                eprintln!("  Report:  {}", path.display());
+            }
             eprintln!();
         }
         if !cf_crash_handler::install(cf_crash_handler::CrashHandlerConfig {
@@ -1543,7 +1599,15 @@ fn real_main() -> i32 {
             count = crashed.len(),
             "Found crashed sessions from a previous run"
         );
+        // User-facing counterpart to the crash-handler notice above: same
+        // style, printed to stderr so it survives the TUI taking over stdout.
+        if let Some(notice) = cf_shell::active_sessions::recovery_notice(&crashed) {
+            eprintln!("{notice}");
+            eprintln!();
+        }
     }
+    // Read-only hint about stale evolution proposals (if that tree exists).
+    report_stale_evolution_proposals(&cf_shell::util::grok_home::grok_home().join("evolution"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1636,7 +1700,7 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
                     println!(
-                        "qidiwork {}",
+                        "grok {}",
                         cf_version::display_version_with_commit(
                             env!("VERSION_WITH_COMMIT"),
                             cf_update::channel_label(),
@@ -1653,8 +1717,8 @@ async fn async_main() -> Result<()> {
                         "--no-leader"
                     };
                     anyhow::bail!(
-                        "顶层 {flag} 作用于 pager TUI，而非 agent 子命令。\
-                         请改用 `qidiwork agent {flag}`。"
+                        "top-level {flag} applies to the pager TUI, not the agent subcommand. \
+                         Use `grok-pager agent {flag}` instead."
                     );
                 }
                 enforce_minimum_version_or_exit(&update_config).await;
@@ -1820,7 +1884,7 @@ async fn async_main() -> Result<()> {
             None,
         );
         if let Some(warning) = launch_yolo.blocked_warning {
-            eprintln!("qidiwork: {warning}");
+            eprintln!("qidi: {warning}");
         }
         // B5: same launch-scoped YOLO allowlist + startup guard as the agent
         // subcommand path. Headless is unattended, so an unrestricted --yolo
@@ -1829,7 +1893,7 @@ async fn async_main() -> Result<()> {
         if let Some(msg) =
             cf_shell::util::config::yolo_launch_refusal(launch_yolo.yolo, args.ack_no_sandbox)
         {
-            eprintln!("qidiwork: {msg}");
+            eprintln!("qidi: {msg}");
             std::process::exit(1);
         }
         let json_schema = args
@@ -1862,6 +1926,7 @@ async fn async_main() -> Result<()> {
                 model: args.model,
                 rules: args.rules,
                 system_prompt_override: args.system_prompt_override.clone(),
+                session_kind: args.session_kind.clone(),
                 continue_last_session: args.continue_last_session,
                 fork_session: args.fork_session,
                 worktree: args.worktree,
@@ -1882,6 +1947,8 @@ async fn async_main() -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                no_memory: args.no_memory,
+                experimental_memory: args.experimental_memory,
             },
         )
         .await;
@@ -1913,9 +1980,9 @@ async fn async_main() -> Result<()> {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             if finish_update_on_exit(adopted, &update_config).await {
-                eprintln!("更新已安装。运行 `qidiwork` 启动。");
+                eprintln!("Update installed. Run `qidi` to start.");
             } else {
-                eprintln!("更新未完成。运行 `qidiwork update` 重试。");
+                eprintln!("Update did not complete. Run `qidi update` to retry.");
             }
             Ok(())
         }
@@ -1926,11 +1993,11 @@ async fn async_main() -> Result<()> {
 /// Complete the update after a quit-for-update (Ctrl+U) exit. Returns `true`
 /// when an update path completed without a reported failure.
 ///
-/// Prefers awaiting the parked waiter for the background `grok update` child
+/// Prefers awaiting the parked waiter for the background `qidi update` child
 /// spawned at startup — the download is usually already done or in flight.
 /// Only when there is no waiter (spawn failed, or no download was needed
 /// because the target was already on disk) or the child failed does this
-/// fall back to a fresh blocking `grok update`, which itself resolves to
+/// fall back to a fresh blocking `qidi update`, which itself resolves to
 /// "Already up to date" without downloading when the disk is current.
 async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
@@ -2076,7 +2143,7 @@ async fn run_update_command(
     }
     Ok(())
 }
-/// After a successful `grok update`, ask any running leader on this machine that
+/// After a successful `qidi update`, ask any running leader on this machine that
 /// is older than `installed_version` to relaunch onto the new binary (bounded
 /// grace; running sessions close and reconnect via `session/load`).
 ///
@@ -2149,9 +2216,9 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     struct TempHeapDump(std::path::PathBuf);
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     impl TempHeapDump {
         fn new(label: &str) -> Self {
             let path = std::env::temp_dir().join(format!(
@@ -2172,13 +2239,13 @@ mod tests {
             assert!(meta.len() > 0, "empty dump file");
         }
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     impl Drop for TempHeapDump {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     fn require_opt_prof() -> bool {
         if jemalloc_prof_available() {
             return true;
@@ -2190,16 +2257,16 @@ mod tests {
         );
         false
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     fn assert_prof_active(expected: bool) {
         assert_eq!(jemalloc_read_prof_active(), Some(expected));
     }
     /// Restores process-global `prof.active` on drop (panic-safe for serial tests).
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     struct ProfActiveGuard {
         previous: bool,
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     impl ProfActiveGuard {
         fn set(active: bool) -> Self {
             let previous = jemalloc_read_prof_active().unwrap_or(false);
@@ -2210,13 +2277,13 @@ mod tests {
             Self { previous }
         }
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     impl Drop for ProfActiveGuard {
         fn drop(&mut self) {
             let _ = jemalloc_set_prof_active(self.previous);
         }
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     fn assert_stats_sane(stats: cf_shell::heap_profile::JemallocStats) {
         assert!(stats.allocated > 0, "allocated={}", stats.allocated);
         assert!(stats.resident > 0, "resident={}", stats.resident);
@@ -2227,13 +2294,13 @@ mod tests {
             stats.allocated
         );
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     #[test]
     #[serial_test::serial(jemalloc_heap_profile)]
     fn jemalloc_stats_readable_after_epoch() {
         assert_stats_sane(jemalloc_heap_stats().expect("stats readable"));
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     #[test]
     #[serial_test::serial(jemalloc_heap_profile)]
     fn jemalloc_prof_active_round_trip_and_dump() {
@@ -2250,7 +2317,7 @@ mod tests {
         jemalloc_dump_to_path(dump.path()).expect("prof.dump");
         dump.assert_nonempty_dump();
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     #[test]
     #[serial_test::serial(jemalloc_heap_profile)]
     fn jemalloc_dump_rejects_interior_nul_path() {
@@ -2267,7 +2334,7 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-    #[cfg(all(feature = "jemalloc", unix))]
+    #[cfg(all(feature = "jemalloc", unix, not(target_os = "android")))]
     #[test]
     #[serial_test::serial(jemalloc_heap_profile)]
     fn install_heap_profile_hooks_wires_shell_apis() {
@@ -2318,7 +2385,7 @@ mod tests {
         );
     }
     use clap::Parser as _;
-    /// `grok dashboard` flags the startup hook without forcing leader mode —
+    /// `qidi dashboard` flags the startup hook without forcing leader mode —
     /// the dashboard is independent of leader mode, so the launch keeps
     /// whatever leader setting the user (or config) chose.
     #[serial_test::serial(QIDI_AGENT_DASHBOARD)]
@@ -2339,7 +2406,7 @@ mod tests {
         );
         unsafe { std::env::remove_var("QIDI_OPEN_DASHBOARD_AT_STARTUP") };
     }
-    /// `grok dashboard --no-leader` is allowed — the dashboard does not
+    /// `qidi dashboard --no-leader` is allowed — the dashboard does not
     /// require a leader, so the combination launches into the dashboard in
     /// non-leader mode.
     #[serial_test::serial(QIDI_AGENT_DASHBOARD)]
@@ -2930,5 +2997,97 @@ mod tests {
             Err("boom".to_string()),
             "Err output must pass through unchanged",
         );
+    }
+    /// Unique per-test temp directory, removed on drop (mirrors `TempHeapDump`).
+    struct TempEvolutionDir(std::path::PathBuf);
+    impl TempEvolutionDir {
+        fn new(label: &str) -> std::io::Result<Self> {
+            let path = std::env::temp_dir().join(format!(
+                "qidi-evolution-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+            std::fs::create_dir_all(&path)?;
+            Ok(Self(path))
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempEvolutionDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn days(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n * 24 * 60 * 60)
+    }
+    /// Write `name` under `dir` and backdate its mtime by `age`.
+    ///
+    /// Uses `File::set_modified` (stable since Rust 1.75) so no extra crate
+    /// (e.g. `filetime`) is needed.
+    fn write_backdated(
+        dir: &std::path::Path,
+        name: &str,
+        age: std::time::Duration,
+    ) -> std::io::Result<()> {
+        let path = dir.join(name);
+        std::fs::write(&path, b"{}")?;
+        let modified = std::time::SystemTime::now()
+            .checked_sub(age)
+            .ok_or_else(|| std::io::Error::other("age underflows SystemTime"))?;
+        let file = std::fs::File::options().write(true).open(&path)?;
+        file.set_modified(modified)
+    }
+    /// A missing tree (fresh install, no `~/.qidi/evolution/`) counts zero and
+    /// the reporting entry point must not panic.
+    #[test]
+    fn stale_proposals_missing_dir_is_silent() -> std::io::Result<()> {
+        let dir = TempEvolutionDir::new("missing")?;
+        // Remove the freshly created dir so the proposals tree truly is absent.
+        std::fs::remove_dir_all(dir.path())?;
+        let proposals = dir.path().join("proposals");
+        assert_eq!(count_stale_proposals(&proposals), 0);
+        report_stale_evolution_proposals(dir.path());
+        Ok(())
+    }
+    /// Directory present but empty (or json-free) counts zero and stays silent.
+    #[test]
+    fn stale_proposals_empty_or_json_free_counts_zero() -> std::io::Result<()> {
+        let dir = TempEvolutionDir::new("empty")?;
+        let proposals = dir.path().join("proposals");
+        std::fs::create_dir_all(&proposals)?;
+        assert_eq!(count_stale_proposals(&proposals), 0);
+        // Non-json entries and subdirectories must not be counted either.
+        std::fs::write(proposals.join("notes.txt"), b"hello")?;
+        std::fs::create_dir_all(proposals.join("nested"))?;
+        assert_eq!(count_stale_proposals(&proposals), 0);
+        report_stale_evolution_proposals(dir.path());
+        Ok(())
+    }
+    /// One 8-day-old `.json` plus a fresh `.json` → exactly one stale.
+    #[test]
+    fn stale_proposals_counts_only_old_json() -> std::io::Result<()> {
+        let dir = TempEvolutionDir::new("count")?;
+        let proposals = dir.path().join("proposals");
+        std::fs::create_dir_all(&proposals)?;
+        write_backdated(&proposals, "old.json", days(8))?;
+        write_backdated(&proposals, "fresh.json", days(0))?;
+        assert_eq!(count_stale_proposals(&proposals), 1);
+        Ok(())
+    }
+    /// Old non-`.json` files are ignored — only the extension gate decides.
+    #[test]
+    fn stale_proposals_ignores_old_non_json() -> std::io::Result<()> {
+        let dir = TempEvolutionDir::new("nonjson")?;
+        let proposals = dir.path().join("proposals");
+        std::fs::create_dir_all(&proposals)?;
+        write_backdated(&proposals, "old.txt", days(30))?;
+        write_backdated(&proposals, "old.json.bak", days(30))?;
+        assert_eq!(count_stale_proposals(&proposals), 0);
+        Ok(())
     }
 }

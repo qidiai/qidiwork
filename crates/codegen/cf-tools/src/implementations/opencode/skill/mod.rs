@@ -17,12 +17,11 @@ use crate::types::tool::{ToolKind, ToolNamespace};
 
 const DESCRIPTION: &str = r#"Load a specialized skill that provides domain-specific instructions and workflows.
 
-When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.
+When you recognize that a task matches an available skill, use this tool to load the full skill instructions.
 
 The skill will inject detailed instructions, workflows, and access to bundled resources into the conversation via a `<skill_content name="...">` block with the loaded content.
 
-The following skills provide specialized sets of instructions for particular tasks.
-Invoke this tool to load a skill when a task matches one of the available skills listed below:
+Skill names are provided in the session's available-skills reminder. If the `<available_skills>` block below lists skills, it is authoritative; otherwise use the names from the reminder (or the `find-skills` skill to discover one).
 
 <available_skills>
 ${%- if skills %}
@@ -34,7 +33,7 @@ ${%- for skill in skills %}
   </skill>
 ${%- endfor %}
 ${%- else %}
-(No skills available. Skills can be added in ~/.qidi/skills/ or .qidi/skills/)
+(No inline list here; use the skill names from the session's available-skills reminder.)
 ${%- endif %}
 </available_skills>"#;
 
@@ -117,6 +116,19 @@ fn find_skill<'a>(name: &str, skills: &'a [SkillInfo]) -> FindSkillResult<'a> {
             FindSkillResult::Ambiguous(qualified)
         }
     }
+}
+
+/// Whether the subagent gate denies this invocation name.
+///
+/// Denylist entries are frontmatter names (`"qwen-image-lowvram"`, `"bid-"`),
+/// while the tool also accepts scoped names (`"user:qwen-image-lowvram"`, or
+/// `"<plugin>:<skill>"` for plugin skills). Checking the bare tail as well
+/// keeps a qualified call from slipping past the gate.
+fn denied_by_gate(gate: &crate::types::skill_discovery_tracker::SubagentSkillDenylist, name: &str) -> bool {
+    gate.denies(name)
+        || name
+            .rsplit_once(':')
+            .is_some_and(|(_, bare)| !bare.is_empty() && gate.denies(bare))
 }
 
 /// Load skill content from its SKILL.md file, stripping YAML frontmatter.
@@ -246,13 +258,20 @@ impl cf_tool_runtime::Tool for SkillTool {
         let resources = shared_resources(&ctx)?;
 
         let available_skills;
+        let denylist;
         {
-            available_skills = resources
-                .lock()
-                .await
+            let guard = resources.lock().await;
+            available_skills = guard
                 .get::<AvailableSkills>()
                 .map(|a| a.0.clone())
                 .unwrap_or_default();
+            // F2S gate, installed by `ToolBridge::subagent_skill_listing` on the
+            // subagent path only. The denied skills are absent from
+            // `available_skills` by construction, so this is what lets a
+            // denial be told apart from a genuinely unknown name.
+            denylist = guard
+                .get::<crate::types::skill_discovery_tracker::SubagentSkillDenylist>()
+                .cloned();
         }
 
         // ── Look up the skill ────────────────────────────────────────
@@ -277,6 +296,31 @@ impl cf_tool_runtime::Tool for SkillTool {
                 });
             }
             FindSkillResult::NotFound => {
+                // A denied skill is filtered out of `available_skills` before
+                // the tool ever sees it. Report the policy denial explicitly:
+                // "not found" sent agents hunting for a typo (or re-installing
+                // a skill that exists) instead of asking the main session.
+                if denylist
+                    .as_ref()
+                    .is_some_and(|gate| denied_by_gate(gate, &input.name))
+                {
+                    return Ok(SkillOutput {
+                        success: false,
+                        tool_result: format!(
+                            "Skill \"{}\" is denied by policy in this subagent session. It is \
+                             not missing: the skill is blocked by \
+                             `[skills].subagent_denied_skills`. Ask the main session to run it, \
+                             or have the user remove it from that setting.",
+                            input.name
+                        ),
+                        skill_name: input.name.clone(),
+                        skill_message: None,
+                        error: Some(format!(
+                            "Skill \"{}\" denied by policy (subagent_denied_skills)",
+                            input.name
+                        )),
+                    });
+                }
                 let names: Vec<&str> = available_skills.iter().map(|s| s.name.as_str()).collect();
                 let available = if names.is_empty() {
                     "none".to_string()
@@ -377,6 +421,11 @@ mod tests {
         assert!(desc.contains("available_skills"));
         assert!(desc.contains("${%- for skill in skills %}"));
         assert!(desc.contains("${{ skill.name }}"));
+        assert!(
+            !desc.contains("No skills available"),
+            "must not claim there are no skills when the session reminder carries them"
+        );
+        assert!(desc.contains("session's available-skills reminder"));
     }
 
     #[test]
@@ -521,6 +570,94 @@ mod tests {
         assert!(!output.success);
         assert!(output.tool_result.contains("not found"));
         assert!(output.tool_result.contains("none"));
+    }
+
+    /// Regression (BUG-2): the F2S gate removes denied skills from the runtime
+    /// set, so the tool used to report them as "not found" -- identical to a
+    /// typo. With the gate resource in scope the denial must be explicit.
+    #[tokio::test]
+    async fn skill_denied_by_policy_is_not_reported_as_missing() {
+        use crate::types::skill_discovery_tracker::SubagentSkillDenylist;
+
+        for denied_name in [
+            // Exact entry from the built-in set.
+            "qwen-image-lowvram",
+            // Scoped call: the gate matches on the bare skill name.
+            "user:qwen-image-lowvram",
+            // Prefix family (`bid-`).
+            "bid-write",
+        ] {
+            let mut resources = Resources::new();
+            resources.insert(AvailableSkills(vec![make_test_skill(
+                "check-work",
+                SkillScope::User,
+                "/path/a",
+            )]));
+            resources.insert(SubagentSkillDenylist::default());
+
+            let output = cf_tool_runtime::Tool::run(
+                &SkillTool,
+                test_ctx(resources.into_shared()),
+                SkillInput {
+                    name: denied_name.into(),
+                },
+            )
+            .await
+            .unwrap();
+
+            assert!(!output.success, "{denied_name} must not load");
+            assert!(
+                output.tool_result.contains("denied by policy"),
+                "{denied_name}: {}",
+                output.tool_result
+            );
+            assert!(
+                !output.tool_result.contains("not found"),
+                "{denied_name} must not be reported as missing: {}",
+                output.tool_result
+            );
+            assert!(
+                output
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("denied by policy")),
+                "{denied_name}: {:?}",
+                output.error
+            );
+        }
+    }
+
+    /// The gate must not turn every unknown name into a denial: a name outside
+    /// the deny-list still reports the ordinary not-found message.
+    #[tokio::test]
+    async fn unknown_skill_still_reports_not_found_with_a_gate_in_scope() {
+        use crate::types::skill_discovery_tracker::SubagentSkillDenylist;
+
+        let mut resources = Resources::new();
+        resources.insert(AvailableSkills(vec![make_test_skill(
+            "check-work",
+            SkillScope::User,
+            "/path/a",
+        )]));
+        resources.insert(SubagentSkillDenylist::default());
+
+        let output = cf_tool_runtime::Tool::run(
+            &SkillTool,
+            test_ctx(resources.into_shared()),
+            SkillInput {
+                name: "no-such-skill".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.success);
+        assert!(
+            output.tool_result.contains("not found"),
+            "{}",
+            output.tool_result
+        );
+        assert!(!output.tool_result.contains("denied by policy"));
     }
 
     #[tokio::test]

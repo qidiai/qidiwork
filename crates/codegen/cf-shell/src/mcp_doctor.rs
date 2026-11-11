@@ -1,4 +1,4 @@
-//! `grok mcp doctor` -- runtime health check for MCP servers.
+//! `qidi mcp doctor` -- runtime health check for MCP servers.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -238,9 +238,9 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     (sources, servers)
 }
 
-// ── Managed (QIDI) server discovery ─────────────────────────
+// ── Managed (grok.com) server discovery ─────────────────────────
 
-const MANAGED_SOURCE_LABEL: &str = "QIDI";
+const MANAGED_SOURCE_LABEL: &str = "qidiai.ltd";
 
 fn managed_skipped(reason: impl Into<String>) -> (ConfigSourceStatus, Vec<DiscoveredServer>) {
     (
@@ -284,7 +284,7 @@ async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredSe
 
     let token = match auth_manager.get_valid_token().await {
         Ok(key) => key,
-        Err(_) => return managed_skipped("登录已过期，请运行 `qidiwork login`"),
+        Err(_) => return managed_skipped("auth expired — run `qidi login`"),
     };
 
     let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
@@ -551,13 +551,13 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
 
     let disabled_names = crate::util::config::disabled_mcp_server_names(cwd);
 
-    // Folder-trust gate: `grok mcp doctor` actually STARTS each server
+    // Folder-trust gate: `qidi mcp doctor` actually STARTS each server
     // (`check_server_start`), so in an untrusted clone it would spawn the repo's
     // project-scoped servers. Resolve the doctor cwd once (no prompt), then skip
     // (do not start) any project-scoped server when untrusted. Reuses the same
     // name primitive as the session/agent-pool gates.
     //
-    // `remote = None` is intentional: standalone `grok mcp doctor` has no loaded
+    // `remote = None` is intentional: standalone `qidi mcp doctor` has no loaded
     // `RemoteSettings`, so a remote-only org `folder_trust_enabled = false`
     // opt-out isn't seen here — gating conservatively (treating the feature as
     // enabled) is the deliberate fail-secure direction. Local env/user/managed
@@ -656,8 +656,8 @@ pub fn print_report(report: &DoctorReport) {
     println!();
 
     if report.servers.is_empty() {
-        println!("  未配置 MCP 服务器。");
-        println!("  可运行 `qidiwork mcp add --help` 开始。");
+        println!("  No MCP servers configured.");
+        println!("  Run `qidi mcp add --help` to get started.");
         println!();
         return;
     }
@@ -687,7 +687,7 @@ pub fn print_report(report: &DoctorReport) {
         report.healthy_count,
         report.failing_count,
         if report.failing_count > 0 {
-            " 可运行 `qidiwork mcp doctor --json` 查看完整诊断。"
+            " Run `qidi mcp doctor --json` for full diagnostics."
         } else {
             ""
         }

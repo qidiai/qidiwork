@@ -20,6 +20,7 @@ pub mod effort;
 pub mod effort_levels;
 pub mod exit;
 pub mod expand;
+pub mod evolution;
 pub mod export;
 pub mod feedback;
 pub mod find;
@@ -100,6 +101,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(plugin::PluginsCommand),
         Arc::new(plugin::MarketplaceCommand),
         Arc::new(plugin::SkillsCommand),
+        Arc::new(evolution::EvolutionCommand),
         Arc::new(share::ShareCommand),
         Arc::new(session_info::SessionInfoCommand),
         Arc::new(rename::RenameCommand),
@@ -477,7 +479,7 @@ mod tests {
     fn usage_manage_returns_open_url() {
         match run_usage("manage") {
             CommandResult::Action(Action::OpenUrl(url)) => {
-                assert_eq!(url, "https://www.qidiai.ltd");
+                assert_eq!(url, "https://qidiai.ltd/?_s=usage");
             }
             other => panic!("expected Action(OpenUrl), got {other:?}"),
         }
@@ -509,7 +511,7 @@ mod tests {
     fn usage_manage_with_leading_whitespace() {
         match run_usage("  manage  ") {
             CommandResult::Action(Action::OpenUrl(url)) => {
-                assert_eq!(url, "https://www.qidiai.ltd");
+                assert_eq!(url, "https://qidiai.ltd/?_s=usage");
             }
             other => panic!("expected Action(OpenUrl), got {other:?}"),
         }

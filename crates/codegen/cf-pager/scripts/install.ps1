@@ -1,14 +1,22 @@
 #
-# Grok CLI installer for PowerShell — https://qidiwork.qidiai.ltd/cli/install.ps1
+# QIDI Code CLI installer for PowerShell — https://x.ai/cli/install.ps1
 #
 # Auth: GROK_DEPLOYMENT_KEY env var (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL
+# Env: QIDI_CHANNEL (stable|alpha|enterprise, default: stable), QIDI_BIN_DIR, QIDI_PROXY_URL
+#
+# Env naming domains (authoritative contract: scripts/README.md):
+#   Installer scripts read the QIDI_* domain only (QIDI_CHANNEL,
+#   QIDI_BIN_DIR, QIDI_PROXY_URL). The running CLI reads the GROK_*
+#   domain (GROK_DEPLOYMENT_KEY, GROK_VERSION, ...). The only
+#   crossings are retained contract points: GROK_DEPLOYMENT_KEY
+#   (enterprise installer auth) and GROK_VERSION (ps1 version
+#   input). ~/.grok stays the runtime home regardless of QIDI_BIN_DIR.
 #
 # Usage:
-#   irm https://qidiwork.qidiai.ltd/cli/install.ps1 | iex                                       # latest stable
-#   & ([scriptblock]::Create((irm https://qidiwork.qidiai.ltd/cli/install.ps1))) -Version 0.1.42 # specific version
-#   $env:GROK_VERSION="0.1.42"; irm https://qidiwork.qidiai.ltd/cli/install.ps1 | iex           # specific version (alt)
-#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://qidiwork.qidiai.ltd/cli/install.ps1 | iex
+#   irm https://x.ai/cli/install.ps1 | iex                                       # latest stable
+#   & ([scriptblock]::Create((irm https://x.ai/cli/install.ps1))) -Version 0.1.42 # specific version
+#   $env:GROK_VERSION="0.1.42"; irm https://x.ai/cli/install.ps1 | iex           # specific version (alt)
+#   $env:GROK_DEPLOYMENT_KEY="<key>"; irm https://x.ai/cli/install.ps1 | iex
 #
 
 param(
@@ -31,7 +39,7 @@ if (-not $Version -and $env:GROK_VERSION) {
 
 # This script is Windows-only. PS 5.1 has no Platform property and only runs on Windows.
 if ($PSVersionTable.Platform -and $PSVersionTable.Platform -ne 'Win32NT') {
-    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://qidiwork.qidiai.ltd/cli/install.sh | bash"
+    Write-Error "This installer is for Windows. On macOS/Linux, use: curl -fsSL https://x.ai/cli/install.sh | bash"
     exit 1
 }
 
@@ -110,7 +118,7 @@ if ($Version -and $Version -notmatch '^\d+\.\d+\.\d+(-\S+)?$') {
 
 # --- Resolve auth ---
 
-$OidcScope = 'https://api.qidiai.ltd::qidi-code'
+$OidcScope = 'https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828'
 $LegacyScope = 'https://accounts.x.ai/sign-in'
 $AuthSource = ''
 
@@ -147,15 +155,15 @@ $platform = "windows-$arch"
 
 # --- Resolve version and channel ---
 
-$BaseUrlPrimary = 'https://qidiwork.qidiai.ltd/cli'
-$BaseUrlFallback = 'https://qidiwork.qidiai.ltd/cli'
+$BaseUrlPrimary = 'https://x.ai/cli'
+$BaseUrlFallback = 'https://storage.googleapis.com/grok-build-public-artifacts/cli'
 $DownloadDir = Join-Path $GrokDir 'downloads'
-$BinDir = if ($env:GROK_BIN_DIR) { $env:GROK_BIN_DIR } else { Join-Path $GrokDir 'bin' }
+$BinDir = if ($env:QIDI_BIN_DIR) { $env:QIDI_BIN_DIR } else { Join-Path $GrokDir 'bin' }
 
 New-Item -ItemType Directory -Path $DownloadDir -Force | Out-Null
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 
-$Channel = if ($env:GROK_CHANNEL) { $env:GROK_CHANNEL } else { 'stable' }
+$Channel = if ($env:QIDI_CHANNEL) { $env:QIDI_CHANNEL } else { 'stable' }
 
 # Pick a working BaseUrl: try Cloudflare-fronted x.ai first, fall back to
 # direct GCS if it's unreachable. The probe doubles as the channel-pointer
@@ -180,9 +188,9 @@ if ($Version) {
 }
 
 if ($AuthSource) {
-    Write-Host "Installing Grok $resolvedVersion ($platform, $AuthSource)..." -ForegroundColor Cyan
+    Write-Host "Installing QIDI Code $resolvedVersion ($platform, $AuthSource)..." -ForegroundColor Cyan
 } else {
-    Write-Host "Installing Grok $resolvedVersion ($platform)..." -ForegroundColor Cyan
+    Write-Host "Installing QIDI Code $resolvedVersion ($platform)..." -ForegroundColor Cyan
 }
 
 # --- Download binary ---
@@ -281,7 +289,7 @@ if (-not (Test-Path $ConfigFile)) {
 # --- Fetch deployment config (deployment key only) ---
 
 if ($env:GROK_DEPLOYMENT_KEY) {
-    $ProxyUrl = if ($env:GROK_PROXY_URL) { $env:GROK_PROXY_URL } else { 'https://api.qidiai.ltd/v1' }
+    $ProxyUrl = if ($env:QIDI_PROXY_URL) { $env:QIDI_PROXY_URL } else { 'https://api.qidiai.ltd/v1' }
     Write-Host '  Fetching deployment config...' -ForegroundColor DarkGray
     try {
         $headers = @{ 'Authorization' = "Bearer $($env:GROK_DEPLOYMENT_KEY)" }
@@ -314,7 +322,7 @@ if ($env:GROK_DEPLOYMENT_KEY) {
     }
 }
 
-Write-Host "Grok $resolvedVersion installed to $BinDir\grok.exe" -ForegroundColor Green
+Write-Host "QIDI Code $resolvedVersion installed to $BinDir\grok.exe" -ForegroundColor Green
 
 # --- Ensure grok is on PATH ---
 

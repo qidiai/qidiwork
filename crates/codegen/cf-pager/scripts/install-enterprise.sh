@@ -1,18 +1,26 @@
 #!/bin/bash
 #
-# Grok CLI installer (enterprise channel) — https://qidiwork.qidiai.ltd/cli/enterprise-install.sh
+# QIDI Code CLI installer (enterprise channel) — https://x.ai/cli/enterprise-install.sh
 #
 # Standalone installer for the enterprise channel. This is intentionally a full
 # copy of the install logic (not a wrapper around install.sh) so that changes to
 # the stable installer cannot accidentally break enterprise deployments.
 #
 # Auth: GROK_DEPLOYMENT_KEY (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_BIN_DIR, GROK_PROXY_URL
+# Env: QIDI_BIN_DIR, QIDI_PROXY_URL
+#
+# Env naming domains (authoritative contract: scripts/README.md):
+#   Installer scripts read the QIDI_* domain only (QIDI_BIN_DIR,
+#   QIDI_PROXY_URL). The running CLI reads the GROK_* domain
+#   (GROK_DEPLOYMENT_KEY, GROK_VERSION, ...). The only crossings
+#   are retained contract points: GROK_DEPLOYMENT_KEY (enterprise
+#   installer auth) and GROK_VERSION (ps1 version input).
+#   ~/.grok stays the runtime home regardless of QIDI_BIN_DIR.
 #
 # Usage:
-#   curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash            # latest enterprise
-#   curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh | bash -s 0.1.42  # specific version
-#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://qidiwork.qidiai.ltd/cli/enterprise-install.sh)
+#   curl -fsSL https://x.ai/cli/enterprise-install.sh | bash            # latest enterprise
+#   curl -fsSL https://x.ai/cli/enterprise-install.sh | bash -s 0.1.42  # specific version
+#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://x.ai/cli/enterprise-install.sh)
 #
 # Windows: run under Git for Windows / MSYS2 Bash (same curl | bash flow); WSL
 # uses the Linux binary.
@@ -122,7 +130,7 @@ read_grok_token() {
 }
 
 # Resolve auth: GROK_DEPLOYMENT_KEY > OIDC token > legacy token
-OIDC_SCOPE="https://api.qidiai.ltd::qidi-code"
+OIDC_SCOPE="https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
 LEGACY_SCOPE="https://accounts.x.ai/sign-in"
 AUTH_SOURCE=""
 
@@ -155,10 +163,10 @@ case "$(uname -m)" in
     *)                    echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-BASE_URL_PRIMARY="https://qidiwork.qidiai.ltd/cli"
-BASE_URL_FALLBACK="https://qidiwork.qidiai.ltd/cli"
+BASE_URL_PRIMARY="https://x.ai/cli"
+BASE_URL_FALLBACK="https://storage.googleapis.com/grok-build-public-artifacts/cli"
 DOWNLOAD_DIR="$HOME/.grok/downloads"
-BIN_DIR="${GROK_BIN_DIR:-$HOME/.grok/bin}"
+BIN_DIR="${QIDI_BIN_DIR:-$HOME/.grok/bin}"
 mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 
 platform="${os}-${arch}"
@@ -194,9 +202,9 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?$ ]]; then
 fi
 
 if [ -n "$AUTH_SOURCE" ]; then
-    echo "Installing Grok $version ($platform, $AUTH_SOURCE)..." >&2
+    echo "Installing QIDI Code $version ($platform, $AUTH_SOURCE)..." >&2
 else
-    echo "Installing Grok $version ($platform)..." >&2
+    echo "Installing QIDI Code $version ($platform)..." >&2
 fi
 
 binary_path="$DOWNLOAD_DIR/grok-$platform"
@@ -206,23 +214,31 @@ if [ "$os" = "windows" ]; then
     binary_path="${binary_path}.exe"
 fi
 
-echo "  Downloading grok ${version}..." >&2
+# Download to a sibling .tmp.$$ file first so a failed/corrupt
+# fetch never destroys the previous install (atomic promote via mv,
+# mirroring install.sh). On POSIX the downloaded binary is also
+# executed once (--version) before promotion: a garbage or truncated
+# artifact is rejected while the existing install stays active.
+binary_tmp="${binary_path}.tmp.$$"
+rm -f "$binary_tmp" 2>/dev/null || true
+
+echo "  Downloading QIDI Code ${version}..." >&2
 if [ "$os" = "windows" ]; then
-    if ! download_file_parallel "${artifact_base}.exe" "$binary_path"; then
-        if ! download_file_parallel "$artifact_base" "$binary_path"; then
-            rm -f "$binary_path"
+    if ! download_file_parallel "${artifact_base}.exe" "$binary_tmp"; then
+        if ! download_file_parallel "$artifact_base" "$binary_tmp"; then
+            rm -f "$binary_tmp"
             if is_not_found "${artifact_base}.exe"; then
-                echo "Error: Grok is not yet available for your system ($platform)." >&2
+                echo "Error: QIDI Code is not yet available for your system ($platform)." >&2
             else
                 echo "Error: binary download failed (${artifact_base}.exe and ${artifact_base})" >&2
             fi
             exit 1
         fi
     fi
-elif ! download_file_parallel "$artifact_base" "$binary_path"; then
-    rm -f "$binary_path"
+elif ! download_file_parallel "$artifact_base" "$binary_tmp"; then
+    rm -f "$binary_tmp"
     if is_not_found "$artifact_base"; then
-        echo "Error: Grok is not yet available for your system ($platform)." >&2
+        echo "Error: QIDI Code is not yet available for your system ($platform)." >&2
     else
         echo "Error: binary download failed from ${artifact_base}" >&2
     fi
@@ -230,6 +246,7 @@ elif ! download_file_parallel "$artifact_base" "$binary_path"; then
 fi
 
 if [ "$os" = "windows" ]; then
+    mv -f "$binary_tmp" "$binary_path"
     # Symlinks require Developer Mode on Windows; copy instead.
     # If the exe is locked by a running process, rename it aside then retry.
     for bin_name in grok.exe agent.exe; do
@@ -246,7 +263,13 @@ if [ "$os" = "windows" ]; then
     done
     echo "  Binary installed to $BIN_DIR/grok.exe and $BIN_DIR/agent.exe." >&2
 else
-    chmod +x "$binary_path"
+    chmod +x "$binary_tmp"
+    if ! "$binary_tmp" --version </dev/null >/dev/null 2>&1; then
+        echo "Error: downloaded grok failed to run; keeping the existing install." >&2
+        rm -f "$binary_tmp"
+        exit 1
+    fi
+    mv -f "$binary_tmp" "$binary_path"
     ln -sf "$binary_path" "$BIN_DIR/grok"
     ln -sf "$binary_path" "$BIN_DIR/agent"
     echo "  Binary linked to $BIN_DIR/grok and $BIN_DIR/agent." >&2
@@ -280,7 +303,7 @@ fi
 
 # Fetch managed_config.toml + requirements.toml from server (deployment key only).
 if [ -n "$GROK_DEPLOYMENT_KEY" ]; then
-    PROXY_URL="${GROK_PROXY_URL:-https://api.qidiai.ltd/v1}"
+    PROXY_URL="${QIDI_PROXY_URL:-https://api.qidiai.ltd/v1}"
     echo "  Fetching deployment config..." >&2
     DEPLOY_RESPONSE=""
     AUTH_HEADER_FILE=$(mktemp 2>/dev/null) || AUTH_HEADER_FILE=""
@@ -315,9 +338,9 @@ if [ -n "$GROK_DEPLOYMENT_KEY" ]; then
 fi
 
 if [ "$os" = "windows" ]; then
-    echo "Grok $version installed to $BIN_DIR/grok.exe" >&2
+    echo "QIDI Code $version installed to $BIN_DIR/grok.exe" >&2
 else
-    echo "Grok $version installed to $BIN_DIR/grok" >&2
+    echo "QIDI Code $version installed to $BIN_DIR/grok" >&2
 fi
 
 # --- Ensure grok is on PATH ---

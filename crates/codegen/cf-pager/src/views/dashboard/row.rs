@@ -714,6 +714,19 @@ fn top_level_subtitle(agent: &AgentView) -> Option<String> {
     if is_worktree {
         parts.push("worktree".to_string());
     }
+    // F8: when this session was dispatched from the dashboard with an
+    // explicit agent type (`/agent <name>` staging), surface it as the
+    // trailing subtitle part (e.g. `main qidicode explore`). `None` for
+    // every non-dashboard dispatch — those rows render byte-identical to
+    // pre-F8.
+    if let Some(agent_type) = agent
+        .dispatch_agent_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        parts.push(sanitize(agent_type));
+    }
     Some(parts.join(" "))
 }
 /// Compose the dim "last tool / message" line painted directly below
@@ -1805,6 +1818,36 @@ mod tests {
         agent.is_worktree = false;
         agent.current_branch = None;
         assert_eq!(top_level_subtitle(&agent).as_deref(), Some("bar"));
+    }
+    /// F8/P3: a dashboard dispatch with a staged agent type surfaces it as
+    /// the trailing subtitle part.
+    #[test]
+    fn subtitle_appends_staged_agent_type() {
+        let mut agent = make_idle_agent_with_model(None);
+        agent.session.cwd = PathBuf::from("/home/me/projects/bar");
+        agent.is_worktree = false;
+        agent.current_branch = None;
+        agent.dispatch_agent_type = Some("explore".to_string());
+        assert_eq!(
+            top_level_subtitle(&agent).as_deref(),
+            Some("bar explore"),
+            "staged agent type must be the trailing subtitle part"
+        );
+    }
+    /// F8/P3: with no staged type the subtitle is byte-identical to the
+    /// pre-F8 format (no extra separator or trailing space).
+    #[test]
+    fn subtitle_without_staged_agent_type_is_byte_identical() {
+        let mut agent = make_idle_agent_with_model(None);
+        agent.session.cwd = PathBuf::from("/home/me/projects/bar");
+        agent.is_worktree = false;
+        agent.current_branch = Some("main".to_string());
+        agent.dispatch_agent_type = None;
+        assert_eq!(
+            top_level_subtitle(&agent).as_deref(),
+            Some("main bar"),
+            "None must render byte-identically to pre-F8"
+        );
     }
     /// The `[bg]` badge reflects RUNNING background tasks only —
     /// `bg_tasks` retains finished (`Done` / `Failed`) tasks for the

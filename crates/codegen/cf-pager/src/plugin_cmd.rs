@@ -1,4 +1,4 @@
-//! `qidiwork plugin` CLI subcommand — manage plugins and marketplace sources.
+//! `qidi plugin` CLI subcommand — manage plugins and marketplace sources.
 //!
 //! Follows the `memory_cmd.rs` / `sessions_cmd.rs` / `worktree_cmd` pattern:
 //! clap args and handler logic co-located in a dedicated module. The pager's
@@ -10,8 +10,6 @@
 //! telemetry.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Subcommand;
@@ -25,7 +23,7 @@ use cf_shell::plugin::{self, RepoUpdateOutcome, UninstallError};
 
 // ── JSON output types ───────────────────────────────────────────────
 
-/// Typed entry for `qidiwork plugin list --json`. The `status` field acts as a
+/// Typed entry for `qidi plugin list --json`. The `status` field acts as a
 /// discriminator: `"installed"` entries have repo/path fields, `"available"`
 /// entries have description/component fields.
 #[derive(Serialize)]
@@ -53,7 +51,7 @@ enum PluginEntry {
     },
 }
 
-/// Typed entry for `qidiwork plugin marketplace list --json`.
+/// Typed entry for `qidi plugin marketplace list --json`.
 #[derive(Serialize)]
 struct MarketplaceSourceEntry {
     name: String,
@@ -108,7 +106,7 @@ pub enum PluginCommand {
     /// Uninstall an installed plugin by name
     #[command(visible_alias = "rm", visible_alias = "remove")]
     Uninstall {
-        /// Plugin name (as shown by `qidiwork plugin list`).
+        /// Plugin name (as shown by `qidi plugin list`).
         name: String,
         /// Skip confirmation for multi-plugin repos.
         #[arg(long)]
@@ -231,94 +229,8 @@ fn trust_prompt(subject: &str, source_arg: &str) -> String {
         "Installing {subject} requires confirmation.\n\
          Plugins can run hooks, MCP servers, and skills on your machine, so installation needs explicit trust.\n\
          \n\
-         To proceed, re-run with --trust:\n  qidiwork plugin install {source_arg} --trust"
+         To proceed, re-run with --trust:\n  qidi plugin install {source_arg} --trust"
     )
-}
-
-// ---- Marketplace network timeout ------------------------------------
-//
-// NOTE: every line added to this file must be pure ASCII. The Chinese
-// user-facing timeout text required by the spec is therefore written with
-// `\u{..}` escapes: ASCII source, UTF-8 runtime string. The unit tests below
-// pin that string byte-for-byte so the escapes cannot silently drift.
-//
-// Where the clone actually happens: `marketplace add` itself never touches the
-// network (it only appends a source to config.toml); the git clone/fetch/reset
-// lives in `cf_plugin_marketplace::git` (git2 fast path, `git` CLI fallback)
-// and is reached from this file through the marketplace source sync used by
-// `plugin list --available` and `marketplace update`. Those helpers are
-// blocking with no cancellation hook, so the timeout is applied by running
-// them on a worker thread and waiting with `recv_timeout`: on timeout the
-// worker keeps running detached, but the user gets an actionable error instead
-// of a CLI that hangs forever.
-
-/// Hard budget for one marketplace source network operation.
-const MARKETPLACE_NET_TIMEOUT_SECS: u64 = 30;
-
-/// Spec timeout text (see the ASCII note above).
-fn marketplace_timeout_message() -> String {
-    "\u{5e02}\u{573a}\u{6e90}\u{8fde}\u{63a5}\u{8d85}\u{65f6}(30s)\u{ff0c}\u{8bf7}\u{68c0}\u{67e5}\u{7f51}\u{7edc}\u{6216}\u{66f4}\u{6362}\u{56fd}\u{5185}\u{955c}\u{50cf}\u{6e90}".to_string()
-}
-
-/// How a `recv_timeout` wait failed.
-#[derive(Debug, PartialEq, Eq)]
-enum WaitOutcome {
-    /// Budget elapsed; the worker is still running (detached).
-    TimedOut,
-    /// The worker dropped its sender without sending (panicked).
-    Aborted,
-}
-
-/// Pure mapping of a `recv_timeout` error onto [`WaitOutcome`]; free of I/O so
-/// the decision logic is unit-testable on its own.
-fn classify_wait_error(err: &RecvTimeoutError) -> WaitOutcome {
-    match err {
-        RecvTimeoutError::Timeout => WaitOutcome::TimedOut,
-        RecvTimeoutError::Disconnected => WaitOutcome::Aborted,
-    }
-}
-
-/// Run a blocking marketplace network operation on a worker thread, waiting at
-/// most `timeout`. `op` is only used to label log lines.
-fn run_marketplace_net_op_with_timeout<T, F>(
-    timeout: Duration,
-    op: &str,
-    f: F,
-) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(f());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(e) => match classify_wait_error(&e) {
-            WaitOutcome::TimedOut => {
-                tracing::warn!(
-                    op,
-                    timeout_secs = timeout.as_secs(),
-                    "marketplace network op timed out"
-                );
-                Err(marketplace_timeout_message())
-            }
-            WaitOutcome::Aborted => {
-                tracing::warn!(op, "marketplace network op worker aborted");
-                Err(format!("{op}: marketplace worker aborted before returning"))
-            }
-        },
-    }
-}
-
-/// [`run_marketplace_net_op_with_timeout`] with the default budget.
-fn run_marketplace_net_op<T, F>(op: &str, f: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    run_marketplace_net_op_with_timeout(Duration::from_secs(MARKETPLACE_NET_TIMEOUT_SECS), op, f)
 }
 
 // ── Top-level dispatch ──────────────────────────────────────────────
@@ -360,7 +272,7 @@ fn cmd_list(json: bool, available: bool) -> Result<()> {
         }
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if repos.is_empty() {
-        println!("No plugins installed. Run `qidiwork plugin install --help` to get started.");
+        println!("No plugins installed. Run `qidi plugin install --help` to get started.");
     } else {
         for (repo_key, repo) in &repos {
             let mp = repo
@@ -465,22 +377,14 @@ fn resolve_marketplace_root(
         SourceKind::Local { path } if path.is_dir() => Some((path.clone(), None)),
         SourceKind::Git { url, branch } => {
             let cache = cf_plugin_marketplace::git::default_cache_root();
-            let url_owned = url.clone();
-            let branch_owned = branch.clone();
-            run_marketplace_net_op("plugin list --available source sync", move || {
-                cf_plugin_marketplace::git::sync_source_cache_with_mode(
-                    &url_owned,
-                    branch_owned.as_deref(),
-                    &cache,
-                    cf_plugin_marketplace::git::SyncMode::UseTtl,
-                )
-                .map(|lease| (lease.path.clone(), Some(lease)))
-                .map_err(|e| format!("failed to sync marketplace {url_owned}: {e}"))
-            })
-            .map_err(|e| {
-                eprintln!("marketplace source {url} sync failed: {e}");
-                tracing::warn!("failed to sync marketplace {url}: {e}");
-            })
+            cf_plugin_marketplace::git::sync_source_cache_with_mode(
+                url,
+                branch.as_deref(),
+                &cache,
+                cf_plugin_marketplace::git::SyncMode::UseTtl,
+            )
+            .map(|lease| (lease.path.clone(), Some(lease)))
+            .map_err(|e| tracing::warn!("failed to sync marketplace {url}: {e}"))
             .ok()
         }
         _ => None,
@@ -591,7 +495,7 @@ fn cmd_install_marketplace(
                     .unwrap_or(&mref.name);
                 println!(
                     "Plugin \"{}\" is already installed from {}. \
-                     Run `qidiwork plugin update {}` to update it.",
+                     Run `qidi plugin update {}` to update it.",
                     mref.name, outcome.source_display_name, update_name,
                 );
                 return Ok(());
@@ -646,7 +550,7 @@ fn cmd_uninstall(name: &str, confirm: bool, keep_data: bool) -> Result<()> {
             "Plugin \"{name}\" belongs to repo \"{repo_key}\" which also contains:\n\
              {}\n\n\
              Uninstalling will remove all {total} plugin(s). To proceed:\n\
-               qidiwork plugin uninstall {name} --confirm",
+               qidi plugin uninstall {name} --confirm",
             other_plugins
                 .iter()
                 .map(|p| format!("  - {p}"))
@@ -700,7 +604,7 @@ fn cmd_enable(name: &str) -> Result<()> {
     if registry.find_plugin(name).is_none() {
         bail!(
             "Plugin \"{name}\" not found.\n\
-               Run `qidiwork plugin list` to see installed plugins."
+               Run `qidi plugin list` to see installed plugins."
         );
     }
     if let Err(e) = cf_shell::config::remove_disabled_plugin(name) {
@@ -717,7 +621,7 @@ fn cmd_disable(name: &str) -> Result<()> {
     if registry.find_plugin(name).is_none() {
         bail!(
             "Plugin \"{name}\" not found.\n\
-               Run `qidiwork plugin list` to see installed plugins."
+               Run `qidi plugin list` to see installed plugins."
         );
     }
     if let Err(e) = cf_shell::config::remove_enabled_plugin(name) {
@@ -734,7 +638,7 @@ fn cmd_details(name: &str) -> Result<()> {
     let (repo_key, repo, _) = registry.find_plugin(name).ok_or_else(|| {
         anyhow::anyhow!(
             "Plugin \"{name}\" not found.\n\
-             Run `qidiwork plugin list` to see installed plugins."
+             Run `qidi plugin list` to see installed plugins."
         )
     })?;
 
@@ -796,9 +700,9 @@ fn cmd_validate(path: &str) -> Result<()> {
         }
         Ok(ManifestLoadResult::NotFound) => {
             println!(
-                "未找到 plugin.json。QIDI 会自动从标准目录发现技能（skills）、\
-                 子代理（agents）与钩子（hooks）。\
-                 只有在需要自定义路径或元信息时才需要该清单文件。"
+                "No plugin.json found. Grok discovers skills, agents, and hooks \
+                 automatically from standard directories. A manifest is only needed \
+                 for custom paths or metadata."
             );
             Ok(())
         }
@@ -814,7 +718,7 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     let version = match load_manifest(&root) {
         Ok(ManifestLoadResult::Found(m)) => m.version.ok_or_else(|| {
             anyhow::anyhow!(
-                "No `version` field in plugin.json. Set a version to use `qidiwork plugin tag`."
+                "No `version` field in plugin.json. Set a version to use `qidi plugin tag`."
             )
         })?,
         Ok(ManifestLoadResult::NotFound) => bail!("No plugin.json found in {path}."),
@@ -924,7 +828,7 @@ fn marketplace_list(
     } else if sources.is_empty() {
         println!(
             "No marketplace sources configured.\n\
-             Run `qidiwork plugin marketplace add --help` to get started."
+             Run `qidi plugin marketplace add --help` to get started."
         );
     } else {
         for s in sources {
@@ -1129,16 +1033,11 @@ fn marketplace_update_with_cache_root(
             name_matched = true;
         }
         if let SourceKind::Git { url, branch } = &source.kind {
-            let url_owned = url.clone();
-            let branch_owned = branch.clone();
-            let cache_root_owned = cache_root.to_path_buf();
-            match run_marketplace_net_op("marketplace update source sync", move || {
-                cf_plugin_marketplace::git::force_sync_source_cache(
-                    &url_owned,
-                    branch_owned.as_deref(),
-                    &cache_root_owned,
-                )
-            }) {
+            match cf_plugin_marketplace::git::force_sync_source_cache(
+                url,
+                branch.as_deref(),
+                cache_root,
+            ) {
                 Ok(_) => {
                     println!("  {}: synced", source.name);
                     refreshed += 1;
@@ -1161,6 +1060,15 @@ fn marketplace_update_with_cache_root(
         }
     } else if errors.is_empty() {
         println!("Refreshed {refreshed} source(s).");
+    } else if refreshed == 0 {
+        // Every source failed to sync: surface the failure instead of
+        // reporting success. Partial failures (refreshed > 0) keep the
+        // best-effort eprintln + Ok semantics above.
+        bail!(
+            "Marketplace update failed ({} source(s)):{}", 
+            errors.len(),
+            errors.iter().fold(String::new(), |acc, e| acc + "\n  " + e)
+        );
     } else {
         eprintln!(
             "Refreshed {refreshed} source(s) with {} error(s): {}",
@@ -1176,102 +1084,21 @@ mod tests {
     use super::*;
     use cf_plugin_marketplace::MarketplaceSource;
 
-    /// Timeout text: ASCII-only source (`\u{..}` escapes) must still produce the
-    /// exact UTF-8 bytes required by the spec.
-    #[test]
-    fn marketplace_timeout_message_is_spec_text() {
-        let msg = marketplace_timeout_message();
-        let expected: Vec<u8> = vec![
-            0xE5, 0xB8, 0x82, 0xE5, 0x9C, 0xBA, 0xE6, 0xBA, 0x90, 0xE8, 0xBF, 0x9E, 0xE6, 0x8E,
-            0xA5, 0xE8, 0xB6, 0x85, 0xE6, 0x97, 0xB6, 0x28, 0x33, 0x30, 0x73, 0x29, 0xEF, 0xBC,
-            0x8C, 0xE8, 0xAF, 0xB7, 0xE6, 0xA3, 0x80, 0xE6, 0x9F, 0xA5, 0xE7, 0xBD, 0x91, 0xE7,
-            0xBB, 0x9C, 0xE6, 0x88, 0x96, 0xE6, 0x9B, 0xB4, 0xE6, 0x8D, 0xA2, 0xE5, 0x9B, 0xBD,
-            0xE5, 0x86, 0x85, 0xE9, 0x95, 0x9C, 0xE5, 0x83, 0x8F, 0xE6, 0xBA, 0x90,
-        ];
-        assert_eq!(msg.as_bytes(), expected.as_slice());
-        assert_eq!(msg.chars().count(), 26, "msg={msg}");
-        assert!(msg.contains("(30s)"), "msg={msg}");
-        assert!(
-            msg.chars().any(|c| !c.is_ascii()),
-            "runtime text must be the UTF-8 Chinese message"
-        );
-    }
-
-    /// Timeout budget matches the spec (30s).
-    #[test]
-    fn marketplace_timeout_budget_is_30_seconds() {
-        assert_eq!(MARKETPLACE_NET_TIMEOUT_SECS, 30);
-    }
-
-    /// Pure wait classification: Timeout -> TimedOut, Disconnected -> Aborted.
-    #[test]
-    fn wait_error_classification() {
-        assert_eq!(
-            classify_wait_error(&RecvTimeoutError::Timeout),
-            WaitOutcome::TimedOut
-        );
-        assert_eq!(
-            classify_wait_error(&RecvTimeoutError::Disconnected),
-            WaitOutcome::Aborted
-        );
-    }
-
-    /// Real behaviour: a worker that outlives the budget yields the spec text.
-    #[test]
-    fn marketplace_net_op_reports_timeout_message() {
-        let err = run_marketplace_net_op_with_timeout(
-            Duration::from_millis(30),
-            "unit-test-op",
-            || {
-                std::thread::sleep(Duration::from_millis(800));
-                Ok::<u8, String>(1)
-            },
-        )
-        .expect_err("worker must outlive the 30ms budget");
-        assert_eq!(err.as_bytes(), marketplace_timeout_message().as_bytes());
-    }
-
-    /// A worker that finishes in time passes its result through untouched.
-    #[test]
-    fn marketplace_net_op_passes_through_success() {
-        let out = run_marketplace_net_op_with_timeout(
-            Duration::from_secs(30),
-            "unit-test-op",
-            || Ok::<u8, String>(7),
-        )
-        .unwrap();
-        assert_eq!(out, 7);
-    }
-
-    /// A worker that dies without sending is reported as aborted, not as a
-    /// timeout (distinct user-facing outcome).
-    #[test]
-    fn marketplace_net_op_reports_abort() {
-        let err = run_marketplace_net_op_with_timeout(
-            Duration::from_secs(30),
-            "unit-test-op",
-            || -> Result<u8, String> { panic!("unit-test worker abort") },
-        )
-        .expect_err("worker must abort");
-        assert!(err.contains("aborted"), "err={err}");
-        assert_ne!(err.as_bytes(), marketplace_timeout_message().as_bytes());
-    }
-
     #[test]
     fn trust_prompt_marketplace_has_no_error_framing() {
         let msg = trust_prompt(
-            "\"sentry\" from marketplace \"QIDI Official\"",
+            "\"sentry\" from marketplace \"xAI Official\"",
             "sentry@xai-org/plugin-marketplace",
         );
         assert!(
             msg.starts_with(
-                "Installing \"sentry\" from marketplace \"QIDI Official\" requires confirmation."
+                "Installing \"sentry\" from marketplace \"xAI Official\" requires confirmation."
             ),
             "{msg}"
         );
         assert!(msg.contains("hooks, MCP servers, and skills"));
         assert!(msg.contains(
-            "To proceed, re-run with --trust:\n  qidiwork plugin install sentry@xai-org/plugin-marketplace --trust"
+            "To proceed, re-run with --trust:\n  qidi plugin install sentry@xai-org/plugin-marketplace --trust"
         ));
         assert!(!msg.contains("Error"));
         assert!(!msg.contains("Failed"));
@@ -1287,7 +1114,7 @@ mod tests {
             ),
             "{git}"
         );
-        assert!(git.ends_with("  qidiwork plugin install u/r --trust"), "{git}");
+        assert!(git.ends_with("  qidi plugin install u/r --trust"), "{git}");
         let local = trust_prompt("from directory /tmp/p", "./p");
         assert!(
             local.starts_with("Installing from directory /tmp/p requires confirmation."),
@@ -1295,14 +1122,14 @@ mod tests {
         );
     }
 
+    /// QIDI local patch: `validate_clone_url` whitelists only https:// and
+    /// ssh:// for marketplace clones (file:// and local paths are rejected
+    /// for security). Guard that contract end-to-end: a local-directory
+    /// source is refused by the sync layer, and `marketplace_update` surfaces
+    /// the refusal instead of silently cloning.
     #[test]
-    fn marketplace_update_force_syncs_fresh_git_cache() {
-        if !git_available() {
-            eprintln!("skipping git-dependent test: git binary not available");
-            return;
-        }
+    fn marketplace_update_rejects_local_clone_urls() {
         let remote = tempfile::tempdir().unwrap();
-        init_remote_repo(remote.path());
         let cache_root = tempfile::tempdir().unwrap();
         let url = remote.path().to_string_lossy().to_string();
         let source = MarketplaceSource {
@@ -1313,68 +1140,23 @@ mod tests {
             },
         };
 
-        let cache_dir = cf_plugin_marketplace::git::sync_source_cache(
+        let err = cf_plugin_marketplace::git::sync_source_cache(
             &url,
             Some("main"),
             cache_root.path(),
         )
-        .unwrap();
-        let first_head = current_head(&cache_dir);
-        add_commit(remote.path(), "second.txt", "second");
-
-        marketplace_update_with_cache_root(&[source], None, cache_root.path()).unwrap();
-        assert_ne!(current_head(&cache_dir), first_head);
-    }
-
-    fn init_remote_repo(path: &Path) {
-        run_git(path, &["init", "--initial-branch", "main"]);
-        run_git(path, &["config", "user.email", "test@example.com"]);
-        run_git(path, &["config", "user.name", "Test User"]);
-        add_commit(path, "file.txt", "initial");
-    }
-
-    fn add_commit(repo: &Path, file: &str, contents: &str) {
-        std::fs::write(repo.join(file), contents).unwrap();
-        run_git(repo, &["add", file]);
-        run_git(repo, &["commit", "-m", file]);
-    }
-
-    fn current_head(repo: &Path) -> String {
-        let output = cf_plugin_marketplace::git::git_command()
-            .current_dir(repo)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-
-    fn git_available() -> bool {
-        let git_bin = std::env::var("GIT_BIN_PATH").unwrap_or_else(|_| "git".to_string());
-        std::process::Command::new(git_bin)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .is_ok_and(|output| output.status.success())
-    }
-
-    fn run_git(dir: &Path, args: &[&str]) {
-        let git_bin = std::env::var("GIT_BIN_PATH").unwrap_or_else(|_| "git".to_string());
-        let output = std::process::Command::new(git_bin)
-            .current_dir(dir)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_ASKPASS", "")
-            .env("GIT_LFS_SKIP_SMUDGE", "1")
-            .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap();
+        .unwrap_err();
         assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
+            err.contains("blocked plugin clone URL"),
+            "local-path clone must be blocked by the security gate, got: {err}"
+        );
+
+        let update_err =
+            marketplace_update_with_cache_root(&[source], None, cache_root.path()).unwrap_err();
+        let update_msg = update_err.to_string();
+        assert!(
+            update_msg.contains("blocked plugin clone URL"),
+            "marketplace_update must propagate the block, got: {update_msg}"
         );
     }
 }

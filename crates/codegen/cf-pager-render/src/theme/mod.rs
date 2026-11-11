@@ -73,9 +73,9 @@ impl ThemeKind {
     /// Human-readable display name.
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::GrokNight => "qidi-dark",
+            Self::GrokNight => "groknight",
             Self::TokyoNight => "tokyonight",
-            Self::GrokDay => "qidi-light",
+            Self::GrokDay => "grokday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
             Self::Auto => "auto",
@@ -105,9 +105,9 @@ impl ThemeKind {
         let lower = name.to_lowercase();
         match lower.as_str() {
             "auto" | "system" => Some(Self::Auto),
-            "qidi-dark" | "dark" | "night" => Some(Self::GrokNight),
+            "groknight" | "grok-night" | "dark" => Some(Self::GrokNight),
             "tokyonight" | "tokyo-night" | "tokyo" => Some(Self::TokyoNight),
-            "qidi-light" | "light" | "day" => Some(Self::GrokDay),
+            "grokday" | "grok-day" | "light" | "day" => Some(Self::GrokDay),
             "rosepine" | "rose-pine" | "rosepine-moon" | "rose-pine-moon" => {
                 Some(Self::RosePineMoon)
             }
@@ -139,12 +139,12 @@ pub fn canonical_name(value: &str) -> Option<&'static str> {
 }
 
 /// Human-friendly display name for a canonical theme value (e.g.
-/// `"qidi-dark"` → `"QIDI 深色"`). Falls back to `value` verbatim.
+/// `"groknight"` → `"Grok Night"`). Falls back to `value` verbatim.
 pub fn display_name_for_canonical(value: &str) -> &str {
     match value {
         "auto" => "Auto",
-        "qidi-dark" => "QIDI 深色",
-        "qidi-light" => "QIDI 浅色",
+        "groknight" => "Grok Night",
+        "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
         other => other,
@@ -1111,11 +1111,11 @@ mod tests {
     #[test]
     fn from_name_concrete_variants_still_work() {
         assert_eq!(
-            ThemeKind::from_name("qidi-dark"),
+            ThemeKind::from_name("groknight"),
             Some(ThemeKind::GrokNight)
         );
         assert_eq!(ThemeKind::from_name("dark"), Some(ThemeKind::GrokNight));
-        assert_eq!(ThemeKind::from_name("qidi-light"), Some(ThemeKind::GrokDay));
+        assert_eq!(ThemeKind::from_name("grokday"), Some(ThemeKind::GrokDay));
         assert_eq!(ThemeKind::from_name("light"), Some(ThemeKind::GrokDay));
         assert_eq!(
             ThemeKind::from_name("tokyonight"),
@@ -1142,15 +1142,16 @@ mod tests {
         let cases = [
             ("auto", ThemeKind::Auto),
             ("system", ThemeKind::Auto),
-            ("qidi-dark", ThemeKind::GrokNight),
-            ("night", ThemeKind::GrokNight),
+            ("groknight", ThemeKind::GrokNight),
+            ("grok-night", ThemeKind::GrokNight),
             ("dark", ThemeKind::GrokNight),
             ("tokyonight", ThemeKind::TokyoNight),
             ("tokyo-night", ThemeKind::TokyoNight),
             ("tokyo", ThemeKind::TokyoNight),
-            ("qidi-light", ThemeKind::GrokDay),
-            ("day", ThemeKind::GrokDay),
+            ("grokday", ThemeKind::GrokDay),
+            ("grok-day", ThemeKind::GrokDay),
             ("light", ThemeKind::GrokDay),
+            ("day", ThemeKind::GrokDay),
             ("rosepine", ThemeKind::RosePineMoon),
             ("rose-pine", ThemeKind::RosePineMoon),
             ("rosepine-moon", ThemeKind::RosePineMoon),

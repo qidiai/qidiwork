@@ -29,7 +29,7 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let auth = agent.auth_manager.auth().await.map_err(|e| {
         tracing::warn!(error = %e, "privacy: auth resolution failed");
         acp::Error::auth_required()
-            .data("需要登录。请运行 `qidiwork login` 重新登录。")
+            .data("Authentication required. Run `qidi login` to re-authenticate.")
     })?;
 
     let proxy_url = agent.cfg.borrow().endpoints.proxy_url();

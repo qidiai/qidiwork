@@ -215,11 +215,11 @@ mod tests {
             !instr.contains("10m"),
             "instruction must not default: {instr}"
         );
-        assert!(instr.contains("Deriving the interval"));
-        assert!(instr.contains("<number><unit>"));
-        assert!(instr.contains("ask the user how often"));
-        assert!(instr.contains("Do NOT execute the prompt inline"));
-        // Raw request forwarded verbatim for the model to parse.
-        assert!(instr.contains(args));
+        // Full-implementation invariants (the stub placeholder was replaced
+        // by the restored xai-grok-tools-api wording): the model must see the
+        // scheduler_create action and the fire_immediately contract.
+        assert!(instr.contains("scheduler_create"), "{instr}");
+        assert!(instr.contains("fire_immediately"), "{instr}");
+        assert!(instr.contains("every 30 minutes do x"), "{instr}");
     }
 }

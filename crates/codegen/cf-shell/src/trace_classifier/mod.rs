@@ -1052,9 +1052,9 @@ pub async fn resolve_api_key(explicit: Option<&str>, grok_home: &Path) -> Result
         return Ok(key);
     }
     Err(anyhow!(
-        "没有 API Key：请传入 --api-key、设置 XAI_API_KEY，或运行 `qidiwork login` \
-         以在 <qidi-home>/auth.json 中生成登录凭据。若存在 refresh_token，过期的 OIDC 令牌会自动刷新；\
-         否则需要重新登录。"
+        "no API key: pass --api-key, set XAI_API_KEY, or run `qidi login` to populate \
+         <grok-home>/auth.json. An expired OIDC token is auto-refreshed when a refresh_token \
+         is present; if not, re-login is required."
     ))
 }
 
@@ -1096,8 +1096,8 @@ async fn non_interactive_auth_key(grok_home: &Path) -> Result<Option<String>> {
         }
         Err(AuthError::NotLoggedIn) => Ok(None),
         Err(e) => Err(anyhow!(
-            "auth.json 刷新失败：{e}。请运行 `qidiwork login` 重新登录，\
-             或传入 --api-key / 设置 $XAI_API_KEY 以绕过 auth.json。"
+            "auth.json refresh failed: {e}. Run `qidi login` to re-authenticate, \
+             or pass --api-key / set $XAI_API_KEY to bypass auth.json."
         )),
     }
 }
@@ -2142,7 +2142,7 @@ mod tests {
     }
 
     /// Write an `auth.json` whose only entry is at the production
-    /// OIDC scope (the same scope `grok login` writes today and
+    /// OIDC scope (the same scope `qidi login` writes today and
     /// `AuthManager` reads). `auth_mode: api_key` skips the refresh
     /// path entirely — useful for "plain key, no refresh wanted"
     /// fixtures.
@@ -2353,7 +2353,7 @@ mod tests {
         assert!(
             msg.contains("--api-key")
                 && msg.contains("XAI_API_KEY")
-                && msg.contains("qidiwork login")
+                && msg.contains("qidi login")
                 && msg.contains("auth.json"),
             "error names all three sources: {msg}",
         );

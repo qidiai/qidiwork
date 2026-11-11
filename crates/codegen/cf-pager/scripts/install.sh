@@ -1,14 +1,22 @@
 #!/bin/bash
 #
-# Grok CLI installer — https://qidiwork.qidiai.ltd/cli/install.sh
+# Grok CLI installer — https://x.ai/cli/install.sh
 #
 # Auth: GROK_DEPLOYMENT_KEY (takes precedence) or ~/.grok/auth.json from `grok login`.
-# Env: GROK_CHANNEL (stable|alpha|enterprise, default: stable), GROK_BIN_DIR, GROK_PROXY_URL
+# Env: QIDI_CHANNEL (stable|alpha|enterprise, default: stable), QIDI_BIN_DIR, QIDI_PROXY_URL
+#
+# Env naming domains (authoritative contract: scripts/README.md):
+#   Installer scripts read the QIDI_* domain only (QIDI_CHANNEL,
+#   QIDI_BIN_DIR, QIDI_PROXY_URL). The running CLI reads the GROK_*
+#   domain (GROK_DEPLOYMENT_KEY, GROK_VERSION, ...). The only
+#   crossings are retained contract points: GROK_DEPLOYMENT_KEY
+#   (enterprise installer auth) and GROK_VERSION (ps1 version
+#   input). ~/.grok stays the runtime home regardless of QIDI_BIN_DIR.
 #
 # Usage:
-#   curl -fsSL https://qidiwork.qidiai.ltd/cli/install.sh | bash            # latest stable
-#   curl -fsSL https://qidiwork.qidiai.ltd/cli/install.sh | bash -s 0.1.42  # specific version
-#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://qidiwork.qidiai.ltd/cli/install.sh)
+#   curl -fsSL https://x.ai/cli/install.sh | bash            # latest stable
+#   curl -fsSL https://x.ai/cli/install.sh | bash -s 0.1.42  # specific version
+#   GROK_DEPLOYMENT_KEY=<key> bash <(curl -fsSL https://x.ai/cli/install.sh)
 #
 # Windows: run under Git for Windows / MSYS2 Bash (same curl | bash flow); WSL
 # uses the Linux binary.
@@ -118,7 +126,7 @@ read_grok_token() {
 }
 
 # Resolve auth: GROK_DEPLOYMENT_KEY > OIDC token > legacy token
-OIDC_SCOPE="https://api.qidiai.ltd::qidi-code"
+OIDC_SCOPE="https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
 LEGACY_SCOPE="https://accounts.x.ai/sign-in"
 AUTH_SOURCE=""
 
@@ -151,14 +159,14 @@ case "$(uname -m)" in
     *)                    echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-BASE_URL_PRIMARY="https://qidiwork.qidiai.ltd/cli"
-BASE_URL_FALLBACK="https://qidiwork.qidiai.ltd/cli"
+BASE_URL_PRIMARY="https://x.ai/cli"
+BASE_URL_FALLBACK="https://storage.googleapis.com/grok-build-public-artifacts/cli"
 DOWNLOAD_DIR="$HOME/.grok/downloads"
-BIN_DIR="${GROK_BIN_DIR:-$HOME/.grok/bin}"
+BIN_DIR="${QIDI_BIN_DIR:-$HOME/.grok/bin}"
 mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
 
 platform="${os}-${arch}"
-CHANNEL="${GROK_CHANNEL:-stable}"
+CHANNEL="${QIDI_CHANNEL:-stable}"
 
 # Pick a working BASE_URL: try Cloudflare-fronted x.ai first, fall back to
 # direct GCS if it's unreachable. The probe doubles as the channel-pointer
@@ -297,7 +305,7 @@ fi
 
 # Fetch managed_config.toml + requirements.toml from server (deployment key only).
 if [ -n "$GROK_DEPLOYMENT_KEY" ]; then
-    PROXY_URL="${GROK_PROXY_URL:-https://api.qidiai.ltd/v1}"
+    PROXY_URL="${QIDI_PROXY_URL:-https://api.qidiai.ltd/v1}"
     echo "  Fetching deployment config..." >&2
     DEPLOY_RESPONSE=""
     AUTH_HEADER_FILE=$(mktemp 2>/dev/null) || AUTH_HEADER_FILE=""

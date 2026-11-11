@@ -108,7 +108,7 @@ fn should_evict(leader_version: Option<&str>, client_version: &str) -> bool {
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Maximum delay between reconnection attempts (caps exponential backoff).
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
-/// Maximum reconnection attempts for bounded mode (headless/`grok -p`).
+/// Maximum reconnection attempts for bounded mode (headless/`qidi -p`).
 /// TUI mode uses unlimited retries controlled by a cancellation token.
 const RECONNECT_MAX_ATTEMPTS_BOUNDED: u32 = 5;
 /// Environment URLs to pass to the leader subprocess.
@@ -884,7 +884,7 @@ pub enum ReconnectPolicy {
     /// Suitable for interactive TUI sessions where the user expects persistence.
     Unbounded,
     /// Retry up to a fixed number of attempts, then fail.
-    /// Suitable for headless/`grok -p` where hanging forever is unacceptable.
+    /// Suitable for headless/`qidi -p` where hanging forever is unacceptable.
     Bounded { max_attempts: u32 },
 }
 impl ReconnectPolicy {
@@ -1337,7 +1337,7 @@ pub async fn connect_or_spawn(
 ///
 /// For a **managed install** — the running binary lives under `grok_home`
 /// (e.g. `~/.qidi/...`) — prefer the managed `~/.qidi/bin/grok` symlink. After an
-/// auto-update or `grok update` atomically swaps that symlink, `current_exe()`
+/// auto-update or `qidi update` atomically swaps that symlink, `current_exe()`
 /// still resolves (via `/proc/self/exe` on Linux) to the *old* versioned target,
 /// so spawning it would relaunch the stale binary. The symlink always points to
 /// the freshly-installed version. This mirrors
@@ -1393,8 +1393,8 @@ fn spawn_leader_subprocess(env_urls: &LeaderEnvUrls) -> Result<u32, ConnectionEr
     cmd.arg("agent").arg("leader");
     cmd.arg("--no-exit-on-disconnect");
     cmd.arg("--relay-on-demand");
-    cmd.arg("--grok-ws-url").arg(&env_urls.grok_ws_url);
-    cmd.arg("--grok-ws-origin").arg(&env_urls.grok_ws_origin);
+    cmd.arg("--qidi-ws-url").arg(&env_urls.grok_ws_url);
+    cmd.arg("--qidi-ws-origin").arg(&env_urls.grok_ws_origin);
     if let Some(socket) = std::env::var_os(crate::leader::LEADER_SOCKET_ENV) {
         cmd.env(crate::leader::LEADER_SOCKET_ENV, socket);
     }

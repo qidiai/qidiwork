@@ -73,6 +73,55 @@ mod cli_catchall_drop_tests {
         assert!(dropped.is_empty());
     }
 }
+/// Inject a subagent session's baseline skill listing into `conversation`.
+///
+/// A subagent (`PromptAudience::Subagent`) session must inject its baseline
+/// skill listing **unconditionally**, read-only against the cross-session
+/// announcement ledger. Its real initialization point is the spawn path
+/// (`spawn_session_actor`, after `install_system_prompt`); it never sends
+/// `SessionCommand::Initialize`, so the `inject_baseline_skill_reminder` seam
+/// in `session_setup.rs` would otherwise never fire for it — the original F2
+/// defect. The zero-turn agent rebuild (`handle_rebuild_agent_for_definition`),
+/// which a subagent can also drive, delegates here too.
+///
+/// Reuses the F2 read-only assets via `bridge.subagent_skill_listing`:
+/// `listing_for_subagent` renders the projection, `clear_pending` drops any
+/// stale pending baseline, and the projected runtime set is written into
+/// `AvailableSkills` so the skill tool's activatable set matches the listing.
+/// The ledger (`announced_names`) is neither read nor written. Projection is
+/// governed by `[skills].subagent_listing`; the F2S gate
+/// (`[skills].subagent_denied_skills`) is handed over at the same seam and
+/// removes the denied skills from both the listing and the runtime set, under
+/// every listing value. No-op for the *listing* when the projection is `none`,
+/// when no skill qualifies, or under the cursor harness (whose preamble lists
+/// skills inline) — the runtime set is still installed.
+pub(super) async fn inject_subagent_baseline_listing(
+    conversation: &mut Vec<ConversationItem>,
+    bridge: &cf_tools::bridge::ToolBridge,
+    skills_config: &cf_agent::prompt::skills::SkillsConfig,
+    is_cursor: bool,
+) {
+    let listing = skills_config.subagent_listing_or_default();
+    // Always clear the child's stale pending + seed the runtime projection,
+    // even under the cursor harness (which suppresses only the reminder text).
+    // The F2S gate travels with the config here (the same seam as the listing
+    // knob), so a child is gated even when its manager was never seeded with
+    // `[skills]` (e.g. built straight from the registry `finalize()` path).
+    let Some(snapshot) = bridge
+        .subagent_skill_listing(listing, skills_config.subagent_denied_skills.clone())
+        .await
+    else {
+        return;
+    };
+    if is_cursor {
+        return;
+    }
+    let tag = cf_tools::reminders::DEFAULT_REMINDER_TAG;
+    conversation.push(ConversationItem::system_reminder(format!(
+        "<{tag}>\n{}\n</{tag}>",
+        snapshot.text
+    )));
+}
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
 /// The permission events receiver should be used to collect telemetry about permission
@@ -370,7 +419,11 @@ pub(crate) async fn spawn_session_actor(
     let web_search_config = if disable_web_search {
         cf_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(cfg) = web_search_sampling_config {
-        if let Some(api_key) = cfg.api_key {
+        if cfg.model == cf_tools::implementations::web_search::NATIVE_MODEL_ID {
+            // Marker config from resolve_web_search_sampling_config: use the
+            // built-in scraping engine (no key, no Responses API).
+            cf_tools::implementations::WebSearchConfig::Native
+        } else if let Some(api_key) = cfg.api_key {
             cf_tools::implementations::WebSearchConfig::Enabled {
                 api_key,
                 base_url: cfg.base_url,
@@ -423,14 +476,7 @@ pub(crate) async fn spawn_session_actor(
         reasoning_effort: sampling_config.reasoning_effort,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
-    let actor_pruning_config = cf_chat_state::PruningConfig {
-        enabled: session_pruning_config.enabled,
-        keep_last_n_turns: session_pruning_config.keep_last_n_turns,
-        soft_trim_threshold: session_pruning_config.soft_trim_threshold,
-        soft_trim_head: session_pruning_config.soft_trim_head,
-        soft_trim_tail: session_pruning_config.soft_trim_tail,
-        hard_clear_age_turns: session_pruning_config.hard_clear_age_turns,
-    };
+    let actor_pruning_config = actor_pruning_config(&session_pruning_config);
     let (chat_state_event_tx, chat_state_event_rx) = mpsc::unbounded_channel();
     let chat_state_handle = cf_chat_state::ChatStateActor::spawn_with_pruning(
         conversation.clone(),
@@ -778,7 +824,7 @@ pub(crate) async fn spawn_session_actor(
                 temporal_decay_enabled: mc.is_none_or(|c| c.search.temporal_decay.enabled),
                 mmr_enabled: mc.is_some_and(|c| c.search.mmr.enabled),
                 mmr_lambda: mc.map_or(0.7, |c| c.search.mmr.lambda),
-                half_life_days: mc.map_or(30.0, |c| c.search.temporal_decay.half_life_days),
+                half_life_days: mc.map_or(7.0, |c| c.search.temporal_decay.half_life_days),
                 embedding_dimensions: mc.map_or(1024, |c| c.embedding.dimensions),
                 total_chunks,
                 total_files: storage.list_memory_files().map_or(0, |f| f.len()),
@@ -960,6 +1006,15 @@ pub(crate) async fn spawn_session_actor(
             *len += 1;
         }
     }
+    // F2R: subagents inject their baseline skill listing here — their real
+    // initialization point. They never send `SessionCommand::Initialize`, so
+    // the `inject_baseline_skill_reminder` seam is otherwise unreachable for
+    // them (the original F2 defect). Covers New/Forked/Resumed subagents. The
+    // cursor-harness twin is `false` in this build (see `session_mode.rs`).
+    if prompt_audience == cf_agent::prompt::context::PromptAudience::Subagent {
+        inject_subagent_baseline_listing(&mut conversation, agent.tool_bridge(), &skills_config, false)
+            .await;
+    }
     if let Some(section) = agent.agents_md_section()
         && should_set_classifier_project_instructions(
             owns_permission_manager,
@@ -977,6 +1032,13 @@ pub(crate) async fn spawn_session_actor(
         save_system_prompt(&session_info, &system_prompt);
     }
     persist_chat_history_jsonl_sync(&session_info, &conversation);
+    // Bug B: seed the date-rollover baseline from the session's cached
+    // `<user_info>` prefix. A resumed session keeps that prefix verbatim (to
+    // preserve the prompt cache), so it still advertises the date the session
+    // was *created*; seeding the baseline to that stale date lets
+    // `maybe_inject_date_rollover_reminder` announce the real current date on
+    // the next turn. Fresh sessions have no prefix yet → fall back to "now".
+    let seeded_local_date = initial_announced_date(&conversation);
     chat_state_handle.replace_conversation(conversation);
     let feedback_client = feedback_proxy_url.map(|base_url| {
         let mut client =
@@ -1144,6 +1206,11 @@ pub(crate) async fn spawn_session_actor(
         }
     };
     let doom_loop_recovery = effective_config.resolve_doom_loop_recovery();
+    // Dynamic tool pipeline switch (P0-2 第二步, design doc §6
+    // Phase A): single-shot session-startup read, frozen for the
+    // session (design doc A-4). Default false; `true` is a
+    // Phase A no-op + warn at the defs-assembly point.
+    let dynamic_tools = effective_config.resolve_dynamic_tools();
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
         auth_method_id,
@@ -1171,6 +1238,7 @@ pub(crate) async fn spawn_session_actor(
         compactions_remaining: std::cell::Cell::new(sampling_config.compactions_remaining),
         compaction_at_tokens: std::cell::Cell::new(sampling_config.compaction_at_tokens),
         doom_loop_recovery,
+        dynamic_tools,
         doom_loop_turn_tally: Default::default(),
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
@@ -1306,13 +1374,15 @@ pub(crate) async fn spawn_session_actor(
         ),
         mcp_reminder_mode: McpReminderMode::from_env(),
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregenerating: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reasoning_pregen_last_run_end: std::cell::Cell::new(None),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
         mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: laziness_debug_log.map(|p| std::sync::Arc::from(p.as_path())),
         deferred_prefix: TaskSlot::new(),
         extension_registry: session_extension_registry(weak.clone()),
-        last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
+        last_announced_local_date: std::cell::Cell::new(seeded_local_date),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(built_hook_registry),
@@ -2059,6 +2129,32 @@ impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
             .end_restart(server);
     }
 }
+/// Map the `[compaction.pruning]` session config
+/// ([`crate::config::PruningConfig`], re-exported from `cf-config`) into the
+/// `cf-chat-state` actor's [`cf_chat_state::PruningConfig`].
+///
+/// B-1: the Phase C batched-mode fields (`batched_pruning`,
+/// `low_watermark_percent`) are passed through **from the config** rather than
+/// hard-coded off, so the flag is actually reachable in production (a
+/// `[compaction.pruning] batched_pruning = true` / `low_watermark_percent = 40`
+/// enables the batched low-watermark clear). The defaults remain
+/// `false` / `None`, so a session that never opts in stays byte-identical to
+/// the pre-Phase-C per-turn build (C-6 flag-off anchor).
+fn actor_pruning_config(
+    session: &crate::config::PruningConfig,
+) -> cf_chat_state::PruningConfig {
+    cf_chat_state::PruningConfig {
+        enabled: session.enabled,
+        keep_last_n_turns: session.keep_last_n_turns,
+        soft_trim_threshold: session.soft_trim_threshold,
+        soft_trim_head: session.soft_trim_head,
+        soft_trim_tail: session.soft_trim_tail,
+        hard_clear_age_turns: session.hard_clear_age_turns,
+        batched_pruning: session.batched_pruning,
+        low_watermark_percent: session.low_watermark_percent,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalBackendKind {
     ReuseParent,
@@ -2081,6 +2177,42 @@ fn select_terminal_backend_kind(
         TerminalBackendKind::LocalPersistent
     } else {
         TerminalBackendKind::LocalNonPersistent
+    }
+}
+/// B-1: the `[compaction.pruning]` batched-mode fields flow through the
+/// config→actor mapping so `batched_mode()` can actually be turned on in
+/// production. Regression anchor: the default config stays per-turn.
+#[cfg(test)]
+mod actor_pruning_wiring_tests {
+    use super::actor_pruning_config;
+
+    #[test]
+    fn batched_flag_and_watermark_reach_actor_batched_mode() {
+        let session = crate::config::PruningConfig {
+            batched_pruning: true,
+            low_watermark_percent: Some(40),
+            ..Default::default()
+        };
+        let actor = actor_pruning_config(&session);
+        assert!(
+            actor.batched_mode(),
+            "B-1: config batched_pruning=true + low_watermark_percent=Some(40) must \
+             reach the actor's batched_mode()"
+        );
+        assert_eq!(
+            actor.low_watermark_percent,
+            Some(40),
+            "B-1: the configured watermark must pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn default_session_config_stays_per_turn() {
+        let actor = actor_pruning_config(&crate::config::PruningConfig::default());
+        assert!(
+            !actor.batched_mode(),
+            "B-1/C-6: the default session config must not activate batched mode"
+        );
     }
 }
 #[cfg(test)]

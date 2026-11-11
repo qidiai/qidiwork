@@ -10,16 +10,17 @@ use cf_shell::env::QidiBuildEnvironment;
 use cf_shell::util::grok_home::grok_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
-const NPM_PACKAGE: &str = "@qidi/qidiwork";
-pub const GH_RELEASE_REPO: &str = "qidiai/qidiwork";
+const NPM_PACKAGE: &str = "@xai-official/grok";
+pub const GH_RELEASE_REPO: &str = "xai-org-shared/cf-tools";
 
-/// Primary CLI base URL: qidiai.ltd endpoint with edge caching
+/// Primary CLI base URL: Cloudflare-fronted x.ai endpoint with edge caching
 /// for binaries and origin-respecting no-cache for channel pointers.
-pub(crate) const CLI_BASE_URL_PRIMARY: &str = "https://qidiwork.qidiai.ltd/cli";
+pub(crate) const CLI_BASE_URL_PRIMARY: &str = "https://x.ai/cli";
 
-/// Fallback CLI base URL: the GCS bucket mirror is not available for the
-/// self-hosted distribution yet, so this points at the same site.
-pub(crate) const CLI_BASE_URL_FALLBACK: &str = "https://qidiwork.qidiai.ltd/cli";
+/// Fallback CLI base URL: direct GCS, used when the primary is unreachable
+/// (Cloudflare outage, regional CF egress issue, DNS hijack, etc.).
+pub(crate) const CLI_BASE_URL_FALLBACK: &str =
+    "https://storage.googleapis.com/cf-tools-public-artifacts/cli";
 
 /// CLI base URLs in preference order. Callers (channel-pointer fetch, binary
 /// download, in-app updater) try each in turn and stop at the first success.
@@ -32,7 +33,7 @@ pub(crate) const CLI_BASE_URLS: &[&str] = &[CLI_BASE_URL_PRIMARY, CLI_BASE_URL_F
 /// about the `QidiBuildEnvironment` enum directly.
 #[derive(Debug, Clone)]
 pub struct UpdateConfig {
-    /// Chat API proxy base URL (versioned `https://api.qidiai.ltd/v1` endpoint).
+    /// Chat API proxy base URL (versioned `https://cli-chat-proxy.grok.com/v1` endpoint).
     pub proxy_base_url: String,
     /// Auth scope key for `~/.qidi/auth.json`.
     pub auth_scope: String,
@@ -420,7 +421,7 @@ pub use cf_version::installed as get_installed_qidi_version;
 /// without exec'ing anything.
 ///
 /// Concurrent updaters (TUI background download, leader hourly checker,
-/// explicit `grok update`) decide staleness from this instead of their own
+/// explicit `qidi update`) decide staleness from this instead of their own
 /// compiled-in version, so a binary another process already installed is
 /// never downloaded a second time.
 ///

@@ -408,7 +408,9 @@ pub(in crate::app::dispatch) fn dispatch_pick_session_in_worktree(
         app.show_toast("Chat conversations can't be resumed in a worktree");
         return vec![];
     }
-    dispatch_new_worktree_session(app, Some(session_id), None, None, None, None, None)
+    dispatch_new_worktree_session(
+        app, Some(session_id), None, None, None, None, None, None,
+    )
 }
 /// Remove a deleted session identity from the modal session picker and the
 /// welcome-screen picker, then re-anchor the selection on a real row.
@@ -462,6 +464,7 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
             *content_loading,
             *source_filter,
             Some(current_repo.as_str()),
+            !state.query.trim().is_empty(),
         );
         reanchor_grouped_selection(state, &map);
     }
@@ -484,6 +487,7 @@ pub(in crate::app::dispatch) fn remove_session_from_pickers(
         app.session_picker_content_loading,
         app.session_picker_source_filter,
         Some(welcome_current_repo.as_str()),
+        !app.session_picker_state.query.trim().is_empty(),
     );
     reanchor_grouped_selection(&mut app.session_picker_state, &welcome_map);
 }
@@ -1252,5 +1256,7 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session_in_worktree(
         agent.active_modal = None;
     }
     invalidate_picker_fetch_on_dismiss(app);
-    dispatch_new_worktree_session(app, Some(session_id), None, None, None, None, None)
+    dispatch_new_worktree_session(
+        app, Some(session_id), None, None, None, None, None, None,
+    )
 }

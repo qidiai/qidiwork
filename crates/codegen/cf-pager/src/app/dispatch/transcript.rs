@@ -226,18 +226,11 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
 
     with_active_agent(app, |agent| {
         let Some(idx) = agent.scrollback.selected() else {
-            crate::unified_log::info("block viewer dispatch: no selection", None, None);
             return;
         };
         let Some(entry) = agent.scrollback.entry(idx) else {
-            crate::unified_log::info("block viewer dispatch: no entry", None, None);
             return;
         };
-        crate::unified_log::info(
-            "block viewer dispatch",
-            None,
-            Some(serde_json::json!({"idx": idx, "media": !entry.block.image_references().is_empty(), "viewer": entry.block.has_normal_fullscreen_viewer()})),
-        );
 
         // Block has images/media but terminal can't render pixels — toast and bail.
         let has_media =
@@ -313,27 +306,10 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
                     is_running,
                 ))
             }
-            RenderBlock::Artifact(block) => {
-                let card = block
-                    .cards
-                    .get(block.focused_idx)
-                    .or_else(|| block.cards.last());
-                crate::unified_log::info(
-                    "block viewer dispatch: artifact arm",
-                    None,
-                    Some(serde_json::json!({"has_card": card.is_some(), "cards": block.cards.len()})),
-                );
-                card.map(|c| {
-                    let content = cf_office_preview::preview_path(&c.path);
-                    let text = cf_office_preview::render_to_text(&content);
-                    BlockViewerPane::for_plain_text(&c.name, &text)
-                })
-            }
             _ => None,
         };
 
         if viewer.is_some() {
-            crate::unified_log::info("block viewer dispatch: viewer opened", None, None);
             agent.block_viewer = viewer;
             return;
         }

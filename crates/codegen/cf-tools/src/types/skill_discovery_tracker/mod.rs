@@ -7,7 +7,9 @@
 //! `SkillUpdateEffects`.
 
 mod conditional;
+mod essential;
 mod listing;
+mod subagent_gate;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -18,7 +20,9 @@ use crate::types::compat::CompatConfig;
 use conditional::ConditionalSkills;
 use listing::{DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement};
 
+pub use essential::{DEFAULT_ESSENTIAL_SKILLS, SkillsMode, SubagentSkillListing};
 pub use listing::{XmlRenderMode, format_announcement_xml, format_compaction_skill_listing};
+pub use subagent_gate::{DEFAULT_SUBAGENT_DENIED_SKILLS, SubagentSkillDenylist};
 
 /// Why a `SkillUpdateEffects` was produced.
 ///
@@ -141,6 +145,15 @@ pub struct SkillManager {
     /// `paths:`-gated skills held back from the listing until a matching file
     /// is touched, plus their activation state. See [`ConditionalSkills`].
     conditional: ConditionalSkills,
+
+    /// Essential-mode listing projection (P0-3 phase 1). `None` = `Full` mode:
+    /// the listing advertises every discovered skill (historical behavior,
+    /// byte-identical). `Some(set)` = `Essential` mode: only skills whose
+    /// `name` is in `set` are rendered; every other skill is filtered out of
+    /// the listing (it never renders, so it never announces). A listing filter
+    /// only — discovery, slash commands, and the skill tool are unaffected.
+    /// Set once via [`SkillManager::set_skills_mode`] before `seed`.
+    essential_allow: Option<HashSet<String>>,
 }
 
 /// Canonicalize a skill path, falling back to the raw path for not-yet-created
@@ -194,6 +207,31 @@ fn dedupe_by_canonical_path_and_name(
     result
 }
 
+/// Drop gate-denied skills from a **subagent** projection (F2S).
+///
+/// Applied to the skill set *before* the listing projection runs, which is what
+/// makes the gate a permission boundary rather than a listing filter: it holds
+/// under every harness (including the XML branch that deliberately skips the
+/// essential allowlist) and under every [`SubagentSkillListing`] value, and the
+/// rendered listing can never advertise a skill the runtime set withholds.
+///
+/// A no-op when the gate is open (`[skills].subagent_denied_skills = []`).
+fn deny_subagent_skills(skills: Vec<SkillInfo>, denied: &SubagentSkillDenylist) -> Vec<SkillInfo> {
+    if denied.is_empty() {
+        return skills;
+    }
+    let (kept, blocked): (Vec<SkillInfo>, Vec<SkillInfo>) = skills
+        .into_iter()
+        .partition(|skill| !denied.denies(&skill.name));
+    if !blocked.is_empty() {
+        tracing::debug!(
+            denied = ?blocked.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            "subagent skill gate removed skills from the child projection"
+        );
+    }
+    kept
+}
+
 /// Inputs for [`render_listing`].
 struct ListingRenderParams<'a> {
     real_prefix: Option<&'a str>,
@@ -202,16 +240,55 @@ struct ListingRenderParams<'a> {
     use_xml_format: bool,
     read_tool_name: &'a str,
     skill_tool_name: &'a str,
+    /// Essential-mode allowlist. `Some(set)` restricts the listing to skills
+    /// named in `set`; `None` lists every skill (Full mode). See
+    /// [`SkillManager::set_skills_mode`].
+    essential_allow: Option<&'a HashSet<String>>,
 }
 
-/// Render the model-facing listing for `skills`, deduplicating against
-/// `announced`. Keys are inserted before budget truncation, so `announced`
-/// tracks skills that qualified, not skills whose text survived.
+/// Render the model-facing listing for `skills`, applying the essential-skill
+/// projection in `Essential` mode and deduplicating against `announced`.
 ///
 /// Both [`SkillManager::take_pending`] and
 /// [`SkillManager::listing_snapshot`] render through this path, so the
 /// injected reminders and the `/context` estimate cannot drift apart.
+///
+/// In `Essential` mode (see [`SkillManager::set_skills_mode`]) the default
+/// markdown harness renders only allowlisted skills; every non-allowlisted
+/// skill is dropped from the projection. The drop is a *listing* filter, not
+/// a state mutation: excluded skills are never inserted into `announced`, so
+/// they simply never appear in a listing (and thus never announce mid-session)
+/// while `listing_snapshot`'s `skill_count` keeps counting only the skills
+/// that actually qualified — the same invariant as the pre-projection
+/// renderer. `Full` mode passes `skills` through unchanged, byte-identical to
+/// the historical renderer.
 fn render_listing(
+    skills: &[SkillInfo],
+    announced: &mut HashSet<String>,
+    params: &ListingRenderParams<'_>,
+) -> Option<String> {
+    // TODO(P0-3 phase 2): apply the essential-skill allowlist to the XML
+    // (custom-template / cursor) harness. Phase 1 projects only the default
+    // markdown harness; the XML branch below is intentionally untouched so
+    // its code path is byte-for-byte identical to pre-projection behavior.
+    if params.use_xml_format {
+        return render_listing_inner(skills, announced, params);
+    }
+    let Some(allow) = params.essential_allow else {
+        return render_listing_inner(skills, announced, params);
+    };
+    let allowed: Vec<SkillInfo> = skills
+        .iter()
+        .filter(|skill| allow.contains(&skill.name))
+        .cloned()
+        .collect();
+    render_listing_inner(&allowed, announced, params)
+}
+
+/// Render `skills` with no projection filter, deduplicating against
+/// `announced`. Keys are inserted before budget truncation, so `announced`
+/// tracks skills that qualified, not skills whose text survived.
+fn render_listing_inner(
     skills: &[SkillInfo],
     announced: &mut HashSet<String>,
     params: &ListingRenderParams<'_>,
@@ -273,6 +350,26 @@ impl SkillManager {
     /// `SkillDiscoveryReminder` gates vendor dirs correctly.
     pub fn set_compat(&mut self, compat: CompatConfig) {
         self.compat = compat;
+    }
+
+    /// Configure the essential-skill listing projection from `[skills].mode`.
+    ///
+    /// `Full` clears the projection (every discovered skill is listed,
+    /// matching the historical renderer byte-for-byte). `Essential` installs
+    /// the resolved allowlist: the user's `[skills].essential_allow` when
+    /// provided, otherwise the built-in [`DEFAULT_ESSENTIAL_SKILLS`].
+    ///
+    /// Must be called at session start, before `seed()`. Mirrors
+    /// [`Self::set_compat`]: the manager defaults to the historical behavior
+    /// (`Full`) and the resolved value is pushed in from config.
+    pub fn set_skills_mode(&mut self, mode: SkillsMode, allow: Option<Vec<String>>) {
+        self.essential_allow = match mode {
+            SkillsMode::Full => None,
+            SkillsMode::Essential => Some(match allow {
+                Some(names) => names.into_iter().collect(),
+                None => DEFAULT_ESSENTIAL_SKILLS.iter().map(|s| (*s).to_owned()).collect(),
+            }),
+        };
     }
 
     /// Pre-populate `announced_names` from persisted state.
@@ -410,9 +507,33 @@ impl SkillManager {
     /// `effects` contains only conversation/UI side-effects the session
     /// must perform.
     pub fn take_pending(&mut self) -> Option<(Vec<SkillInfo>, SkillUpdateEffects)> {
+        self.take_pending_gated(None)
+    }
+
+    /// [`Self::take_pending`] with the F2S subagent gate applied (R5).
+    ///
+    /// A mid-session discovery flush re-derives the whole skill set, so it must
+    /// pass the same permission boundary as the subagent's startup baseline;
+    /// otherwise the first `SKILL.md` discovery in a child session would
+    /// replace `AvailableSkills` with the unfiltered catalog and re-open every
+    /// denied skill for the rest of the session.
+    ///
+    /// `denied` is `Some` only when the caller established that this is a
+    /// subagent session (the bridge reads the [`SubagentSkillDenylist`]
+    /// resource, which is installed by the subagent injection seam and never by
+    /// a primary session). The gate runs **before** the announcement is
+    /// rendered and before `announced_names` is updated, so a denied skill is
+    /// neither advertised nor recorded as announced.
+    ///
+    /// `None` is byte-identical to the historical ungated path.
+    pub fn take_pending_gated(
+        &mut self,
+        denied: Option<&SubagentSkillDenylist>,
+    ) -> Option<(Vec<SkillInfo>, SkillUpdateEffects)> {
         let pending = self.pending.take()?;
 
-        let runtime_skills = dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills);
+        let mut runtime_skills =
+            dedup_by_canonical_path(&self.discovered_skills, &self.startup_skills);
 
         let kind = match pending {
             PendingKind::Discovery => SkillUpdateKind::Discovery,
@@ -421,7 +542,7 @@ impl SkillManager {
         // Take the announced set out of `self` so `render_listing` can
         // borrow `self` immutably alongside it; restored below.
         let mut announced = std::mem::take(&mut self.announced_names);
-        let skills_owned = match pending {
+        let mut skills_owned = match pending {
             PendingKind::Discovery => None,
             PendingKind::BaselineChange => {
                 announced.clear();
@@ -431,6 +552,14 @@ impl SkillManager {
                 ))
             }
         };
+        if let Some(denied) = denied {
+            runtime_skills = deny_subagent_skills(runtime_skills, denied);
+            let listing = match skills_owned.take() {
+                Some(skills) => skills,
+                None => self.discovered_skills.clone(),
+            };
+            skills_owned = Some(deny_subagent_skills(listing, denied));
+        }
         let skills = skills_owned.as_deref().unwrap_or(&self.discovered_skills);
 
         let system_reminder = render_listing(skills, &mut announced, &self.render_params());
@@ -490,6 +619,16 @@ impl SkillManager {
 
     /// Listing-render inputs shared by the reminder and snapshot paths.
     fn render_params(&self) -> ListingRenderParams<'_> {
+        self.render_params_with_allow(self.essential_allow.as_ref())
+    }
+
+    /// Listing-render inputs with an explicit essential projection, so the
+    /// subagent baseline path ([`Self::listing_for_subagent`]) can render
+    /// with a projection other than the primary session's configured one.
+    fn render_params_with_allow<'a>(
+        &'a self,
+        essential_allow: Option<&'a HashSet<String>>,
+    ) -> ListingRenderParams<'a> {
         ListingRenderParams {
             real_prefix: self.real_cwd_prefix.as_deref(),
             display_prefix: self.display_cwd.as_deref(),
@@ -500,7 +639,138 @@ impl SkillManager {
                 .skill_tool_name
                 .as_deref()
                 .unwrap_or(DEFAULT_SKILL_TOOL_NAME),
+            essential_allow,
         }
+    }
+
+    /// Resolve the essential allowlist governing a [`SubagentSkillListing`]
+    /// projection (O-1).
+    ///
+    /// - `Some(None)` — [`SubagentSkillListing::Full`]: no projection.
+    /// - `Some(Some(set))` — [`SubagentSkillListing::Essential`]: restrict to
+    ///   `set` (the session's resolved `essential_allow` when present, else the
+    ///   built-in [`DEFAULT_ESSENTIAL_SKILLS`]; mirrors `set_skills_mode`).
+    /// - `None` — [`SubagentSkillListing::None`]: no injection at all.
+    fn subagent_listing_allow(
+        &self,
+        listing: SubagentSkillListing,
+    ) -> Option<Option<HashSet<String>>> {
+        match listing {
+            SubagentSkillListing::None => None,
+            SubagentSkillListing::Essential => Some(Some(
+                self.essential_allow.clone().unwrap_or_else(|| {
+                    DEFAULT_ESSENTIAL_SKILLS
+                        .iter()
+                        .map(|s| (*s).to_owned())
+                        .collect()
+                }),
+            )),
+            SubagentSkillListing::Full => Some(None),
+        }
+    }
+
+    /// Render the baseline skill listing a **subagent** session injects at
+    /// startup, applying the requested [`SubagentSkillListing`] projection.
+    ///
+    /// **Read-only w.r.t. the announcement ledger**: draws from the current
+    /// combined skill set (startup + discovered) with a throwaway announce set,
+    /// so `announced_names` is never read for dedup nor written. This is why
+    /// the child can neither pollute nor be suppressed by the cross-session
+    /// ledger (its production call path is the shell's subagent-spawn
+    /// injection, via `ToolBridge::subagent_skill_listing`).
+    ///
+    /// `denied` is the resolved F2S subagent gate
+    /// ([`SubagentSkillDenylist`], from `[skills].subagent_denied_skills`). It is
+    /// applied to the skill set before rendering, so gate-denied skills are
+    /// absent from the listing under every harness and every
+    /// [`SubagentSkillListing`] value. Passing it in (rather than storing it on
+    /// the manager) keeps the gate a property of the *subagent injection seam*:
+    /// nothing else can reach the manager with it.
+    ///
+    /// Returns `None` when the projection is [`SubagentSkillListing::None`]
+    /// (no injection) or when no skill qualifies for the listing (including
+    /// "the gate denied everything that was left").
+    pub fn listing_for_subagent(
+        &self,
+        listing: SubagentSkillListing,
+        denied: &SubagentSkillDenylist,
+    ) -> Option<SkillListingSnapshot> {
+        let allow = self.subagent_listing_allow(listing)?;
+        let skills =
+            dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills);
+        let skills = deny_subagent_skills(skills, denied);
+        let mut qualified = HashSet::new();
+        let params = self.render_params_with_allow(allow.as_ref());
+        let text = render_listing(&skills, &mut qualified, &params)?;
+        Some(SkillListingSnapshot {
+            text,
+            skill_count: qualified.len(),
+        })
+    }
+
+    /// The runtime (skill-tool-visible) skill set matching the baseline
+    /// listing a subagent injects at startup, for installation into
+    /// `AvailableSkills` (O-1).
+    ///
+    /// The skill tool reads its activatable set from `AvailableSkills`. The
+    /// per-session `finalize()` seeds that resource with the **unprojected**
+    /// startup catalog, so without this a subagent whose listing is
+    /// `Essential` would advertise only the allowlisted skills while the tool
+    /// could still activate every startup skill — the listing and the
+    /// activatable set would disagree. Applying the same projection here keeps
+    /// them in lockstep.
+    ///
+    /// Mirrors [`render_listing`]'s gate for the *essential* allowlist so the
+    /// two cannot drift: the XML harness does not apply the essential allowlist
+    /// (P0-3 phase 2 TODO), so neither does the runtime set.
+    ///
+    /// `denied` is the resolved F2S subagent gate (see
+    /// [`Self::listing_for_subagent`]). It rides **on top** of either
+    /// projection and holds for every listing value:
+    ///
+    /// | listing | runtime set |
+    /// |---|---|
+    /// | `Essential` | essential allowlist ∩ ¬denied |
+    /// | `Full` | all skills ∩ ¬denied |
+    /// | `None` | all skills ∩ ¬denied |
+    ///
+    /// `None` deliberately still returns a set. F2R left the resource
+    /// untouched for `None` (a *cost* argument: no injection, no override), but
+    /// the gate is a *permission* boundary — leaving the unprojected catalog
+    /// activatable would make it bypassable with a single `subagent_listing =
+    /// "none"`. So `None` installs the gate-only projection instead.
+    pub fn subagent_runtime_skills(
+        &self,
+        listing: SubagentSkillListing,
+        denied: &SubagentSkillDenylist,
+    ) -> Vec<SkillInfo> {
+        let allow = self.subagent_listing_allow(listing);
+        let skills =
+            dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills);
+        let skills = deny_subagent_skills(skills, denied);
+        if self.use_xml_format {
+            return skills;
+        }
+        match allow {
+            Some(Some(allow)) => skills
+                .into_iter()
+                .filter(|skill| allow.contains(&skill.name))
+                .collect(),
+            // `Full` (`Some(None)`) and `None` (`None`): the gate-only set.
+            Some(None) | None => skills,
+        }
+    }
+
+    /// Discard any pending reconciliation without rendering or announcing.
+    ///
+    /// Used by the subagent baseline path: the child injects its baseline
+    /// listing read-only, so its pending `BaselineChange` must be dropped
+    /// rather than drained — draining (`take_pending`) writes `announced_names`,
+    /// the ledger a child must leave untouched. Without this, the first tool
+    /// call would drain the stale pending and inject a second listing (and
+    /// pollute the ledger).
+    pub fn clear_pending(&mut self) {
+        self.pending = None;
     }
 
     /// Get the current dynamically discovered skills.
@@ -1572,5 +1842,835 @@ mod tests {
                 .unwrap();
             assert_eq!(snapshot.text, injected, "xml={xml}");
         }
+    }
+
+    // ── Essential-mode projection (P0-3 phase 1) ─────────────────
+
+    #[test]
+    fn essential_mode_lists_only_allowlisted_skills() {
+        let mut mgr = SkillManager::new();
+        mgr.set_skills_mode(
+            SkillsMode::Essential,
+            Some(vec!["allowed-a".to_owned(), "allowed-b".to_owned()]),
+        );
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("allowed-a", "/a/SKILL.md"),
+                make_skill("excluded", "/b/SKILL.md"),
+                make_skill("allowed-b", "/c/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let r = mgr.take_pending_reconciliation().unwrap();
+        let text = r.effects.system_reminder.expect("listing rendered");
+        assert!(
+            text.contains("- allowed-a:"),
+            "allowlisted skill missing:\n{text}"
+        );
+        assert!(
+            text.contains("- allowed-b:"),
+            "allowlisted skill missing:\n{text}"
+        );
+        assert!(
+            !text.contains("excluded"),
+            "non-allowlisted skill leaked into listing:\n{text}"
+        );
+    }
+
+    #[test]
+    fn essential_mode_suppresses_non_allowlisted_discovery() {
+        let mut mgr = SkillManager::new();
+        mgr.set_skills_mode(
+            SkillsMode::Essential,
+            Some(vec!["core".to_owned(), "core-dyn".to_owned()]),
+        );
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("core", "/core/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let _ = mgr.take_pending_reconciliation(); // drain baseline
+
+        // A non-allowlisted discovery must not announce.
+        assert!(mgr.add_discovered(vec![make_skill("noise", "/noise/SKILL.md")]));
+        let r = mgr.take_pending_reconciliation().unwrap();
+        assert!(
+            r.effects.system_reminder.is_none(),
+            "non-allowlisted discovery must not announce: {:?}",
+            r.effects.system_reminder
+        );
+        // Discovery/invocation is unaffected: the skill is still advertised
+        // for slash commands (projection is listing-only).
+        assert!(mgr.slash_skills().iter().any(|s| s.name == "noise"));
+
+        // An allowlisted discovery still announces normally.
+        assert!(mgr.add_discovered(vec![make_skill("core-dyn", "/core-dyn/SKILL.md")]));
+        let text = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .expect("allowlisted discovery must announce");
+        assert!(text.contains("core-dyn"), "{text}");
+    }
+
+    #[test]
+    fn essential_mode_second_render_omits_excluded_skill() {
+        // After the excluded skill is marked decided, a re-announce (e.g. a
+        // baseline change) still omits it.
+        let mut mgr = SkillManager::new();
+        mgr.set_skills_mode(SkillsMode::Essential, Some(vec!["keep".to_owned()]));
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("keep", "/keep/SKILL.md"),
+                make_skill("drop", "/drop/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let _ = mgr.take_pending_reconciliation();
+
+        mgr.update_startup_baseline(vec![
+            make_skill("keep", "/keep/SKILL.md"),
+            make_skill("drop2", "/drop2/SKILL.md"),
+        ]);
+        let text = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .expect("baseline change re-announces");
+        assert!(text.contains("- keep:"), "{text}");
+        assert!(!text.contains("drop"), "excluded skill reappeared:\n{text}");
+    }
+
+    #[test]
+    fn full_mode_matches_default_rendering() {
+        let skills = vec![
+            make_skill("x", "/x/SKILL.md"),
+            make_skill("y", "/y/SKILL.md"),
+        ];
+
+        let mut default_mgr = SkillManager::new();
+        default_mgr.seed(None, None, skills.clone(), None, None, None);
+        let default_text = default_mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder;
+
+        let mut full_mgr = SkillManager::new();
+        // Explicit Full with a would-be allowlist must behave like no filter.
+        full_mgr.set_skills_mode(SkillsMode::Full, Some(vec!["x".to_owned()]));
+        full_mgr.seed(None, None, skills.clone(), None, None, None);
+        let full_text = full_mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder;
+
+        assert_eq!(default_text, full_text, "Full must equal default rendering");
+        let text = full_text.expect("full listing rendered");
+        assert!(text.contains("- x:"), "{text}");
+        assert!(text.contains("- y:"), "{text}");
+    }
+
+    #[test]
+    fn essential_default_uses_builtin_allowlist() {
+        let mut mgr = SkillManager::new();
+        mgr.set_skills_mode(SkillsMode::Essential, None);
+        assert!(
+            mgr.essential_allow.as_ref().unwrap().contains("check-work"),
+            "built-in allowlist should be installed when no override is given"
+        );
+
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("check-work", "/ck/SKILL.md"),
+                make_skill("bid-write", "/bid/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let text = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .unwrap();
+        assert!(text.contains("- check-work:"), "{text}");
+        assert!(
+            !text.contains("bid-write"),
+            "office skill must not be essential:\n{text}"
+        );
+    }
+
+    #[test]
+    fn essential_listing_snapshot_reflects_projection() {
+        // /context accounting must reflect the projected listing, not the
+        // full set.
+        let mut mgr = SkillManager::new();
+        mgr.set_skills_mode(SkillsMode::Essential, Some(vec!["keep".to_owned()]));
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("keep", "/keep/SKILL.md"),
+                make_skill("drop", "/drop/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let snapshot = mgr.listing_snapshot().unwrap();
+        assert_eq!(snapshot.skill_count, 1);
+        assert!(snapshot.text.contains("keep"), "{}", snapshot.text);
+        assert!(
+            !snapshot.text.contains("drop"),
+            "snapshot must reflect the projection: {}",
+            snapshot.text
+        );
+    }
+
+    #[test]
+    fn essential_is_ignored_by_xml_harness_phase1() {
+        // Phase 1 projects only the markdown harness. The XML branch must
+        // stay unfiltered until the phase-2 TODO is implemented.
+        let mut mgr = SkillManager::new();
+        mgr.set_xml_format(true);
+        mgr.set_skills_mode(SkillsMode::Essential, Some(vec!["keep".to_owned()]));
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("keep", "/keep/SKILL.md"),
+                make_skill("drop", "/drop/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let text = mgr
+            .take_pending_reconciliation()
+            .unwrap()
+            .effects
+            .system_reminder
+            .unwrap();
+        assert!(text.contains("keep"), "{text}");
+        assert!(
+            text.contains("drop"),
+            "XML harness must remain unfiltered in phase 1: {text}"
+        );
+    }
+
+    // ── Subagent baseline listing (F2) ───────────────────────────
+
+    /// Seed a manager with an allowlisted core skill plus a non-allowlisted
+    /// one, returning it with the baseline pending still in place.
+    ///
+    /// Pass [`open_gate`] for the F2S subagent gate: these tests isolate the F2
+    /// listing projection, and `bid-write` is one of the built-in denied
+    /// families. Gate behaviour has its own fixture and tests
+    /// (`manager_with_gate_skills`).
+    fn manager_with_mixed_skills() -> SkillManager {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("check-work", "/ck/SKILL.md"),
+                make_skill("bid-write", "/bid/SKILL.md"),
+                make_skill("random-tool", "/rt/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        mgr
+    }
+
+    /// The F2S gate with nothing denied, so a projection can be tested in
+    /// isolation from the gate.
+    fn open_gate() -> SubagentSkillDenylist {
+        SubagentSkillDenylist::open()
+    }
+
+    /// The F2S gate at its built-in (dangerous-families) value.
+    fn default_gate() -> SubagentSkillDenylist {
+        SubagentSkillDenylist::default()
+    }
+
+    /// Manager seeded with the three exact-name denied families, both `bid-`
+    /// prefix victims, and two safe skills. The `wecom-` family is exercised by
+    /// its own fixture in [`subagent_gate_denies_wecom_family_in_child_projection`].
+    fn manager_with_gate_skills() -> SkillManager {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("check-work", "/ck/SKILL.md"),
+                make_skill("random-tool", "/rt/SKILL.md"),
+                make_skill("qwen-image-lowvram", "/qwen/SKILL.md"),
+                make_skill("pdf-to-word-ocr", "/pdf/SKILL.md"),
+                make_skill("seal-extractor", "/seal/SKILL.md"),
+                make_skill("bid-write", "/bw/SKILL.md"),
+                make_skill("bid-parse", "/bp/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        mgr
+    }
+
+    /// Sorted skill names, for order-independent set assertions.
+    fn runtime_names(skills: &[SkillInfo]) -> Vec<&str> {
+        let mut names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn subagent_essential_projection_filters_to_allowlist() {
+        let mgr = manager_with_mixed_skills();
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Essential, &open_gate())
+            .expect("essential projection must render");
+        assert!(
+            snapshot.text.contains("check-work"),
+            "allowlisted core skill must be present in the subagent essential listing:\n{}",
+            snapshot.text
+        );
+        assert!(
+            !snapshot.text.contains("bid-write") && !snapshot.text.contains("random-tool"),
+            "non-allowlisted skills must be projected out of the subagent essential listing:\n{}",
+            snapshot.text
+        );
+        assert_eq!(
+            snapshot.skill_count, 1,
+            "exactly one allowlisted skill should qualify: {}",
+            snapshot.text
+        );
+    }
+
+    #[test]
+    fn subagent_full_projection_lists_every_skill() {
+        let mgr = manager_with_mixed_skills();
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Full, &open_gate())
+            .expect("full projection must render");
+        for name in ["check-work", "bid-write", "random-tool"] {
+            assert!(
+                snapshot.text.contains(name),
+                "full projection must list {name}:\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(snapshot.skill_count, 3, "all three skills should qualify");
+    }
+
+    #[test]
+    fn subagent_none_projection_injects_nothing() {
+        let mgr = manager_with_mixed_skills();
+        assert!(
+            mgr.listing_for_subagent(SubagentSkillListing::None, &open_gate())
+                .is_none(),
+            "`none` must suppress the subagent baseline listing entirely"
+        );
+    }
+
+    #[test]
+    fn subagent_listing_is_read_only_and_leaves_ledger_untouched() {
+        // The announcement ledger (`announced_names`) must NOT be read for
+        // dedup nor written by the subagent baseline path.
+        let mut mgr = manager_with_mixed_skills();
+        // Simulate an inherited, fully-populated ledger.
+        mgr.restore_announced_names(
+            ["check-work", "bid-write", "random-tool"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        );
+        let before = mgr.announced_names().clone();
+
+        // Even with every skill already "announced", the subagent still gets a
+        // listing (unconditional), and the ledger is unchanged.
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Essential, &open_gate())
+            .expect("subagent listing must not be suppressed by an inherited ledger");
+        assert!(snapshot.text.contains("check-work"), "{}", snapshot.text);
+        assert_eq!(
+            mgr.announced_names(),
+            &before,
+            "subagent baseline rendering must not mutate the announcement ledger"
+        );
+    }
+
+    #[test]
+    fn clear_pending_drops_stale_baseline_without_announcing() {
+        let mut mgr = manager_with_mixed_skills();
+        // seed() set a pending BaselineChange; the subagent path drops it
+        // read-only so the first tool call cannot drain a second listing.
+        mgr.clear_pending();
+        assert!(
+            mgr.take_pending_reconciliation().is_none(),
+            "clear_pending must discard the pending reconciliation"
+        );
+        // And the ledger stays empty (nothing rendered, nothing announced).
+        assert!(
+            mgr.announced_names().is_empty(),
+            "clear_pending must not announce anything"
+        );
+    }
+
+    /// O-1: the runtime set a subagent installs into `AvailableSkills` must
+    /// match its listing — `Essential` restricts to the allowlist, `Full`
+    /// keeps every skill, and `None` installs the gate-only set (F2S changed
+    /// the last one: `none` used to override nothing, which would have made the
+    /// permission gate bypassable by choosing `none`). Otherwise the skill tool
+    /// could activate a skill the listing never advertised.
+    #[test]
+    fn subagent_runtime_skills_tracks_the_listing_projection() {
+        let mgr = manager_with_mixed_skills();
+
+        let essential = mgr.subagent_runtime_skills(SubagentSkillListing::Essential, &open_gate());
+        assert_eq!(
+            runtime_names(&essential),
+            vec!["check-work"],
+            "essential runtime set must be exactly the allowlisted skill"
+        );
+
+        let full = mgr.subagent_runtime_skills(SubagentSkillListing::Full, &open_gate());
+        assert_eq!(
+            full.len(),
+            3,
+            "full runtime set must keep every skill: {:?}",
+            full.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+
+        let none = mgr.subagent_runtime_skills(SubagentSkillListing::None, &open_gate());
+        assert_eq!(
+            runtime_names(&none),
+            vec!["bid-write", "check-work", "random-tool"],
+            "with the gate open, `none` installs the whole catalog"
+        );
+    }
+
+    // ── Subagent skill gate (F2S) ────────────────────────────────
+
+    /// The default gate removes the dangerous families from **both** the child
+    /// listing and the runtime set, while leaving unrelated skills alone.
+    #[test]
+    fn subagent_gate_default_denies_dangerous_skills_in_listing_and_runtime_set() {
+        let mgr = manager_with_gate_skills();
+        let gate = default_gate();
+
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Full, &gate)
+            .expect("full listing must render");
+        for denied in [
+            "qwen-image-lowvram",
+            "pdf-to-word-ocr",
+            "seal-extractor",
+            "bid-write",
+            "bid-parse",
+        ] {
+            assert!(
+                !snapshot.text.contains(denied),
+                "the default gate must keep {denied} out of the child listing:\n{}",
+                snapshot.text
+            );
+        }
+        for kept in ["check-work", "random-tool"] {
+            assert!(
+                snapshot.text.contains(kept),
+                "the gate must not disturb unrelated skill {kept}:\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(
+            snapshot.skill_count, 2,
+            "only the two unrelated skills may qualify:\n{}",
+            snapshot.text
+        );
+
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::Full, &gate)),
+            vec!["check-work", "random-tool"],
+            "the runtime set must follow the listing exactly"
+        );
+    }
+
+    /// v3 decision 1: the `wecom-` family must not reach a subagent — neither in
+    /// the model-facing listing nor in the activatable runtime set. A child that
+    /// can load `wecom-unified` posts to WeChat with the user's own
+    /// `wecom-cli` credentials, bypassing the `wecom-bridge` daemon's source
+    /// validation, human confirmation and audit log.
+    #[test]
+    fn subagent_gate_denies_wecom_family_in_child_projection() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("check-work", "/ck/SKILL.md"),
+                make_skill("audit-rubrics", "/ar/SKILL.md"),
+                make_skill("wecom-unified", "/wc/SKILL.md"),
+                make_skill("wecom-bridge", "/wb/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let gate = default_gate();
+
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Full, &gate)
+            .expect("full listing must render");
+        for denied in ["wecom-unified", "wecom-bridge"] {
+            assert!(
+                !snapshot.text.contains(denied),
+                "the default gate must keep {denied} out of the child listing:\n{}",
+                snapshot.text
+            );
+        }
+        for kept in ["check-work", "audit-rubrics"] {
+            assert!(
+                snapshot.text.contains(kept),
+                "the gate must not disturb unrelated skill {kept}:\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(
+            snapshot.skill_count, 2,
+            "only the two safe skills may qualify:\n{}",
+            snapshot.text
+        );
+
+        let full_runtime =
+            mgr.subagent_runtime_skills(SubagentSkillListing::Full, &gate);
+        assert_eq!(
+            runtime_names(&full_runtime),
+            vec!["audit-rubrics", "check-work"],
+            "the activatable set must not carry the wecom family"
+        );
+        // `none` installs the gate-only set, so the listing knob cannot re-open
+        // the WeChat path.
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::None, &gate)),
+            vec!["audit-rubrics", "check-work"],
+            "`none` must still withhold the wecom family"
+        );
+    }
+
+    /// R5: a mid-session discovery flush re-derives the whole skill set, so it
+    /// must pass the same gate as the startup baseline. A pending
+    /// `wecom-unified` / `bid-*` discovery must be withheld from both the
+    /// runtime set (what the skill tool can activate) and the injected
+    /// announcement — otherwise one touch of a `SKILL.md` re-opens the family
+    /// for the rest of the child session.
+    #[test]
+    fn gated_pending_flush_withholds_denied_discoveries() {
+        let mut mgr = manager_with_gate_skills();
+        // Drain the startup baseline: the defect is the *discovery* flush.
+        let _ = mgr.take_pending();
+        assert!(
+            mgr.add_discovered(vec![
+                make_skill("fresh-safe", "/fs/SKILL.md"),
+                make_skill("wecom-unified", "/wu/SKILL.md"),
+                make_skill("bid-review", "/br/SKILL.md"),
+            ]),
+            "the discoveries must queue a pending flush"
+        );
+
+        let (runtime, effects) = mgr
+            .take_pending_gated(Some(&default_gate()))
+            .expect("a queued discovery must flush");
+
+        let names = runtime_names(&runtime);
+        assert!(
+            names.contains(&"fresh-safe"),
+            "the safe discovery must survive the gate: {names:?}"
+        );
+        for denied in [
+            "wecom-unified",
+            "bid-review",
+            // The startup baseline's denied families must stay out of the
+            // `AvailableSkills` replacement too, not just the new discoveries.
+            "qwen-image-lowvram",
+            "pdf-to-word-ocr",
+            "seal-extractor",
+            "bid-write",
+            "bid-parse",
+        ] {
+            assert!(
+                !names.contains(&denied),
+                "{denied} must stay withheld after the flush: {names:?}"
+            );
+        }
+
+        let reminder = effects
+            .system_reminder
+            .expect("a discovery flush announces the new skills");
+        assert!(
+            reminder.contains("fresh-safe"),
+            "the safe skill must be announced:\n{reminder}"
+        );
+        for denied in ["wecom-unified", "bid-review"] {
+            assert!(
+                !reminder.contains(denied),
+                "{denied} must not be announced to the child:\n{reminder}"
+            );
+        }
+    }
+
+    /// R5: the gate is re-read on **every** flush, not latched at the first
+    /// one. `wecom-one` stays in `discovered_skills` after being withheld (the
+    /// gate is a write-time filter, not a state purge), so each later flush has
+    /// to filter it again — and a fresh denied discovery must be withheld just
+    /// the same.
+    #[test]
+    fn gate_is_reapplied_on_each_pending_flush() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![make_skill("check-work", "/ck/SKILL.md")],
+            None,
+            None,
+            None,
+        );
+        let _ = mgr.take_pending_gated(Some(&default_gate()));
+
+        mgr.add_discovered(vec![make_skill("wecom-one", "/w1/SKILL.md")]);
+        let (runtime, _) = mgr
+            .take_pending_gated(Some(&default_gate()))
+            .expect("first discovery flush");
+        assert!(
+            !runtime.iter().any(|s| s.name == "wecom-one"),
+            "first flush must withhold the denied discovery"
+        );
+
+        mgr.add_discovered(vec![make_skill("wecom-two", "/w2/SKILL.md")]);
+        let (runtime, effects) = mgr
+            .take_pending_gated(Some(&default_gate()))
+            .expect("second discovery flush");
+        assert_eq!(
+            runtime_names(&runtime),
+            vec!["check-work"],
+            "a later flush must not forget the earlier denial either"
+        );
+        // With nothing *announceable* left, the renderer legitimately yields no
+        // reminder; if one is produced, it must not mention the denied skill.
+        assert!(
+            !effects
+                .system_reminder
+                .as_deref()
+                .unwrap_or_default()
+                .contains("wecom-two"),
+            "the second denied discovery must not be announced"
+        );
+    }
+
+    /// Requirement 3: the primary session is never gated. With no denylist in
+    /// scope (the `take_pending()` wrapper), a `wecom-unified` discovery flows
+    /// through exactly as before.
+    #[test]
+    fn ungated_pending_flush_keeps_denied_names_for_the_primary_session() {
+        let mut mgr = SkillManager::new();
+        mgr.seed(
+            None,
+            None,
+            vec![
+                make_skill("check-work", "/ck/SKILL.md"),
+                make_skill("wecom-unified", "/wu/SKILL.md"),
+            ],
+            None,
+            None,
+            None,
+        );
+        let (runtime, _) = mgr.take_pending().expect("startup baseline flush");
+        assert!(
+            runtime.iter().any(|s| s.name == "wecom-unified"),
+            "the primary session must keep its full skill set: {:?}",
+            runtime_names(&runtime)
+        );
+    }
+
+    /// The gate holds under every `subagent_listing` value, including `none` —
+    /// where it still installs or writes `full - denied` rather than leaving the
+    /// unprojected catalog activatable.
+    #[test]
+    fn subagent_gate_applies_under_every_listing_projection() {
+        let mgr = manager_with_gate_skills();
+        let gate = default_gate();
+
+        let essential = mgr
+            .listing_for_subagent(SubagentSkillListing::Essential, &gate)
+            .expect("essential must render");
+        assert!(essential.text.contains("check-work"), "{}", essential.text);
+        assert!(
+            !essential.text.contains("bid-write"),
+            "the gate must hold under the essential projection too: {}",
+            essential.text
+        );
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::Essential, &gate)),
+            vec!["check-work"]
+        );
+
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::Full, &gate)),
+            vec!["check-work", "random-tool"],
+            "the gate must hold under `full`"
+        );
+
+        assert!(
+            mgr.listing_for_subagent(SubagentSkillListing::None, &gate)
+                .is_none(),
+            "`none` still injects nothing"
+        );
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::None, &gate)),
+            vec!["check-work", "random-tool"],
+            "`none` must install `full - denied` so the gate cannot be bypassed \
+             by the listing knob"
+        );
+    }
+
+    /// The gate rides on top of the essential allowlist: denying an allowlisted
+    /// skill removes it, and with nothing left the listing disappears while the
+    /// (empty) runtime set is still installed.
+    #[test]
+    fn subagent_gate_overrides_the_essential_allowlist() {
+        let mgr = manager_with_gate_skills();
+        let gate = SubagentSkillDenylist::resolve(Some(vec!["check-work".to_owned()]));
+
+        assert!(
+            mgr.listing_for_subagent(SubagentSkillListing::Essential, &gate)
+                .is_none(),
+            "with the only allowlisted skill denied, nothing qualifies to inject"
+        );
+        assert!(
+            mgr.subagent_runtime_skills(SubagentSkillListing::Essential, &gate)
+                .is_empty(),
+            "the activatable set must be empty, not silently re-opened"
+        );
+    }
+
+    /// An explicit denylist **replaces** the built-in set.
+    #[test]
+    fn subagent_gate_custom_override_replaces_the_default_set() {
+        let mgr = manager_with_gate_skills();
+        let gate = SubagentSkillDenylist::resolve(Some(vec!["random-tool".to_owned()]));
+
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Full, &gate)
+            .expect("full listing must render");
+        assert!(
+            !snapshot.text.contains("random-tool"),
+            "the configured entry must be denied:\n{}",
+            snapshot.text
+        );
+        for back in [
+            "qwen-image-lowvram",
+            "pdf-to-word-ocr",
+            "seal-extractor",
+            "bid-write",
+            "bid-parse",
+        ] {
+            assert!(
+                snapshot.text.contains(back),
+                "an explicit denylist replaces the built-in set, so {back} returns:\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(
+            runtime_names(&mgr.subagent_runtime_skills(SubagentSkillListing::Full, &gate)),
+            vec![
+                "bid-parse",
+                "bid-write",
+                "check-work",
+                "pdf-to-word-ocr",
+                "qwen-image-lowvram",
+                "seal-extractor",
+            ],
+        );
+    }
+
+    /// An explicit empty denylist opens the gate for children entirely.
+    #[test]
+    fn subagent_gate_empty_override_opens_everything() {
+        let mgr = manager_with_gate_skills();
+        let gate = open_gate();
+
+        let snapshot = mgr
+            .listing_for_subagent(SubagentSkillListing::Full, &gate)
+            .expect("full listing must render");
+        for re_opened in [
+            "qwen-image-lowvram",
+            "pdf-to-word-ocr",
+            "seal-extractor",
+            "bid-write",
+            "bid-parse",
+        ] {
+            assert!(
+                snapshot.text.contains(re_opened),
+                "an empty denylist must re-open {re_opened}:\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(
+            mgr.subagent_runtime_skills(SubagentSkillListing::Full, &gate)
+                .len(),
+            7,
+            "an empty denylist must restore the whole catalog"
+        );
+    }
+
+    /// Primary-session regression: the gate is invisible to anything but the
+    /// two subagent projections. The primary listing (`listing_snapshot`) and
+    /// the slash-command set (`slash_skills`) still carry the denied skills, so
+    /// the user's own session is never restricted.
+    #[test]
+    fn subagent_gate_does_not_touch_the_primary_session_surfaces() {
+        let mgr = manager_with_gate_skills();
+
+        let snapshot = mgr
+            .listing_snapshot()
+            .expect("primary listing must render");
+        for denied in [
+            "qwen-image-lowvram",
+            "pdf-to-word-ocr",
+            "seal-extractor",
+            "bid-write",
+            "bid-parse",
+        ] {
+            assert!(
+                snapshot.text.contains(denied),
+                "the primary listing must stay ungated: {denied}\n{}",
+                snapshot.text
+            );
+        }
+        assert_eq!(snapshot.skill_count, 7);
+
+        assert!(
+            mgr.slash_skills().iter().any(|s| s.name == "bid-write"),
+            "the primary slash-command set must stay ungated"
+        );
     }
 }

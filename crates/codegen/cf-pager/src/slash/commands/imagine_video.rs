@@ -1,12 +1,13 @@
 use agent_client_protocol as acp;
 use cf_tools::implementations::qidi_build::{
-    IMAGE_TO_VIDEO_TOOL_NAME, IMAGINE_VIDEO_COMMAND_NAME, imagine_video_instruction,
-    imagine_video_usage_message,
+    IMAGINE_VIDEO_COMMAND_NAME, imagine_video_instruction, imagine_video_usage_message,
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-const REQUIRED_TOOLS: &[&str] = &[IMAGE_TO_VIDEO_TOOL_NAME];
+/// Client-facing name (see the /imagine sibling note): the registry id
+/// `qidi_build:ImageToVideo` never appears in the advertised tools set.
+const REQUIRED_TOOLS: &[&str] = &["image_to_video"];
 
 pub struct ImagineVideoCommand;
 
@@ -48,7 +49,7 @@ impl SlashCommand for ImagineVideoCommand {
         CommandResult::InjectSkill {
             display_text: format!("/imagine-video {prompt}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                imagine_video_instruction(),
+                imagine_video_instruction(prompt),
             ))],
             display_as_skill: false,
             scheduled_task_preview: None,

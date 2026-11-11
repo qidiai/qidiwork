@@ -1,10 +1,19 @@
 use indexmap::IndexMap;
 
+/// Sentinel model id that selects the built-in scraping engine for the web
+/// search tool (no API key, no LLM round-trip). Reserved: configuring
+/// `[models] web_search = "native"` always selects the native engine, even
+/// if a `[model.native]` table exists.
+pub const NATIVE_MODEL_ID: &str = "native";
+
 /// Configuration for the web search tool.
 ///
 /// Use `Disabled` when no API key is available or web search should be turned off.
 /// Use `Enabled { … }` to provide credentials and endpoint configuration.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+/// Use `Native` for the built-in engine: it scrapes public search engines
+/// (360/Sogou for CJK queries, Bing otherwise) directly and returns the
+/// result list — zero external dependencies, no API key, no second LLM call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum WebSearchConfig {
     #[default]
@@ -18,12 +27,13 @@ pub enum WebSearchConfig {
         #[serde(skip_serializing_if = "Option::is_none")]
         alpha_test_key: Option<String>,
     },
+    Native,
 }
 
 impl WebSearchConfig {
-    /// Returns `true` when the config is the `Enabled` variant.
+    /// Returns `true` when the config enables the tool (either backend).
     pub fn is_enabled(&self) -> bool {
-        matches!(self, Self::Enabled { .. })
+        !matches!(self, Self::Disabled)
     }
 
     /// Return a copy safe for returning to clients.
@@ -33,6 +43,7 @@ impl WebSearchConfig {
     pub fn redacted(&self) -> Self {
         match self {
             Self::Disabled => Self::Disabled,
+            Self::Native => Self::Native,
             Self::Enabled {
                 base_url,
                 model,
@@ -63,7 +74,7 @@ mod tests {
     fn test_config_enabled() {
         let config = WebSearchConfig::Enabled {
             api_key: "test-key".to_string(),
-            base_url: "https://api.x.ai/v1".to_string(),
+            base_url: "https://api.example.test/v1".to_string(),
             model: "test-web-search-model".to_string(),
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
@@ -77,7 +88,7 @@ mod tests {
         headers.insert("X-Custom".to_string(), "value".to_string());
         let config = WebSearchConfig::Enabled {
             api_key: "secret-key-12345".to_string(),
-            base_url: "https://api.x.ai/v1".to_string(),
+            base_url: "https://api.example.test/v1".to_string(),
             model: "test-web-search-model".to_string(),
             extra_headers: headers,
             alpha_test_key: Some("alpha-secret".to_string()),
@@ -92,7 +103,7 @@ mod tests {
                 alpha_test_key,
             } => {
                 assert_eq!(api_key, "***REDACTED***");
-                assert_eq!(base_url, "https://api.x.ai/v1");
+                assert_eq!(base_url, "https://api.example.test/v1");
                 assert_eq!(model, "test-web-search-model");
                 assert_eq!(extra_headers.get("X-Custom").unwrap(), "value");
                 assert!(alpha_test_key.is_none());
@@ -105,7 +116,7 @@ mod tests {
     fn test_config_serde_roundtrip() {
         let config = WebSearchConfig::Enabled {
             api_key: "key".to_string(),
-            base_url: "https://api.x.ai/v1".to_string(),
+            base_url: "https://api.example.test/v1".to_string(),
             model: "test-web-search-model".to_string(),
             extra_headers: IndexMap::new(),
             alpha_test_key: None,
@@ -120,10 +131,23 @@ mod tests {
         let json = r#"{
             "status": "enabled",
             "api_key": "xai-abc123",
-            "base_url": "https://api.x.ai/v1",
+            "base_url": "https://api.example.test/v1",
             "model": "test-web-search-model"
         }"#;
         let config: WebSearchConfig = serde_json::from_str(json).unwrap();
         assert!(config.is_enabled());
+    }
+
+    #[test]
+    fn test_native_variant() {
+        assert!(WebSearchConfig::Native.is_enabled());
+        assert_eq!(WebSearchConfig::Native.redacted(), WebSearchConfig::Native);
+        let json = serde_json::to_string(&WebSearchConfig::Native).unwrap();
+        assert_eq!(json, r#"{"status":"native"}"#);
+        let parsed: WebSearchConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, WebSearchConfig::Native));
+        // The sentinel model id is a stable contract between config and
+        // resolution (`[models] web_search = "native"`).
+        assert_eq!(NATIVE_MODEL_ID, "native");
     }
 }

@@ -1,6 +1,6 @@
 //! Internal state types for the ChatStateActor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cf_sampling_types::{
     ConversationItem, DanglingToolCallReason, SamplingConfig, TokenUsage,
@@ -10,12 +10,21 @@ use cf_sampling_types::{
 use crate::types::Credentials;
 use crate::usage::UsageLedger;
 
-/// Bytes/4 estimate of the system prompt portion of a [`ConversationItem`].
+/// Phase C replay-hint debounce cap (C-4): a given args fingerprint is
+/// prompted on its first [`REPLAY_PROMPT_MAX_COUNT`] replays and suppressed
+/// thereafter — "同 args 指纹第 3 次重放后不再提示" (design doc C-4).
+pub const REPLAY_PROMPT_MAX_COUNT: u8 = 3;
+
+/// Character-aware estimate of the system prompt portion of a
+/// [`ConversationItem`] — same basis as the message path
+/// ([`estimate_item_tokens`]): 3.4 ASCII characters per token and 4/5
+/// token per CJK character, so `/context`'s `system_prompt_tokens` row
+/// does not drift from `message_tokens`.
 /// Returns 0 for non-system items so callers can pipe through whatever they
 /// have without unwrapping.
 pub fn estimate_system_message_tokens(item: &ConversationItem) -> u64 {
     match item {
-        ConversationItem::System(s) => cf_token_estimation::estimate_tokens(&s.content),
+        ConversationItem::System(s) => cf_token_estimation::estimate_tokens_aware(&s.content),
         _ => 0,
     }
 }
@@ -34,7 +43,23 @@ pub fn estimate_tool_definitions_tokens(tds: &[cf_sampling_types::ToolDefinition
     tds.iter().map(estimate_tool_definition_tokens).sum()
 }
 
-/// Bytes/4 estimate for a single [`ConversationItem`].
+/// Same estimator for the flat [`cf_sampling_types::ToolSpec`] wire type —
+/// shared by the cf-shell payload per-unit tap (`payload_accounting`) for
+/// its `builtinToolDefs` section: counts exactly what is submitted,
+/// including the conditional `StructuredOutput` synthetic tool (pushed
+/// upstream in cf-shell before `build_request`).
+pub fn estimate_tool_spec_tokens(spec: &cf_sampling_types::ToolSpec) -> u64 {
+    let desc = spec.description.as_deref().unwrap_or("");
+    cf_token_estimation::estimate_tokens_aware(&spec.name)
+        + cf_token_estimation::estimate_tokens_aware(desc)
+        + cf_token_estimation::estimate_tokens_aware(&spec.parameters.to_string())
+}
+
+/// Character-aware estimate for a single [`ConversationItem`]:
+/// text content goes through [`cf_token_estimation::estimate_tokens_aware`]
+/// (3.4 ASCII characters per token, 4/5 token per CJK character), so the
+/// provider-calibrated rate applies to every text segment instead of the
+/// raw bytes/4 heuristic that under-counted ASCII by ~18%.
 ///
 /// Images are counted at [`cf_token_estimation::IMAGE_TOKEN_ESTIMATE`] each.
 /// Shared by [`estimate_conversation_tokens`] and [`estimate_messages_tokens`]
@@ -42,52 +67,57 @@ pub fn estimate_tool_definitions_tokens(tds: &[cf_sampling_types::ToolDefinition
 pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
     use cf_sampling_types::ContentPart;
     match item {
-        ConversationItem::System(s) => cf_token_estimation::estimate_tokens(&s.content),
+        ConversationItem::System(s) => cf_token_estimation::estimate_tokens_aware(&s.content),
         ConversationItem::User(u) => {
-            let mut bytes: usize = 0;
+            let mut tokens: u64 = 0;
             let mut images: u64 = 0;
             for p in &u.content {
                 match p {
-                    ContentPart::Text { text } => bytes += text.len(),
+                    ContentPart::Text { text } => {
+                        tokens += cf_token_estimation::estimate_tokens_aware(text);
+                    }
                     ContentPart::Image { .. } => images += 1,
                 }
             }
-            (bytes as u64) / cf_token_estimation::BYTES_PER_TOKEN
-                + cf_token_estimation::estimate_image_tokens(images)
+            tokens + cf_token_estimation::estimate_image_tokens(images)
         }
         ConversationItem::Assistant(a) => {
-            let bytes = a.content.len()
-                + a.tool_calls
-                    .iter()
-                    .map(|tc| tc.arguments.len())
-                    .sum::<usize>();
-            (bytes as u64) / cf_token_estimation::BYTES_PER_TOKEN
+            let mut tokens = cf_token_estimation::estimate_tokens_aware(&a.content);
+            for tc in &a.tool_calls {
+                tokens += cf_token_estimation::estimate_tokens_aware(&tc.arguments);
+            }
+            tokens
         }
-        ConversationItem::ToolResult(tr) => cf_token_estimation::estimate_tokens(&tr.content),
+        ConversationItem::ToolResult(tr) => {
+            cf_token_estimation::estimate_tokens_aware(&tr.content)
+        }
         ConversationItem::BackendToolCall(b) => {
-            cf_token_estimation::estimate_tokens(&b.text_summary())
+            cf_token_estimation::estimate_tokens_aware(&b.text_summary())
         }
         ConversationItem::Reasoning(r) => {
-            // Summary + content text follow the standard bytes-per-token
-            // estimate; encrypted blobs are base64 and don't survive
-            // tokenization 1:1, so estimate at len/4 as well.
-            let text_bytes = cf_sampling_types::reasoning_item_text(r).len();
+            // Summary + content text use the character-aware estimate;
+            // encrypted blobs are base64 (pure ASCII) and don't survive
+            // tokenization 1:1, so they stay at the plain bytes/4 rate.
+            let text = cf_sampling_types::reasoning_item_text(r);
             let enc_bytes = r.encrypted_content.as_deref().map(str::len).unwrap_or(0);
-            ((text_bytes + enc_bytes) as u64) / cf_token_estimation::BYTES_PER_TOKEN
+            cf_token_estimation::estimate_tokens_aware(&text)
+                + ((enc_bytes as u64) / cf_token_estimation::BYTES_PER_TOKEN)
         }
     }
 }
 
-/// Estimate token footprint: text bytes / 4, images at the per-image
+/// Estimate token footprint: character-aware text (3.4 ASCII characters
+/// per token, 4/5 token per CJK character), images at the per-image
 /// constant defined by [`cf_token_estimation::IMAGE_TOKEN_ESTIMATE`].
 pub fn estimate_conversation_tokens(items: &[ConversationItem]) -> u64 {
     items.iter().map(estimate_item_tokens).sum()
 }
 
 /// cf-tools's [`ItemTokenCounter`](cf_compaction::ItemTokenCounter)
-/// for the shared compaction engine: the bytes/4 estimate cf-tools already
-/// uses to drive its compaction triggers, exposed through the seam so the
-/// shared budgeting math gets the *same* trusted count.
+/// for the shared compaction engine: the character-aware estimate
+/// (3.4 ASCII chars/token, 4/5 token per CJK char) drives the compaction
+/// triggers, exposed through the seam so the shared budgeting math gets
+/// the *same* trusted count.
 ///
 /// Where another host plugs a real BPE tokenizer into the same seam,
 /// cf-tools estimates instead, reusing [`estimate_item_tokens`] so the
@@ -103,7 +133,7 @@ impl cf_compaction::ItemTokenCounter<ConversationItem> for EstimatedItemTokenCou
     }
 }
 
-/// Bytes/4 estimate of every non-system item in `items`.
+/// Character-aware estimate of every non-system item in `items`.
 pub fn estimate_messages_tokens(items: &[ConversationItem]) -> u64 {
     items
         .iter()
@@ -137,13 +167,16 @@ pub(crate) struct ChatState {
     /// Opaque credential secrets (api key, optional extra auth, client version).
     /// Stored opaquely — the actor never interprets them.
     pub credentials: Credentials,
-    /// Bytes/4 estimate of tokens added since the last `record_token_usage`.
-    /// Used by `check_preflight_overflow` to detect context window overflows
+    /// Character-aware estimate of tokens added since the last
+    /// `record_token_usage` (text via
+    /// `cf_token_estimation::estimate_tokens_aware`). Used by
+    /// `check_preflight_overflow` to detect context window overflows
     /// between model responses.
     pub estimated_tokens_since_model: u64,
-    /// Bytes/4 estimate of the conversation as of the last `record_token_usage`
-    /// (or last reseed). `total_tokens − estimate_at_last_response` is the
-    /// provider-side overhead carried across compaction.
+    /// Character-aware estimate of the conversation as of the last
+    /// `record_token_usage` (or last reseed). `total_tokens −
+    /// estimate_at_last_response` is the provider-side overhead
+    /// carried across compaction.
     pub estimate_at_last_response: u64,
     /// Per-turn token usage from the most recent model response.
     /// Stashed by `record_last_turn_usage()` and read at `PromptResponse`
@@ -173,6 +206,21 @@ pub(crate) struct ChatState {
     /// discover harness subagents via their `<subagent_result>` footer.
     /// Drained by `TakeHarnessTraceTurns` at the end of the user-facing turn.
     pub(super) harness_trace_turns: Vec<Vec<ConversationItem>>,
+    /// Prompt index at which the last batched batch-clear fired (Phase C).
+    /// `None` = no batch clear yet this session, or the window has been
+    /// re-armed after utilization dropped below the low watermark. Used for
+    /// the C-7 hysteresis: at most one batch clear per window episode.
+    pub last_batch_clear_at: Option<usize>,
+    /// Phase C replay-hint debounce (C-4): args-fingerprint → replay count.
+    /// The soft-guidance placeholder is shown for the first
+    /// [`REPLAY_PROMPT_MAX_COUNT`] replays of a given args fingerprint and
+    /// suppressed thereafter.
+    pub replay_prompt_fingerprints: BTreeMap<u64, u8>,
+    /// Phase C Reasoning-summary table (C-1): block fingerprint → summary
+    /// text. Pre-generated asynchronously by the session layer and written via
+    /// `set_reasoning_summaries`; the batched prune only *reads* it (table hit
+    /// → replace with a synthetic sibling, miss → skip — never-bare-clear).
+    pub reasoning_summaries: crate::types::ReasoningSummaries,
 }
 
 /// Tracks which conversation items belong to the current turn without
@@ -245,7 +293,24 @@ impl ChatState {
             turn_capture: None,
             harness_trace_buffer: Vec::new(),
             harness_trace_turns: Vec::new(),
+            last_batch_clear_at: None,
+            replay_prompt_fingerprints: BTreeMap::new(),
+            reasoning_summaries: crate::types::ReasoningSummaries::new(),
         }
+    }
+
+    /// Phase C replay-hint debounce (C-4): records a replay of `fingerprint`
+    /// and reports whether the soft-guidance replay placeholder should now be
+    /// suppressed. Returns `false` (still prompt) for the first
+    /// [`REPLAY_PROMPT_MAX_COUNT`] replays and `true` (suppress) thereafter —
+    /// "同 args 指纹第 3 次重放后不再提示" (design doc C-4).
+    pub(super) fn replay_prompt_suppressed(&mut self, fingerprint: u64) -> bool {
+        let count = self
+            .replay_prompt_fingerprints
+            .entry(fingerprint)
+            .or_insert(0);
+        *count = count.saturating_add(1);
+        *count > REPLAY_PROMPT_MAX_COUNT
     }
 
     /// Seal the items accumulated since the last flush into one harness trace
@@ -300,6 +365,117 @@ mod tests {
     }
 
     #[test]
+    fn estimate_item_tokens_uses_character_aware_text_estimate() {
+        // 100 CJK chars -> ceil(100 * 4 / 5) = 80 tokens, above the 75
+        // the raw bytes/4 heuristic reports.
+        let sys = ConversationItem::system("你".repeat(100));
+        assert_eq!(estimate_item_tokens(&sys), 80);
+
+        // User text: 你好世界 = 4 CJK -> ceil(16/5) = 4,
+        // "hello" = 5 ASCII chars -> floor(50/34) = 1.
+        let user = ConversationItem::user("你好世界hello");
+        assert_eq!(estimate_item_tokens(&user), 5);
+
+        // Assistant content follows the same aware path.
+        let asst = ConversationItem::assistant("你好世界hello");
+        assert_eq!(estimate_item_tokens(&asst), 5);
+
+        // Assistant tool-call arguments are text too.
+        // `{"路径":"你好"}`: 7 ASCII chars -> floor(70/34) = 2,
+        // 4 CJK -> ceil(16/5) = 4.
+        let tc = cf_sampling_types::ToolCall {
+            id: std::sync::Arc::from("tc1"),
+            name: "write_file".to_string(),
+            arguments: std::sync::Arc::from("{\"路径\":\"你好\"}"),
+        };
+        let asst_tc = ConversationItem::assistant_tool_calls(vec![tc]);
+        assert_eq!(estimate_item_tokens(&asst_tc), 6);
+
+        // Tool results carry text content.
+        let tr = ConversationItem::tool_result("tc1", "你好世界hello");
+        assert_eq!(estimate_item_tokens(&tr), 5);
+
+        // Each user text part is estimated as its own segment:
+        // 2 CJK -> ceil(8/5) = 2 per part, 2 parts -> 4.
+        let parts = vec![
+            cf_sampling_types::ContentPart::Text {
+                text: std::sync::Arc::from("你好"),
+            },
+            cf_sampling_types::ContentPart::Text {
+                text: std::sync::Arc::from("世界"),
+            },
+        ];
+        let multi = ConversationItem::user_with_parts(parts);
+        assert_eq!(estimate_item_tokens(&multi), 4);
+    }
+
+    #[test]
+    fn estimate_item_tokens_ascii_uses_calibrated_rate() {
+        // Pure-ASCII items run at the calibrated 3.4 chars/token:
+        // floor(chars * 10 / 34).
+        let items = vec![
+            ConversationItem::system("you are a helpful assistant"),
+            ConversationItem::user("fix the login bug in auth.rs"),
+            ConversationItem::assistant("let me look at the file"),
+            ConversationItem::tool_result("tc1", "fn login() {}"),
+        ];
+        // 27 chars -> floor(270/34) = 7; 28 -> floor(280/34) = 8;
+        // 23 -> floor(230/34) = 6; 13 -> floor(130/34) = 3.
+        let expected = [7, 8, 6, 3];
+        for (item, want) in items.iter().zip(expected) {
+            assert_eq!(estimate_item_tokens(item), want);
+        }
+    }
+
+    #[test]
+    fn estimate_item_tokens_multisegment_ascii_is_sum_of_per_segment_floors() {
+        // Per-segment semantics pin: `estimate_item_tokens` floors
+        // each text segment separately and sums the floors, so a
+        // multi-segment item can land a couple of tokens below the
+        // merged floor(sum_chars * 10 / 34) — pure ASCII included.
+        // These assertions lock the per-segment values; the merged
+        // values are in the comments so a future reader does not
+        // mistake the delta for a bug or "fix" the arithmetic back
+        // to the merged semantics.
+
+        // User, three text parts: "ab" (2 chars) + "cd" (2 chars)
+        // + "efgh" (4 chars).
+        // Per-segment floors: floor(20/34) + floor(20/34) +
+        // floor(40/34) = 0 + 0 + 1 = 1.
+        // Merged (8 chars * 10 / 34 = 80/34): 2.  -> 1 token lower.
+        let parts = vec![
+            cf_sampling_types::ContentPart::Text {
+                text: std::sync::Arc::from("ab"),
+            },
+            cf_sampling_types::ContentPart::Text {
+                text: std::sync::Arc::from("cd"),
+            },
+            cf_sampling_types::ContentPart::Text {
+                text: std::sync::Arc::from("efgh"),
+            },
+        ];
+        let user = ConversationItem::user_with_parts(parts);
+        assert_eq!(estimate_item_tokens(&user), 1);
+
+        // Assistant content "ab" (2 chars) plus one tool call whose
+        // arguments are "cd" (2 chars).
+        // Per-segment floors: floor(20/34) + floor(20/34) = 0 + 0 = 0.
+        // Merged (4 chars * 10 / 34 = 40/34): 1.  -> 1 token lower.
+        let assistant = ConversationItem::Assistant(cf_sampling_types::AssistantItem {
+            content: std::sync::Arc::from("ab"),
+            tool_calls: vec![cf_sampling_types::ToolCall {
+                id: std::sync::Arc::from("tc1"),
+                name: "write_file".to_string(),
+                arguments: std::sync::Arc::from("cd"),
+            }],
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+        });
+        assert_eq!(estimate_item_tokens(&assistant), 0);
+    }
+
+    #[test]
     fn new_state_has_correct_defaults() {
         let state = ChatState::new(vec![], test_sampling_config());
         assert_eq!(state.prompt_index, 0);
@@ -324,7 +500,7 @@ mod tests {
 
     #[test]
     fn new_state_estimates_tokens_from_conversation() {
-        // 4000 bytes of text per item, bytes / 4 = 1000 tokens each
+        // 4000 ASCII chars per item -> floor(40_000 / 34) = 1176 tokens each
         let items = vec![
             ConversationItem::system("x".repeat(4000).as_str()),
             ConversationItem::user("y".repeat(4000).as_str()),
@@ -332,13 +508,14 @@ mod tests {
             ConversationItem::tool_result("call-1", "w".repeat(4000).as_str()),
         ];
         let state = ChatState::new(items, test_sampling_config());
-        assert_eq!(state.total_tokens, 4000); // 4 * (4000/4)
+        assert_eq!(state.total_tokens, 4_704); // 4 * 1176
     }
 
     #[test]
     fn estimate_system_message_tokens_only_counts_system_items() {
         let sys = ConversationItem::system("a".repeat(400));
-        assert_eq!(estimate_system_message_tokens(&sys), 100);
+        // 400 ASCII chars -> floor(4_000 / 34) = 117
+        assert_eq!(estimate_system_message_tokens(&sys), 117);
         let user = ConversationItem::user("hello");
         assert_eq!(estimate_system_message_tokens(&user), 0);
         let asst = ConversationItem::assistant("hi");
@@ -361,16 +538,16 @@ mod tests {
 
     #[test]
     fn estimate_messages_tokens_excludes_system_and_sums_rest() {
-        // 4000 bytes per item -> 1000 tokens each.
+        // 4000 ASCII chars per item -> 1176 tokens each.
         let items = vec![
             ConversationItem::system("x".repeat(4000).as_str()),
             ConversationItem::user("y".repeat(4000).as_str()),
             ConversationItem::assistant("z".repeat(4000).as_str()),
             ConversationItem::tool_result("call-1", "w".repeat(4000).as_str()),
         ];
-        // Total = 4000 (4 items * 1000), system = 1000, messages = 3000.
-        assert_eq!(estimate_conversation_tokens(&items), 4000);
-        assert_eq!(estimate_messages_tokens(&items), 3000);
+        // Total = 4704 (4 items * 1176), system = 1176, messages = 3528.
+        assert_eq!(estimate_conversation_tokens(&items), 4_704);
+        assert_eq!(estimate_messages_tokens(&items), 3_528);
     }
 
     #[test]
@@ -398,5 +575,30 @@ mod tests {
         );
         let single = estimate_tool_definition_tokens(&a);
         assert_eq!(estimate_tool_definitions_tokens(&[a, b]), single * 2);
+    }
+
+    /// C-4 replay-hint debounce (skeleton): a given args fingerprint prompts
+    /// for the first `REPLAY_PROMPT_MAX_COUNT` replays and is suppressed from
+    /// the next one onward ("同 args 指纹第 3 次重放后不再提示").
+    #[test]
+    fn test_batched_replay_prompt_debounce_suppresses_after_third_replay() {
+        let mut state = ChatState::new(vec![], test_sampling_config());
+        // Replays 1..=3 still prompt.
+        for replay in 1..=usize::from(REPLAY_PROMPT_MAX_COUNT) {
+            assert!(
+                !state.replay_prompt_suppressed(0xC0FFEE),
+                "C-4: replay {replay} must still prompt"
+            );
+        }
+        // Replay 4 onward suppresses.
+        assert!(
+            state.replay_prompt_suppressed(0xC0FFEE),
+            "C-4: replay 4 must be suppressed (after the 3rd replay)"
+        );
+        // A different fingerprint starts fresh.
+        assert!(
+            !state.replay_prompt_suppressed(0xDEAD),
+            "C-4: a different args fingerprint must start at replay 1"
+        );
     }
 }

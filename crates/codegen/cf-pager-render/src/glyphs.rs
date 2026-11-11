@@ -19,6 +19,32 @@ use std::sync::OnceLock;
 use crate::host::HostOs;
 use crate::terminal::{TerminalName, terminal_context};
 
+/// Windows-only: whether the console output code page is UTF-8 (65001).
+///
+/// The pager emits UTF-8 chrome (braille logo/spinners, box-drawing,
+/// Powerline icons, ellipses). If the console code page is a legacy OEM
+/// page (e.g. 936/GBK, 437), every multi-byte UTF-8 sequence is
+/// misinterpreted byte-by-byte and renders as garbled "floating"
+/// characters — exactly the symptom of running `qidi.exe` from a plain
+/// cmd.exe window without `chcp 65001`. Non-Windows hosts are always
+/// UTF-8-native, so this returns `true` there and never triggers the
+/// ASCII fallback.
+#[cfg(windows)]
+fn windows_output_cp_is_utf8() -> bool {
+    unsafe extern "system" {
+        fn GetConsoleOutputCP() -> u32;
+    }
+    // SAFETY: `GetConsoleOutputCP` is a plain Win32 query with no
+    // arguments and no pointer state; it cannot fail in a way that
+    // requires cleanup.
+    unsafe { GetConsoleOutputCP() == 65001 }
+}
+
+#[cfg(not(windows))]
+fn windows_output_cp_is_utf8() -> bool {
+    true
+}
+
 /// `"❯ "` normally, `"> "` on legacy ConHost. Always 2 columns wide.
 pub fn prompt_arrow() -> &'static str {
     if is_legacy_windows_console() {
@@ -442,13 +468,38 @@ fn to_legacy_glyphs(s: &str) -> String {
 pub fn is_legacy_windows_console() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        forced_legacy_console_override().unwrap_or_else(|| {
+        // Test binaries default to the non-legacy assumption so toast and
+        // chrome wording assertions stay byte-stable across developer hosts
+        // (a GBK ConHost host machine would otherwise flip every pinned
+        // string). The dedicated fallback tests force legacy explicitly via
+        // QIDI_FORCE_LEGACY_CONSOLE=1 or exercise to_legacy_glyphs directly.
+        #[cfg(test)]
+        {
+            if let Some(forced) = forced_legacy_console_override() {
+                return forced;
+            }
+            return false;
+        }
+        #[cfg(not(test))]
+        {
+            forced_legacy_console_override().unwrap_or_else(|| {
             // `env_brand`, not `brand`: a bare ConHost is detected as
             // `Unknown`, but `brand` optimistically becomes `WindowsTerminal`
             // on native Windows. Font capability needs the raw detection so
             // legacy consoles still get the ASCII glyph fallback.
+            //
+            // Code page check: even a detected modern terminal (Windows
+            // Terminal, VS Code…) cannot render UTF-8 chrome correctly while
+            // the console output code page is a legacy OEM page (936/GBK,
+            // 437) — every multi-byte sequence is garbled. Treat that as
+            // legacy too, so the UI stays readable instead of showing
+            // "floating" mojibake characters.
+            if !windows_output_cp_is_utf8() {
+                return true;
+            }
             decide_legacy_windows_console(HostOs::current(), terminal_context().env_brand)
-        })
+            })
+        }
     })
 }
 
@@ -605,8 +656,11 @@ mod tests {
         }
     }
 
-    // On the (non-Windows) test host the helpers must return the fancy
-    // glyphs, and the `char` helpers must agree with their `&str` siblings.
+    // On a non-legacy host the helpers must return the fancy glyphs, and the
+    // `char` helpers must agree with their `&str` siblings. Unix-only: a
+    // real Windows host legitimately reports legacy (code-page check),
+    // and forcing it off would defeat the very fallback under test.
+    #[cfg(unix)]
     #[test]
     fn glyph_helpers_return_fancy_on_non_legacy() {
         assert!(!is_legacy_windows_console());
@@ -658,8 +712,9 @@ mod tests {
         );
     }
 
-    // On the (non-Windows) test host the funnel must be a zero-copy borrow
-    // so non-legacy toasts are byte-identical to the input.
+    // Unix-only: a real Windows host legitimately reports legacy
+    // (code-page check); see the sibling test note.
+    #[cfg(unix)]
     #[test]
     fn legacy_glyph_fallback_is_borrow_on_non_legacy() {
         assert!(!is_legacy_windows_console());

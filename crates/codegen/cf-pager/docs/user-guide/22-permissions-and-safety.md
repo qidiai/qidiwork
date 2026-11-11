@@ -1,6 +1,6 @@
 # Permissions and Safety Controls
 
-Grok can read files, search code, edit files, and run shell commands. The permission system controls what the agent is allowed to do. You can combine several independent layers: permission rules, permission modes, hooks, and the OS-level sandbox.
+QIDI Code can read files, search code, edit files, and run shell commands. The permission system controls what the agent is allowed to do. You can combine several independent layers: permission rules, permission modes, hooks, and the OS-level sandbox.
 
 This guide explains how a tool call is authorized, how to configure permission rules from the CLI, native configuration, or Claude settings, and how to use `PreToolUse` hooks for allow lists that apply in every mode.
 
@@ -100,13 +100,13 @@ Do not use `permission_mode` for this; it is a user-switchable default, not a lo
 
 The user-level `~/.qidi/requirements.toml` is under the user's control, so a developer can remove the lock by editing that file. For enforcement that users cannot override, deploy the setting in the root-owned system file `/etc/grok/requirements.toml`.
 
-> **Note:** Grok honors the permission rules in Claude Code's `managed-settings.json`, but not its `disableBypassPermissionsMode` lock. To disable always-approve in Grok, use `requirements.toml` as shown above.
+> **Note:** QIDI Code honors the permission rules in Claude Code's `managed-settings.json`, but not its `disableBypassPermissionsMode` lock. To disable always-approve in QIDI Code, use `requirements.toml` as shown above.
 
 ---
 
 ## Configuring Permissions
 
-Grok reads permission rules from three compatible sources. Rules from all sources are merged into one set; a rule's effect depends on its action (`deny` > `ask` > `allow`), not on which file it came from.
+QIDI Code reads permission rules from three compatible sources. Rules from all sources are merged into one set; a rule's effect depends on its action (`deny` > `ask` > `allow`), not on which file it came from.
 
 ### Where Permission Rules Live (Scopes)
 
@@ -115,18 +115,18 @@ Permission rules can be global (all projects), project-scoped (one repository), 
 | Scope | File | Shared with teammates |
 |-------|------|-----------------------|
 | Global (all projects) | `~/.qidi/config.toml` | No |
-| Project (committed) | `<project>/.grok/config.toml` | Yes (commit it) |
+| Project (committed) | `<project>/.qidi/config.toml` | Yes (commit it) |
 | Project (personal) | `<project>/.claude/settings.local.json` | No (gitignore it) |
-| Interactive grants | Stored internally by Grok, per project | No |
+| Interactive grants | Stored internally by QIDI Code, per project | No |
 
 Notes on scoping:
 
-- Grok discovers a `.grok/config.toml` at every directory level from the repository root down to your working directory, so a subdirectory can add rules on top of the repo root's.
+- QIDI Code discovers a `.qidi/config.toml` at every directory level from the repository root down to your working directory, so a subdirectory can add rules on top of the repo root's.
 - Rules from all scopes are merged into one rule set; `deny` > `ask` > `allow` applies across scopes, so a global `deny` cannot be overridden by a project `allow`.
-- Grok has no native `config.local.toml`. For personal, uncommitted rules in a project, use `.claude/settings.local.json`; Grok reads it directly (see [Claude Code Compatibility](#3-claude-code-compatibility-claudesettingsjson)).
+- QIDI Code has no native `config.local.toml`. For personal, uncommitted rules in a project, use `.claude/settings.local.json`; QIDI Code reads it directly (see [Claude Code Compatibility](#3-claude-code-compatibility-claudesettingsjson)).
 - Interactive "Always allow" decisions are stored outside the repository, scoped to the project (see [Interactive Approvals](#interactive-approvals-and-where-they-persist)).
 
-To stop prompts for a specific command in one project, add a narrow allow rule to that project's `.grok/config.toml` (or `.claude/settings.json`):
+To stop prompts for a specific command in one project, add a narrow allow rule to that project's `.qidi/config.toml` (or `.claude/settings.json`):
 
 ```toml
 [permission]
@@ -138,7 +138,7 @@ This approves only the listed commands. Always-approve mode, by contrast, approv
 ### 1. CLI Flags
 
 ```bash
-grok -p "Review the API changes" \
+qidi -p "Review the API changes" \
   --allow 'Bash(git *)' \
   --allow 'Bash(gh *)' \
   --allow 'Read' \
@@ -159,7 +159,7 @@ Rule syntax examples:
 
 See [Rule Matching Reference](#rule-matching-reference) for the exact matching semantics, including how chained commands and wildcards are evaluated.
 
-### 2. Native Configuration (`~/.qidi/config.toml` and `.grok/config.toml`)
+### 2. Native Configuration (`~/.qidi/config.toml` and `.qidi/config.toml`)
 
 ```toml
 [permission]
@@ -177,9 +177,9 @@ The structured `tool` field accepts the lowercase names `bash`, `read`, `edit`, 
 
 Because `deny` always wins, you cannot combine these `allow` rules with a catch-all `deny` on `bash` to mean "only allow git/gh"; a `deny tool = "bash"` rule would block `git` and `gh` too. For deny-by-default, use `defaultMode: "dontAsk"` in `.claude/settings.json` or a `PreToolUse` hook (below).
 
-Rules from the global `~/.qidi/config.toml` and every project `.grok/config.toml` (from the repo root down to your working directory) are merged into one rule set, alongside any `.claude/settings.json` rules.
+Rules from the global `~/.qidi/config.toml` and every project `.qidi/config.toml` (from the repo root down to your working directory) are merged into one rule set, alongside any `.claude/settings.json` rules.
 
-Managed configuration deployed by your organization also contributes `[permission]` rules: the system `/etc/grok/managed_config.toml`, and a user-level copy that Grok maintains automatically at `~/.qidi/managed_config.toml`. Managed rules merge like rules from any other source, with two properties specific to managed `allow` rules: your own `deny` and `ask` rules win over a managed `allow` (severity ordering), and a catch-all managed `allow` is ignored when always-approve is locked off. For rules that users cannot edit away, use the root-owned system `/etc/grok/requirements.toml`.
+Managed configuration deployed by your organization also contributes `[permission]` rules: the system `/etc/grok/managed_config.toml`, and a user-level copy that QIDI Code maintains automatically at `~/.qidi/managed_config.toml`. Managed rules merge like rules from any other source, with two properties specific to managed `allow` rules: your own `deny` and `ask` rules win over a managed `allow` (severity ordering), and a catch-all managed `allow` is ignored when always-approve is locked off. For rules that users cannot edit away, use the root-owned system `/etc/grok/requirements.toml`.
 
 Permission rules from every source are read once, when a session starts. Changes apply to the next session.
 
@@ -202,7 +202,7 @@ allow = [
 
 ### 3. Claude Code Compatibility (`.claude/settings.json`)
 
-Grok reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, plus the project-level `<project>/.claude/settings.json` and `settings.local.json` (walking up to the repo root). The native `.grok` source for permission rules is `config.toml`, described in the section above.
+QIDI Code reads `~/.claude/settings.json` and `~/.claude/settings.local.json`, plus the project-level `<project>/.claude/settings.json` and `settings.local.json` (walking up to the repo root). The native `.qidi` source for permission rules is `config.toml`, described in the section above.
 
 Example:
 
@@ -223,7 +223,7 @@ Example:
 }
 ```
 
-Supported `defaultMode` values are `default`, `acceptEdits`, `bypassPermissions`, `dontAsk`, and `plan`. Grok reads `defaultMode` from its canonical location under `permissions`; a top-level `defaultMode` is also accepted when the nested key is absent.
+Supported `defaultMode` values are `default`, `acceptEdits`, `bypassPermissions`, `dontAsk`, and `plan`. QIDI Code reads `defaultMode` from its canonical location under `permissions`; a top-level `defaultMode` is also accepted when the nested key is absent.
 
 `permissions.allow`, `permissions.deny`, and `permissions.ask` entries are translated into native rules and then matched with the semantics in the [Rule Matching Reference](#rule-matching-reference). Translation notes:
 
@@ -250,7 +250,7 @@ Matching is case-sensitive. Leading whitespace in the command is trimmed before 
 
 A trailing `:*` suffix on a Bash rule is stripped to a plain prefix: `Bash(git commit:*)` becomes prefix `git commit`. Because prefixes have no word boundary, a `deny` written as `Bash(sed:*)` also blocks commands such as `sed-custom`.
 
-**Chained commands.** Grok parses each command like a shell and splits it on `&&`, `||`, `;`, `|`, and newlines. The rule actions treat segments differently:
+**Chained commands.** QIDI Code parses each command like a shell and splits it on `&&`, `||`, `;`, `|`, and newlines. The rule actions treat segments differently:
 
 - `deny` and `ask` rules are checked against every segment, and against the whole string. One denied segment rejects the entire command.
 - `allow` rules are checked against the whole command string only. `Bash(git *)` therefore auto-approves `git status && rm -rf /`, because the full string starts with `git `. Pair narrow allow rules with `deny` rules for the patterns you want to block.
@@ -277,7 +277,7 @@ Path patterns are globs matched against the path string the tool was called with
 
 ### MCP Rules
 
-`MCPTool(...)` patterns match the full Grok tool name in `server__tool` form, with glob support: `MCPTool(linear__*)` matches every tool from the `linear` server. Grok tool names carry no `mcp__` prefix, so a rule written as `mcp__server__tool` never matches an MCP call; write `MCPTool(server__tool)` instead.
+`MCPTool(...)` patterns match the full QIDI Code tool name in `server__tool` form, with glob support: `MCPTool(linear__*)` matches every tool from the `linear` server. QIDI Code tool names carry no `mcp__` prefix, so a rule written as `mcp__server__tool` never matches an MCP call; write `MCPTool(server__tool)` instead.
 
 ### WebFetch Rules
 
@@ -325,9 +325,9 @@ The remembered prefix is limited to a short form of the command: read-only comma
 
 ### Persistence Is Per Project
 
-Interactive grants are stored in Grok's own state directory under your home directory, scoped to the directory you launched Grok from. A grant made in one project never applies in another, grants are not written into the repository, and they are not meant to be hand-edited.
+Interactive grants are stored in QIDI Code's own state directory under your home directory, scoped to the directory you launched QIDI Code from. A grant made in one project never applies in another, grants are not written into the repository, and they are not meant to be hand-edited.
 
-Interactive grants are personal, per-machine state. For an allowlist you can review in code review and share with teammates, use declarative rules in the project's `.grok/config.toml` instead.
+Interactive grants are personal, per-machine state. For an allowlist you can review in code review and share with teammates, use declarative rules in the project's `.qidi/config.toml` instead.
 
 ---
 
@@ -411,7 +411,7 @@ For hook installation, the JSON format, the trust model for project hooks, and o
 ### Headless git and gh Only (CI and Automation)
 
 ```bash
-grok -p "Implement the feature using only git and GitHub CLI" \
+qidi -p "Implement the feature using only git and GitHub CLI" \
   --allow 'Read' \
   --allow 'Grep' \
   --allow 'Bash(git *)' \
@@ -423,7 +423,7 @@ Install the `git-gh-only` hook above to deny every other `Bash` command. For den
 ### Read-Only Code Reviewer
 
 ```toml
-# .grok/config.toml
+# .qidi/config.toml
 [permission]
 rules = [
   { action = "allow", tool = "read" },
@@ -464,7 +464,7 @@ Recommended combination for untrusted code:
 
 1. **Prefer narrow patterns.** `Bash(git *)` grants less access than a bare `Bash` allow rule.
 2. **Combine layers.** `dontAsk`, narrow allow rules, a restrictive hook, and the sandbox each restrict independently.
-3. **Review project configuration from unfamiliar sources.** Project permission rules in `.grok/config.toml` and `.claude/settings.json`, including `allow` rules, apply without a separate trust prompt. Review them, and any project hooks, before working in an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
+3. **Review project configuration from unfamiliar sources.** Project permission rules in `.qidi/config.toml` and `.claude/settings.json`, including `allow` rules, apply without a separate trust prompt. Review them, and any project hooks, before working in an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
 4. **Test your policy.** With `defaultMode: "dontAsk"` set (or your `PreToolUse` hook installed), run representative commands and confirm what is blocked.
 5. **Treat the read-only command list as a convenience, not a security boundary.**
 

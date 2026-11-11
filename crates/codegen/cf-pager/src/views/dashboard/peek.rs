@@ -1140,7 +1140,6 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
             RenderBlock::UserPrompt(_) => break,
             // Structural blocks carry no response type — keep scanning.
             RenderBlock::System(_) | RenderBlock::SessionEvent(_) | RenderBlock::Stub(_) => {}
-            RenderBlock::Artifact(_) => {}
         }
     }
     if running {
@@ -1335,7 +1334,6 @@ fn block_short_text(block: &crate::scrollback::block::RenderBlock) -> Option<Str
         RenderBlock::Btw(_) => Some("(btw)".to_string()),
         RenderBlock::ContextInfo(_) => Some("(context info)".to_string()),
         RenderBlock::CreditLimit(_) => Some("(credit limit)".to_string()),
-        RenderBlock::Artifact(b) => Some(format!("(artifacts \u{00d7} {})", b.cards.len())),
         RenderBlock::Stub(_) => None,
     }
 }

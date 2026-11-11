@@ -93,7 +93,7 @@ pub(super) fn dispatch_show_privacy_info(app: &mut AppView) -> Vec<Effect> {
     }
 
     lines.push("");
-    lines.push("  Learn more: https://api.qidiai.ltd/legal");
+    lines.push("  Learn more: https://x.ai/legal");
     let text = lines.join("\n");
     push_system_to_any_agent(app, &text);
     vec![]

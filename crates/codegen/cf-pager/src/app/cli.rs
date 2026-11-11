@@ -22,7 +22,7 @@ pub enum Command {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
-        /// Use QIDI Code OAuth via api.qidiai.ltd.
+        /// Use QIDI Code OAuth via auth.x.ai.
         #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
@@ -151,7 +151,7 @@ pub struct WrapArgs {
     )]
     pub command: Vec<String>,
 }
-/// Targets a running leader process by PID (used by `grok workspace`).
+/// Targets a running leader process by PID (used by `qidi workspace`).
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct LeaderTargetArgs {
     /// Leader process ID.
@@ -296,13 +296,13 @@ impl AgentArgs {
                 Ok(canonical) if canonical.is_dir() => Some(canonical),
                 Ok(_) => {
                     eprintln!(
-                        "qidiwork: --plugin-dir {}: not a directory; skipping",
+                        "qidi: --plugin-dir {}: not a directory; skipping",
                         p.display()
                     );
                     None
                 }
                 Err(e) => {
-                    eprintln!("qidiwork: --plugin-dir {}: {e}; skipping", p.display());
+                    eprintln!("qidi: --plugin-dir {}: {e}; skipping", p.display());
                     None
                 }
             })
@@ -314,7 +314,7 @@ impl AgentArgs {
 pub enum AgentCmd {
     /// Run the agent over stdio
     Stdio,
-    /// 通过 QIDI WebSocket 中继以 headless 方式运行 agent
+    /// Run the agent headlessly over the QIDI WebSocket relay
     Headless(HeadlessArgs),
     /// Run the agent as a WebSocket server
     Serve(ServeArgs),
@@ -324,9 +324,13 @@ pub enum AgentCmd {
 /// WebSocket URL override arguments, used by headless / leader / serve modes.
 #[derive(Debug, clap::Args, Clone, Default)]
 pub struct HeadlessArgs {
-    #[arg(long = "grok-ws-origin")]
+    /// WebSocket origin override (auth/build links). `--grok-ws-origin` is
+    /// kept as a visible alias so existing scripts keep working.
+    #[arg(long = "qidi-ws-origin", visible_alias = "grok-ws-origin")]
     pub grok_ws_origin: Option<String>,
-    #[arg(long = "grok-ws-url")]
+    /// WebSocket relay URL override. `--grok-ws-url` is kept as a visible
+    /// alias so existing scripts keep working.
+    #[arg(long = "qidi-ws-url", visible_alias = "grok-ws-url")]
     pub grok_ws_url: Option<String>,
 }
 /// Arguments for the `agent serve` subcommand.
@@ -364,7 +368,7 @@ pub struct LeaderArgs {
     /// Keep the leader running after the last client disconnects.
     #[arg(long)]
     pub no_exit_on_disconnect: bool,
-    /// Defer the QIDI relay WebSocket until the first headless IPC client
+    /// Defer the relay WebSocket until the first headless IPC client
     /// registers. Without this flag the leader connects the relay eagerly at
     /// startup — required for bare leaders (headless remote env / systemd) that
     /// receive remote prompts *through* the relay. Passed by leaders auto-spawned
@@ -516,6 +520,13 @@ pub struct PagerArgs {
     /// Model ID to use.
     #[clap(short = 'm', long = "model", value_name = "MODEL")]
     pub model: Option<String>,
+    /// Session kind stamped into `summary.json` for a **new** session
+    /// (headless runs). Headless one-shot runs default to `subagent_headless`
+    /// so dispatched tasks stay out of history browsing while remaining
+    /// searchable. Pass `user` (or `normal`/`none`) to keep the session in
+    /// the normal history list.
+    #[clap(long = "session-kind", value_name = "KIND", env = "QIDI_SESSION_KIND")]
+    pub session_kind: Option<String>,
     /// Reasoning effort for reasoning models
     #[clap(
         long = "reasoning-effort",
@@ -544,7 +555,9 @@ pub struct PagerArgs {
         value_name = "PROMPT"
     )]
     pub system_prompt_override: Option<String>,
-    /// Resume a session by ID, or the most recent if omitted.
+    /// Resume a session by ID, or the most recent if omitted. The session's
+    /// persisted agent type is restored — `--agent` must match it or be
+    /// omitted.
     #[arg(
         long = "resume",
         short = 'r',
@@ -606,7 +619,8 @@ pub struct PagerArgs {
     /// Disable cross-session memory for this session.
     #[arg(long = "no-memory", conflicts_with = "experimental_memory")]
     pub no_memory: bool,
-    /// Agent name or definition file path.
+    /// Agent name or definition file path. With `--resume`, it must match the
+    /// session's persisted agent type.
     #[arg(long = "agent", value_name = "NAME")]
     pub agent: Option<String>,
     /// Inline subagent definitions as JSON.
@@ -642,7 +656,7 @@ pub struct PagerArgs {
     pub self_verify: bool,
     /// Exit as soon as the first agent turn ends, without waiting for pending
     /// background bash/monitor tasks or background subagents (headless only).
-    /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`)
+    /// Default for all `qidi -p` runs is to wait (up to `--background-wait-timeout`)
     /// so eval harnesses see full task completion. Use this for fast scripts that
     /// only need the first turn's text. Does not wait for server-side auto-wake
     /// output or persistent monitors (those hit the timeout).
@@ -708,13 +722,13 @@ pub struct PagerArgs {
     /// into the terminal's native scrollback (use the terminal's own scroll /
     /// selection); a small pinned region holds the prompt + running turn.
     /// Sticky: records `[ui] screen_mode = "minimal"` in ~/.qidi/config.toml
-    /// so future plain `qidiwork` invocations open in minimal mode too.
+    /// so future plain `qidi` invocations open in minimal mode too.
     #[arg(long = "minimal")]
     pub minimal: bool,
     /// Open in the standard fullscreen TUI, overriding a sticky minimal
     /// preference. Sticky counterpart of --minimal: records
     /// `[ui] screen_mode = "fullscreen"` in ~/.qidi/config.toml so future
-    /// plain `qidiwork` invocations open fullscreen again. Fullscreen-vs-inline
+    /// plain `qidi` invocations open fullscreen again. Fullscreen-vs-inline
     /// still follows the alt-screen policy (--no-alt-screen, [terminal]
     /// alt_screen, terminal auto-detection).
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
@@ -734,7 +748,7 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
-    /// Initial prompt for the interactive session, e.g. `qidiwork "fix the bug"` or `qidiwork --worktree=feat "create this feature"`.
+    /// Initial prompt for the interactive session, e.g. `qidi "fix the bug"` or `qidi --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
         conflicts_with_all = &["single",
@@ -767,18 +781,33 @@ pub enum ResumeTarget {
     /// Not resuming an existing session (new auto or new-with-id).
     None,
 }
+/// The argv[0] token fed to clap so usage/help lines name the real binary.
+///
+/// `grok` (the pre-rebrand name) and `agent` stay accepted for compatibility;
+/// anything else - an unrecognised binary, a missing argv[0] - falls back to
+/// the canonical `qidi`. Windows ships `qidi.exe`, so the file name is taken
+/// and a trailing `.exe` is stripped before matching; matching is exact
+/// (case-sensitive) on that stem.
+fn resolve_bin_name(argv0: Option<&str>) -> &'static str {
+    let Some(raw) = argv0 else {
+        return "qidi";
+    };
+    let file = std::path::Path::new(raw)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(raw);
+    let stem = file.strip_suffix(".exe").unwrap_or(file);
+    match stem {
+        "grok" => "grok",
+        "agent" => "agent",
+        _ => "qidi",
+    }
+}
+
 impl PagerArgs {
     /// Parse CLI arguments and apply `--cwd` if provided.
     pub fn parse_and_apply_cwd() -> anyhow::Result<Self> {
-        let bin_name = std::env::args()
-            .next()
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
-            .to_owned();
+        let bin_name = resolve_bin_name(std::env::args().next().as_deref()).to_owned();
         let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
         if let Some(socket) = args.leader_socket.take() {
             args.leader_socket = Some(std::path::absolute(&socket).unwrap_or(socket));
@@ -890,7 +919,7 @@ impl PagerArgs {
     /// The initial interactive prompt from the positional argument, trimmed.
     ///
     /// Returns `None` when no positional prompt was given or it is only
-    /// whitespace. This is the `grok "<prompt>"` launch form; the headless
+    /// whitespace. This is the `qidi "<prompt>"` launch form; the headless
     /// `-p`/`--single` path is handled separately.
     pub fn initial_prompt(&self) -> Option<&str> {
         self.prompt
@@ -902,9 +931,63 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `resolve_bin_name` decides the program name clap renders in usage and
+    /// help. Windows argv[0] is `qidi.exe`: the pre-T-0105 filter matched only
+    /// the bare legacy names and fell back to a hard-coded `"grok"`, so every
+    /// real invocation printed `Usage: grok` (T-0104 census).
+    #[test]
+    fn resolve_bin_name_accepts_known_names_and_falls_back_to_qidi() {
+        assert_eq!(resolve_bin_name(Some("qidi.exe")), "qidi");
+        assert_eq!(resolve_bin_name(Some("./qidi")), "qidi");
+        assert_eq!(resolve_bin_name(Some("C:\\Users\\me\\qidi.exe")), "qidi");
+        // Legacy names remain honest: they are still shipped/aliased binaries.
+        assert_eq!(resolve_bin_name(Some("grok")), "grok");
+        // `grok.exe` only resolves to the compat name if the extension is
+        // stripped before matching: a bare "grok" input passes with and
+        // without the strip, so it cannot pin that arm (review-seat ask).
+        assert_eq!(resolve_bin_name(Some("grok.exe")), "grok");
+        assert_eq!(resolve_bin_name(Some("agent")), "agent");
+        // Unrecognised or absent argv[0] resolves to the canonical name.
+        assert_eq!(resolve_bin_name(Some("weird")), "qidi");
+        assert_eq!(resolve_bin_name(None), "qidi");
+    }
+
+    /// The rendered `--help` text must advertise the rebranded binary name.
+    #[test]
+    fn help_output_usage_line_says_qidi_not_grok() {
+        let err = PagerArgs::try_parse_from(["qidi", "--help"]).unwrap_err();
+        let rendered = err.render().to_string();
+        // clap may style the usage heading; strip CSI escape sequences so the
+        // assertions check the program name, not the color codes.
+        let mut help = String::with_capacity(rendered.len());
+        let mut chars = rendered.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                help.push(c);
+                continue;
+            }
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for v in chars.by_ref() {
+                    if v.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            help.contains("Usage: qidi"),
+            "`--help` must render `Usage: qidi`; got:\n{help}"
+        );
+        assert!(
+            !help.contains("Usage: grok"),
+            "`--help` must not render `Usage: grok`; got:\n{help}"
+        );
+    }
     #[test]
     fn version_flag_exits_zero() {
-        let err = PagerArgs::try_parse_from(["grok", "--version"]).unwrap_err();
+        let err = PagerArgs::try_parse_from(["qidi", "--version"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(
             err.exit_code() == 0,
@@ -914,7 +997,7 @@ mod tests {
     }
     #[test]
     fn version_short_flag_exits_zero() {
-        let err = PagerArgs::try_parse_from(["grok", "-v"]).unwrap_err();
+        let err = PagerArgs::try_parse_from(["qidi", "-v"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(
             err.exit_code() == 0,
@@ -925,35 +1008,35 @@ mod tests {
     #[test]
     fn resume_target_classifies_flags() {
         assert_eq!(
-            PagerArgs::try_parse_from(["grok"]).unwrap().resume_target(),
+            PagerArgs::try_parse_from(["qidi"]).unwrap().resume_target(),
             ResumeTarget::None
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "-c"])
+            PagerArgs::try_parse_from(["qidi", "-c"])
                 .unwrap()
                 .resume_target(),
             ResumeTarget::MostRecentForCwd
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "--resume"])
+            PagerArgs::try_parse_from(["qidi", "--resume"])
                 .unwrap()
                 .resume_target(),
             ResumeTarget::MostRecentForCwd
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "--resume", "sess-1"])
+            PagerArgs::try_parse_from(["qidi", "--resume", "sess-1"])
                 .unwrap()
                 .resume_target(),
             ResumeTarget::SessionId("sess-1".to_string())
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "-s", "sess-2"])
+            PagerArgs::try_parse_from(["qidi", "-s", "sess-2"])
                 .unwrap()
                 .resume_target(),
             ResumeTarget::None
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "-r", "old", "--fork-session"])
+            PagerArgs::try_parse_from(["qidi", "-r", "old", "--fork-session"])
                 .unwrap()
                 .resume_target(),
             ResumeTarget::SessionId("old".to_string())
@@ -964,11 +1047,11 @@ mod tests {
     /// invocation would be ambiguous.
     #[test]
     fn minimal_and_fullscreen_flags_conflict() {
-        let args = PagerArgs::try_parse_from(["grok", "--minimal"]).unwrap();
+        let args = PagerArgs::try_parse_from(["qidi", "--minimal"]).unwrap();
         assert!(args.minimal && !args.fullscreen);
-        let args = PagerArgs::try_parse_from(["grok", "--fullscreen"]).unwrap();
+        let args = PagerArgs::try_parse_from(["qidi", "--fullscreen"]).unwrap();
         assert!(args.fullscreen && !args.minimal);
-        let err = PagerArgs::try_parse_from(["grok", "--minimal", "--fullscreen"]).unwrap_err();
+        let err = PagerArgs::try_parse_from(["qidi", "--minimal", "--fullscreen"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
     #[test]
@@ -980,7 +1063,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let missing = tmp.path().join("missing");
         let args = PagerArgs::try_parse_from([
-            "grok".as_ref(),
+            "qidi".as_ref(),
             "agent".as_ref(),
             "--no-leader".as_ref(),
             "--plugin-dir".as_ref(),
@@ -1038,19 +1121,19 @@ mod tests {
     #[test]
     fn startup_sandbox_profile_no_resume() {
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "--sandbox", "strict"])
+            PagerArgs::try_parse_from(["qidi", "--sandbox", "strict"])
                 .unwrap()
                 .startup_sandbox_profile(None),
             SandboxStartup::Apply(Some("strict".to_string()))
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok", "--sandbox", ""])
+            PagerArgs::try_parse_from(["qidi", "--sandbox", ""])
                 .unwrap()
                 .startup_sandbox_profile(None),
             SandboxStartup::Apply(None)
         );
         assert_eq!(
-            PagerArgs::try_parse_from(["grok"])
+            PagerArgs::try_parse_from(["qidi"])
                 .unwrap()
                 .startup_sandbox_profile(None),
             SandboxStartup::Apply(None)
@@ -1058,7 +1141,7 @@ mod tests {
     }
     #[test]
     fn leader_socket_flag_parses_at_root() {
-        let args = PagerArgs::try_parse_from(["grok", "--leader-socket", "/tmp/leader-x.sock"])
+        let args = PagerArgs::try_parse_from(["qidi", "--leader-socket", "/tmp/leader-x.sock"])
             .expect("--leader-socket parses at the root");
         assert_eq!(
             args.leader_socket.as_deref(),
@@ -1068,7 +1151,7 @@ mod tests {
     #[test]
     fn leader_socket_flag_is_global_for_subcommands() {
         let args = PagerArgs::try_parse_from([
-            "grok",
+            "qidi",
             "agent",
             "leader",
             "--leader-socket",
@@ -1082,19 +1165,19 @@ mod tests {
     }
     #[test]
     fn leader_socket_flag_defaults_to_none() {
-        let args = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
+        let args = PagerArgs::try_parse_from(["qidi"]).expect("bare grok parses");
         assert!(args.leader_socket.is_none());
     }
     #[test]
     fn debug_file_flag_parses_and_is_global() {
-        let root = PagerArgs::try_parse_from(["grok", "--debug-file", "/tmp/fire.txt"])
+        let root = PagerArgs::try_parse_from(["qidi", "--debug-file", "/tmp/fire.txt"])
             .expect("--debug-file parses at the root");
         assert_eq!(
             root.debug_file.as_deref(),
             Some(std::path::Path::new("/tmp/fire.txt"))
         );
         let sub =
-            PagerArgs::try_parse_from(["grok", "agent", "stdio", "--debug-file", "/tmp/f.txt"])
+            PagerArgs::try_parse_from(["qidi", "agent", "stdio", "--debug-file", "/tmp/f.txt"])
                 .expect("--debug-file parses after a subcommand (global)");
         assert_eq!(
             sub.debug_file.as_deref(),
@@ -1103,100 +1186,142 @@ mod tests {
     }
     #[test]
     fn debug_file_flag_defaults_to_none() {
-        let args = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
+        let args = PagerArgs::try_parse_from(["qidi"]).expect("bare grok parses");
         assert!(args.debug_file.is_none());
     }
     #[test]
     fn positional_prompt_seeds_interactive_session() {
         let args =
-            PagerArgs::try_parse_from(["grok", "fix the bug"]).expect("positional prompt parses");
+            PagerArgs::try_parse_from(["qidi", "fix the bug"]).expect("positional prompt parses");
         assert_eq!(args.initial_prompt(), Some("fix the bug"));
         assert!(args.command.is_none());
         assert!(args.single.is_none());
     }
     #[test]
     fn bare_grok_has_no_initial_prompt() {
-        let args = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
+        let args = PagerArgs::try_parse_from(["qidi"]).expect("bare grok parses");
         assert_eq!(args.initial_prompt(), None);
     }
     #[test]
     fn initial_prompt_trims_and_ignores_whitespace_only() {
-        let args = PagerArgs::try_parse_from(["grok", "  spaced  "]).expect("padded prompt parses");
+        let args = PagerArgs::try_parse_from(["qidi", "  spaced  "]).expect("padded prompt parses");
         assert_eq!(args.initial_prompt(), Some("spaced"));
-        let blank = PagerArgs::try_parse_from(["grok", "   "]).expect("blank prompt parses");
+        let blank = PagerArgs::try_parse_from(["qidi", "   "]).expect("blank prompt parses");
         assert_eq!(blank.initial_prompt(), None);
     }
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
-        let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
+        let args = PagerArgs::try_parse_from(["qidi", "logout"]).expect("subcommand parses");
         assert!(matches!(args.command, Some(Command::Logout)));
         assert!(args.prompt.is_none());
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {
-        let err = PagerArgs::try_parse_from(["grok", "-p", "headless", "interactive"])
+        let err = PagerArgs::try_parse_from(["qidi", "-p", "headless", "interactive"])
             .expect_err("positional prompt + --single must conflict");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
     #[test]
     fn worktree_flag_and_initial_prompt_combine() {
-        let a = PagerArgs::try_parse_from(["grok", "do the thing", "-w"])
+        let a = PagerArgs::try_parse_from(["qidi", "do the thing", "-w"])
             .expect("prompt then bare -w parses");
         assert_eq!(a.initial_prompt(), Some("do the thing"));
         assert_eq!(a.worktree.as_deref(), Some(""));
-        let b = PagerArgs::try_parse_from(["grok", "--worktree=feat", "do the thing"])
+        let b = PagerArgs::try_parse_from(["qidi", "--worktree=feat", "do the thing"])
             .expect("--worktree=name + positional parses");
         assert_eq!(b.initial_prompt(), Some("do the thing"));
         assert_eq!(b.worktree.as_deref(), Some("feat"));
-        let c = PagerArgs::try_parse_from(["grok", "-w", "x"]).expect("-w x parses");
+        let c = PagerArgs::try_parse_from(["qidi", "-w", "x"]).expect("-w x parses");
         assert_eq!(c.worktree.as_deref(), Some("x"));
         assert_eq!(c.initial_prompt(), None);
     }
     #[test]
     fn trust_flag_parses_on_pager_and_alias() {
-        let bare = PagerArgs::try_parse_from(["grok"]).expect("bare grok parses");
+        let bare = PagerArgs::try_parse_from(["qidi"]).expect("bare grok parses");
         assert!(!bare.trust);
-        let long = PagerArgs::try_parse_from(["grok", "--trust"]).expect("--trust parses");
+        let long = PagerArgs::try_parse_from(["qidi", "--trust"]).expect("--trust parses");
         assert!(long.trust);
         let alias =
-            PagerArgs::try_parse_from(["grok", "--trust-folder"]).expect("--trust-folder parses");
+            PagerArgs::try_parse_from(["qidi", "--trust-folder"]).expect("--trust-folder parses");
         assert!(alias.trust);
     }
     #[test]
     fn reasoning_effort_and_effort_alias_parse_same_field() {
-        let long = PagerArgs::try_parse_from(["grok", "--reasoning-effort", "high"])
+        let long = PagerArgs::try_parse_from(["qidi", "--reasoning-effort", "high"])
             .expect("--reasoning-effort parses");
         assert_eq!(long.reasoning_effort.as_deref(), Some("high"));
         let alias =
-            PagerArgs::try_parse_from(["grok", "--effort", "high"]).expect("--effort alias parses");
+            PagerArgs::try_parse_from(["qidi", "--effort", "high"]).expect("--effort alias parses");
         assert_eq!(alias.reasoning_effort.as_deref(), Some("high"));
     }
     #[test]
     fn reasoning_effort_accepts_max_and_remapped_ids() {
-        let max = PagerArgs::try_parse_from(["grok", "--effort", "max"]).expect("max parses");
+        let max = PagerArgs::try_parse_from(["qidi", "--effort", "max"]).expect("max parses");
         assert_eq!(max.reasoning_effort.as_deref(), Some("max"));
         let deep =
-            PagerArgs::try_parse_from(["grok", "--reasoning-effort", "deep"]).expect("deep parses");
+            PagerArgs::try_parse_from(["qidi", "--reasoning-effort", "deep"]).expect("deep parses");
         assert_eq!(deep.reasoning_effort.as_deref(), Some("deep"));
     }
     #[test]
     fn reasoning_effort_last_flag_wins_when_both_names_set() {
         let args =
-            PagerArgs::try_parse_from(["grok", "--reasoning-effort", "low", "--effort", "high"])
+            PagerArgs::try_parse_from(["qidi", "--reasoning-effort", "low", "--effort", "high"])
                 .expect("both effort flag names parse");
         assert_eq!(args.reasoning_effort.as_deref(), Some("high"));
         let reverse =
-            PagerArgs::try_parse_from(["grok", "--effort", "high", "--reasoning-effort", "low"])
+            PagerArgs::try_parse_from(["qidi", "--effort", "high", "--reasoning-effort", "low"])
                 .expect("both effort flag names parse (reverse order)");
         assert_eq!(reverse.reasoning_effort.as_deref(), Some("low"));
     }
     #[test]
     fn agent_args_effort_alias_parses() {
-        let args = PagerArgs::try_parse_from(["grok", "agent", "--effort", "max", "stdio"])
+        let args = PagerArgs::try_parse_from(["qidi", "agent", "--effort", "max", "stdio"])
             .expect("agent --effort parses");
         let Command::Agent(agent) = args.command.expect("agent subcommand") else {
             panic!("expected agent subcommand");
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
+    }
+    /// Pull the `HeadlessArgs` out of `agent headless <args>`.
+    fn parse_headless(extra: &[&str]) -> HeadlessArgs {
+        let mut argv = vec!["qidi", "agent", "headless"];
+        argv.extend_from_slice(extra);
+        let args = PagerArgs::try_parse_from(argv).expect("agent headless parses");
+        let Command::Agent(agent) = args.command.expect("agent subcommand") else {
+            panic!("expected agent subcommand");
+        };
+        let Some(AgentCmd::Headless(headless)) = agent.mode else {
+            panic!("expected headless mode");
+        };
+        headless
+    }
+    /// The qidi-named flags are canonical; the legacy grok-named flags remain
+    /// visible aliases so existing scripts keep parsing.
+    #[test]
+    fn headless_ws_flags_accept_qidi_names_and_grok_aliases() {
+        let qidi = parse_headless(&[
+            "--qidi-ws-url",
+            "wss://relay.example/ws",
+            "--qidi-ws-origin",
+            "https://relay.example",
+        ]);
+        assert_eq!(qidi.grok_ws_url.as_deref(), Some("wss://relay.example/ws"));
+        assert_eq!(
+            qidi.grok_ws_origin.as_deref(),
+            Some("https://relay.example")
+        );
+        let grok = parse_headless(&[
+            "--grok-ws-url",
+            "wss://legacy.example/ws",
+            "--grok-ws-origin",
+            "https://legacy.example",
+        ]);
+        assert_eq!(grok.grok_ws_url.as_deref(), Some("wss://legacy.example/ws"));
+        assert_eq!(
+            grok.grok_ws_origin.as_deref(),
+            Some("https://legacy.example")
+        );
+        let none = parse_headless(&[]);
+        assert!(none.grok_ws_url.is_none() && none.grok_ws_origin.is_none());
     }
 }

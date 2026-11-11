@@ -9,29 +9,42 @@
 //! Also covers shell-rc rewrite: stowed/symlinked `~/.bashrc` etc. must survive
 //! reinstall without being replaced by a plain file.
 //!
-//! The installer lives in the sibling `qidi-code` crate; it is resolved by
-//! relative path. If it cannot be found (e.g. a sandbox that does not vendor it)
-//! the test skips rather than fail — under the repo's `cargo nextest` workflow
-//! the path resolves and the installer is exercised end to end.
+//! The installer lives in the sibling `cf-pager` crate; it is
+//! resolved by relative path. The script MUST resolve on unix:
+//! a missing script is a hard failure, not a skip — the silent
+//! `return`-skip is what let this suite rot unseen for months
+//! (the path still pointed at the pre-rebrand `qidi-code`
+//! crate, so every run "skipped" while passing).
+//!
+//! Platform gating: the blitz shells out to `/bin/bash`.
+//! Windows has no bash, so the two tests below are
+//! `#[ignore]`d there — libtest prints `test ... ignored`
+//! per test in the default `cargo test` output, making the
+//! skip explicit with its reason instead of the previous
+//! file-level `#![cfg(unix)]` compile-out (which showed only
+//! a bare `running 0 tests`). Run the blitz on ubuntu or
+//! WSL; CI runs it in the `test-install-sh` job.
 
-#![cfg(unix)]
-
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
 fn script_path(name: &str) -> Option<PathBuf> {
     dunce::canonicalize(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../qidi-code/scripts/{name}")),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../cf-pager/scripts/{name}")),
     )
     .ok()
     .filter(|p| p.exists())
 }
 
+#[cfg(unix)]
 fn install_sh_path() -> Option<PathBuf> {
     script_path("install.sh")
 }
 
+#[cfg(unix)]
 fn host_platform() -> String {
     let os = if cfg!(target_os = "macos") {
         "macos"
@@ -51,6 +64,7 @@ const INSTALLER_BLOCK_START: &str = "# >>> grok installer >>>";
 
 /// Write a fake `curl` that intercepts every download `install.sh` performs.
 /// `$FAKE_MODE` (full|truncate|garbage) selects the corruption.
+#[cfg(unix)]
 fn write_fake_curl(dir: &Path) {
     let body = format!(
         r#"#!/bin/bash
@@ -91,9 +105,10 @@ exit 0
 }
 
 /// Seed a valid previous-good binary + symlink in the isolated home.
+#[cfg(unix)]
 fn seed_previous_good(home: &Path, platform: &str) -> PathBuf {
-    let downloads = home.join(".grok").join("downloads");
-    let bin = home.join(".grok").join("bin");
+    let downloads = home.join(".qidi").join("downloads");
+    let bin = home.join(".qidi").join("bin");
     std::fs::create_dir_all(&downloads).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let prev = downloads.join(format!("grok-{platform}"));
@@ -107,8 +122,9 @@ fn seed_previous_good(home: &Path, platform: &str) -> PathBuf {
 
 /// Re-resolve `$BIN_DIR/grok` from disk and re-run it: the active grok must
 /// always execute, and never be a `.tmp`/partial file.
+#[cfg(unix)]
 fn assert_active_grok_runs(home: &Path) {
-    let link = home.join(".grok").join("bin").join("grok");
+    let link = home.join(".qidi").join("bin").join("grok");
     assert!(link.is_symlink(), "grok must remain a symlink");
     let resolved =
         dunce::canonicalize(&link).unwrap_or_else(|e| panic!("grok symlink dangles: {e}"));
@@ -125,6 +141,17 @@ fn assert_active_grok_runs(home: &Path) {
     assert!(ok, "active grok must run: {}", resolved.display());
 }
 
+/// Run the real installer in an isolated home. `QIDI_BIN_DIR` points
+/// the installer at `$HOME/.qidi/bin` (exercising the env override and
+/// the absolute-symlink branch, since the hardcoded `DOWNLOAD_DIR`
+/// `$HOME/.grok/downloads` then has a different dirname); `QIDI_CHANNEL`
+/// pins the channel. These are the two knobs the blitz pins —
+/// `install.sh` also reads `QIDI_PROXY_URL` (:300), which the
+/// blitz leaves unset. The knobs were renamed `GROK_*` → `QIDI_*` in
+/// the cf rebrand; the pre-rebrand `QIDI_*` names were once silently
+/// ignored (install.sh then read only `GROK_*`, :157/:161), another
+/// defect the silent skip hid.
+#[cfg(unix)]
 fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, shell: &str) -> bool {
     let path_env = format!("{}:/usr/bin:/bin", fakebin.display());
     let status = Command::new("/bin/bash")
@@ -134,7 +161,7 @@ fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, she
         .env("HOME", home)
         .env("PATH", path_env)
         .env("SHELL", shell)
-        .env("QIDI_BIN_DIR", home.join(".grok").join("bin"))
+        .env("QIDI_BIN_DIR", home.join(".qidi").join("bin"))
         .env("QIDI_CHANNEL", "stable")
         .env("FAKE_MODE", mode)
         .status()
@@ -142,10 +169,12 @@ fn run_installer(install_sh: &Path, home: &Path, fakebin: &Path, mode: &str, she
     status.success()
 }
 
+#[cfg(unix)]
 fn installer_block_count(body: &str) -> usize {
     body.matches(INSTALLER_BLOCK_START).count()
 }
 
+#[cfg(unix)]
 fn assert_single_installer_block(path: &Path, preserved: Option<&str>) {
     let body = std::fs::read_to_string(path).unwrap_or_else(|e| {
         panic!("read {}: {e}", path.display());
@@ -167,6 +196,7 @@ fn assert_single_installer_block(path: &Path, preserved: Option<&str>) {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(unix)]
 enum RcLayout {
     Missing,
     Plain,
@@ -176,6 +206,7 @@ enum RcLayout {
     StowRelativeDotDot,
 }
 
+#[cfg(unix)]
 struct ShellRcCase {
     name: &'static str,
     script: &'static str,
@@ -187,6 +218,7 @@ struct ShellRcCase {
 }
 
 /// Returns `(installer_home, rc_path, stow_target, expected_link_value)`.
+#[cfg(unix)]
 fn setup_rc(
     root: &Path,
     case: &ShellRcCase,
@@ -233,14 +265,16 @@ fn setup_rc(
     }
 }
 
+#[cfg(unix)]
 fn run_shell_rc_case(case: &ShellRcCase) {
-    let Some(script) = script_path(case.script) else {
-        eprintln!(
-            "skipping {}: {} not found relative to crate",
-            case.name, case.script
-        );
-        return;
-    };
+    // Loud failure, not a skip: on unix the installer script
+    // must resolve (see the module doc).
+    let script = script_path(case.script).unwrap_or_else(|| {
+        panic!(
+            "{} not found relative to crate; the sibling-crate layout changed -- update script_path()",
+            case.script
+        )
+    });
     let platform = host_platform();
     let fakedir = tempfile::tempdir().unwrap();
     write_fake_curl(fakedir.path());
@@ -299,12 +333,24 @@ fn run_shell_rc_case(case: &ShellRcCase) {
     assert_active_grok_runs(&home_path);
 }
 
+/// Windows has no bash: the blitz is skipped there, explicitly
+/// (libtest prints `test ... ignored` with this reason in the
+/// default output). On unix the body below runs for real.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "no bash on windows: run the install.sh blitz on ubuntu or WSL (CI: test-install-sh job)"
+)]
 fn install_sh_blitz_keeps_grok_runnable_under_corruption() {
-    let Some(install_sh) = install_sh_path() else {
-        eprintln!("skipping: install.sh not found relative to crate; run under cargo");
-        return;
-    };
+    #[cfg(unix)]
+    install_sh_blitz_body();
+}
+
+#[cfg(unix)]
+fn install_sh_blitz_body() {
+    let install_sh = install_sh_path().unwrap_or_else(|| {
+        panic!("install.sh not found relative to crate; the sibling-crate layout changed -- update script_path()")
+    });
     let platform = host_platform();
     let fakedir = tempfile::tempdir().unwrap();
     write_fake_curl(fakedir.path());
@@ -339,8 +385,21 @@ fn install_sh_blitz_keeps_grok_runnable_under_corruption() {
 }
 
 /// Shell-rc rewrite matrix: stow absolute/relative/`..`, plain, first-create, enterprise.
+///
+/// Windows has no bash: explicitly ignored there (see
+/// `install_sh_blitz_keeps_grok_runnable_under_corruption`).
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "no bash on windows: run the install.sh blitz on ubuntu or WSL (CI: test-install-sh job)"
+)]
 fn install_sh_shell_rc_rewrite_matrix() {
+    #[cfg(unix)]
+    install_sh_shell_rc_rewrite_matrix_body();
+}
+
+#[cfg(unix)]
+fn install_sh_shell_rc_rewrite_matrix_body() {
     let cases = [
         ShellRcCase {
             name: "stow absolute bashrc reinstall",
@@ -400,5 +459,128 @@ fn install_sh_shell_rc_rewrite_matrix() {
 
     for case in &cases {
         run_shell_rc_case(case);
+    }
+}
+
+/// Enterprise channel: an explicitly passed bad TARGET version
+/// is rejected before any network access (exit 1 + message on
+/// stderr), mirroring the stable installer's format gate.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "no bash on windows: enterprise version-format gate runs on ubuntu or WSL"
+)]
+fn install_enterprise_sh_rejects_bad_version_format() {
+    #[cfg(unix)]
+    install_enterprise_sh_rejects_bad_version_format_body();
+}
+
+#[cfg(unix)]
+fn install_enterprise_sh_rejects_bad_version_format_body() {
+    let script = script_path("install-enterprise.sh").unwrap_or_else(|| {
+        panic!(
+            "install-enterprise.sh not found relative to crate; the sibling-crate layout changed -- update script_path()"
+        )
+    });
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new("/bin/bash")
+        .arg(script)
+        .arg("999bad")
+        .env_clear()
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .expect("spawn bash install-enterprise.sh");
+    assert!(
+        !out.status.success(),
+        "bad TARGET version must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Invalid version format"),
+        "stderr must carry the format error, got: {stderr}"
+    );
+}
+
+/// Enterprise channel keeps the active grok runnable under
+/// download corruption: the installer downloads to a `.tmp.$$`
+/// file, executes it (`--version`) before promoting, and only
+/// then links it — so a corrupt artifact never becomes the
+/// active binary and the previous-good install survives with no
+/// `.tmp` partial left behind.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "no bash on windows: run the enterprise blitz on ubuntu or WSL (CI: test-install-sh job)"
+)]
+fn install_enterprise_sh_blitz_keeps_grok_runnable_under_corruption() {
+    #[cfg(unix)]
+    install_enterprise_sh_blitz_body();
+}
+
+#[cfg(unix)]
+fn install_enterprise_sh_blitz_body() {
+    let script = script_path("install-enterprise.sh").unwrap_or_else(|| {
+        panic!(
+            "install-enterprise.sh not found relative to crate; the sibling-crate layout changed -- update script_path()"
+        )
+    });
+    let platform = host_platform();
+    let fakedir = tempfile::tempdir().unwrap();
+    write_fake_curl(fakedir.path());
+
+    // Same corruption matrix as the stable blitz: full downloads
+    // promote, truncate/garbage downloads fail the pre-promote
+    // --version gate and keep the previous-good install.
+    let cases = [
+        ("full", true),
+        ("truncate", false),
+        ("garbage", false),
+        ("full", true),
+        ("truncate", false),
+        ("garbage", false),
+        ("full", true),
+    ];
+
+    for (mode, expect_ok) in cases {
+        let home = tempfile::tempdir().unwrap();
+        seed_previous_good(home.path(), &platform);
+
+        let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
+        let status = Command::new("/bin/bash")
+            .arg(&script)
+            .arg("0.1.181")
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", path_env)
+            .env("SHELL", "/bin/bash")
+            .env("QIDI_BIN_DIR", home.path().join(".qidi").join("bin"))
+            .env("FAKE_MODE", mode)
+            .status()
+            .expect("spawn bash install-enterprise.sh");
+        assert_eq!(
+            status.success(),
+            expect_ok,
+            "install-enterprise.sh mode={mode} exit success mismatch"
+        );
+
+        // The invariant holds regardless of which path was taken:
+        // the active grok always runs (new good binary on
+        // success, previous-good on rejection).
+        assert_active_grok_runs(home.path());
+
+        // No .tmp partial may survive in the download dir —
+        // every failure path must clean up its own temp file.
+        let downloads = home.path().join(".grok").join("downloads");
+        let leftovers: Vec<_> = std::fs::read_dir(&downloads)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "install-enterprise.sh must clean .tmp partials: {:?}",
+            leftovers
+        );
     }
 }

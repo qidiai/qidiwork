@@ -6,7 +6,7 @@
 //! session's `subagents/` dir and flips any stale `running` meta (not tracked by
 //! the live coordinator) to `cancelled` (mechanism A, the meta pass).
 //!
-//! This test spawns a real `grok agent stdio` process, seeds an orphaned
+//! This test spawns a real `qidi agent stdio` process, seeds an orphaned
 //! `running` meta on disk, resumes the session, and asserts the meta was
 //! reconciled to `cancelled`.
 //!
@@ -67,7 +67,7 @@ async fn resume_reconciles_orphaned_running_subagent() {
         // terminal write, no SubagentFinished) — exactly what a dead process
         // leaves behind.
         // GrokStdioClient sets HOME=<temp>; the binary uses <HOME>/.grok as QIDI_HOME.
-        let grok_home = shared_home.path().join(".grok");
+        let grok_home = shared_home.path().join(".qidi");
         let session_dir = locate_session_dir(&grok_home, session_id.0.as_ref());
         let sub_id = "sa-orphan";
         let meta_path = session_dir.join("subagents").join(sub_id).join("meta.json");

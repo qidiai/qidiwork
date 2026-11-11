@@ -106,7 +106,8 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 
 /// Budget-aware variant of [`build_recap_items`]. Best-effort: returns a
 /// structurally-valid, non-empty request trimmed to the estimated prompt budget
-/// (the same bytes/4 estimator compaction triggers on) to prevent
+/// (the same character-aware estimator compaction triggers on: 3.4 ASCII
+/// chars/token, 4/5 token per CJK character) to prevent
 /// `ic_400_prompt_too_long` on long sessions. Not an absolute guarantee — a
 /// degenerate tiny window, an oversized retained `System` prefix, or estimator
 /// optimism can still exceed the real limit (the 85% + headroom + 500k cap make
@@ -796,10 +797,18 @@ mod tests {
         let reasoning_tokens = estimate_item_tokens(&mk_reasoning("r"));
         let filler_tokens = snapshot_budget - reasoning_tokens;
 
+        // The filler is ASCII and estimated at the calibrated 10/34 tokens per
+        // character (floor), so the shared inverse derives the character count:
+        // floor(10 * ceil(34X/10) / 34) == X exactly (zero residual; e.g. 100 ->
+        // 340 -> 100, 517 -> 1758 -> 517), and the `+1` variant lands at X + 1
+        // or more, keeping the strict `>`.
+
         // Exactly at budget => fast path (`<=`) keeps reasoning verbatim.
         let at = vec![
             mk_reasoning("r"),
-            ConversationItem::user("a".repeat((filler_tokens * 4) as usize)),
+            ConversationItem::user(
+                "a".repeat(cf_token_estimation::estimate_chars_aware(filler_tokens) as usize),
+            ),
         ];
         assert_eq!(estimate_conversation_tokens(&at), snapshot_budget);
         let out_at = budget_recap_items(at, tag, false, 8_000);
@@ -813,7 +822,9 @@ mod tests {
         // One token over => over-budget path strips reasoning.
         let over = vec![
             mk_reasoning("r"),
-            ConversationItem::user("a".repeat((filler_tokens * 4 + 4) as usize)),
+            ConversationItem::user(
+                "a".repeat(cf_token_estimation::estimate_chars_aware(filler_tokens + 1) as usize),
+            ),
         ];
         assert!(estimate_conversation_tokens(&over) > snapshot_budget);
         let out_over = budget_recap_items(over, tag, false, 8_000);

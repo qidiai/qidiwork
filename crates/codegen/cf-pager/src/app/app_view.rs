@@ -317,6 +317,14 @@ pub struct SessionPickerEntry {
     pub repo_name: String,
     /// Human-readable worktree label (if the session was created in a named worktree).
     pub worktree_label: Option<String>,
+    /// Subagent child session (`sessionKind` starts with `subagent`).
+    ///
+    /// These never appear in `sessions` — the server sends them under
+    /// `_meta["x.ai/subagentSessions"]` — and the picker keeps them out of the
+    /// default list so a user's own history isn't swamped by orchestration
+    /// children. They stay discoverable: a non-empty query matches them like
+    /// any other row (see [`crate::views::session_picker::filter_session_entries`]).
+    pub is_subagent: bool,
     /// Lazy-loaded detail for the expanded card view.
     pub card_detail: Option<CardDetail>,
 }
@@ -1001,9 +1009,6 @@ pub struct AppView {
     /// Debounce stamp for watch/focus subscription checks (see
     /// [`super::subscription`]).
     pub last_subscription_check_at: Option<std::time::Instant>,
-    /// Office-artifact manifest watch (QidiWork); lazily armed while the
-    /// bound task workspace exists. See [`crate::app::office_watch`].
-    pub(crate) office_watch: Option<crate::app::office_watch::OfficeWatch>,
     /// Server override (seconds) for the subscription-watch cadence.
     pub subscription_watch_interval_secs: Option<u64>,
     /// A stale-source gate held out of `gate` while a live check verifies
@@ -1303,7 +1308,6 @@ impl AppView {
             subscription_tier: None,
             paywall_check_started: None,
             last_subscription_check_at: None,
-            office_watch: None,
             subscription_watch_interval_secs: None,
             pending_gate_verification: None,
             gate_verify_gen: 0,
@@ -2882,6 +2886,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             ctx.sp_content_loading,
             source_filter,
             Some(current_repo.as_str()),
+            !ctx.sp_state.query.trim().is_empty(),
         );
         let entry_count = entry_map.len();
         let non_selectable_flags: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
@@ -5129,7 +5134,6 @@ pub(crate) mod tests {
             subscription_tier: None,
             paywall_check_started: None,
             last_subscription_check_at: None,
-            office_watch: None,
             subscription_watch_interval_secs: None,
             pending_gate_verification: None,
             gate_verify_gen: 0,
@@ -6512,7 +6516,7 @@ pub(crate) mod tests {
         let mut app = test_app();
         app.gate = Some(cf_shell::auth::GateInfo {
             message: "Subscribe to use QIDI Code".into(),
-            url: Some("https://grok.com/supergrok?referrer=cf-tools".into()),
+            url: Some("https://qidiai.ltd/superqidi?referrer=cf-tools".into()),
             label: None,
         });
         assert!(app.is_access_blocked());
@@ -6561,6 +6565,12 @@ pub(crate) mod tests {
                 cursor: true,
                 ..Default::default()
             };
+        // The shared fixture's opaque "/tmp" cwd is not canonicalizable
+        // on Windows (per-drive resolution; a runner's D:\tmp does not
+        // exist, so dunce::canonicalize fails NotFound — production
+        // canonicalizes the app cwd for real, effects/mod.rs). Point it
+        // at a directory that exists on every platform.
+        app.cwd = std::env::temp_dir();
         let crate::app::actions::Effect::CanonicalizeForeignResumeCwd {
             requested_cwd,
             launch_token,
@@ -10299,6 +10309,10 @@ pub(crate) mod tests {
         app.project_picker_disabled = false;
         assert!(!app.needs_project_picker());
     }
+    // /tmp-as-non-project-dir is POSIX semantics (Windows treats it as
+    // a project dir); terminal-like Tab is compiled out on Windows. Gate
+    // to POSIX, matching the cf-shell fixture-gating precedent.
+    #[cfg(not(windows))]
     #[test]
     fn needs_project_picker_true_for_non_project_dir() {
         let mut app = test_app();
@@ -10325,6 +10339,7 @@ pub(crate) mod tests {
             branch: None,
             repo_name: "r".into(),
             worktree_label: None,
+            is_subagent: false,
             card_detail: None,
         };
         let f_key = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));

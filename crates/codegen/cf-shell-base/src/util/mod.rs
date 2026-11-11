@@ -62,18 +62,18 @@ pub fn is_cli_chat_proxy_url(url: &str) -> bool {
     }
     false
 }
-/// True for first-party Qidi endpoints (`*.qidiai.ltd`, cli-chat-proxy, and
-/// optional non-production first-party hosts when that feature is enabled).
+/// True for first-party xAI endpoints (`*.x.ai`, cli-chat-proxy, and optional
+/// non-production first-party hosts when that feature is enabled).
 /// `disable_api_key_auth` refuses keys only for these; other hosts are BYOK and
-/// exempt. Safe against invalid URLs and suffix attacks (`evil-qidiai.ltd.example`).
-pub fn is_first_party_qidi_url(url: &str) -> bool {
+/// exempt. Safe against invalid URLs and suffix attacks (`evil-x.ai.example`).
+pub fn is_first_party_xai_url(url: &str) -> bool {
     if is_cli_chat_proxy_url(url) {
         return true;
     }
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_owned()))
-        .is_some_and(|host| host == "qidiai.ltd" || host.ends_with(".qidiai.ltd"))
+        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
 }
 /// Truncate a string to at most `max_chars` characters.
 /// Slices at char boundaries so multi-byte UTF-8 never panics.
@@ -215,41 +215,40 @@ mod tests {
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_public_api() {
-        assert!(!is_cli_chat_proxy_url("https://api.qidiai.ltd"));
+        assert!(!is_cli_chat_proxy_url("https://api.x.ai/v1"));
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_spoofed_hostname() {
         assert!(!is_cli_chat_proxy_url(
-            "https://api.qidiai.ltd.evil.example/v1"
+            "https://cli-chat-proxy.grok.com.evil.example/v1"
         ));
     }
     #[test]
     fn test_is_cli_chat_proxy_url_rejects_v11_prefix_confusion() {
         assert!(!is_cli_chat_proxy_url(
-            "https://api.qidiai.ltd/v11/chat/completions"
+            "https://cli-chat-proxy.grok.com/v11/chat/completions"
         ));
     }
     #[test]
-    fn test_is_first_party_qidi_url() {
-        assert!(is_first_party_qidi_url("https://api.qidiai.ltd/v1"));
-        assert!(is_first_party_qidi_url(
+    fn test_is_first_party_xai_url() {
+        assert!(is_first_party_xai_url("https://api.x.ai/v1"));
+        assert!(is_first_party_xai_url(
+            "https://api.x.ai/v1/chat/completions"
+        ));
+        assert!(is_first_party_xai_url("https://x.ai"));
+        assert!(is_first_party_xai_url(
             "https://api.qidiai.ltd/v1/chat/completions"
         ));
-        assert!(is_first_party_qidi_url("https://qidiai.ltd"));
-        assert!(is_first_party_qidi_url("https://www.qidiai.ltd"));
-        assert!(is_first_party_qidi_url(
-            "https://api.qidiai.ltd/v1/chat/completions"
-        ));
-        assert!(!is_first_party_qidi_url("https://api.openai.com/v1"));
-        assert!(!is_first_party_qidi_url("https://api.anthropic.com/v1"));
-        assert!(!is_first_party_qidi_url(
+        assert!(!is_first_party_xai_url("https://api.openai.com/v1"));
+        assert!(!is_first_party_xai_url("https://api.anthropic.com/v1"));
+        assert!(!is_first_party_xai_url(
             "https://generativelanguage.googleapis.com"
         ));
-        assert!(!is_first_party_qidi_url("https://api.qidiai.ltd.evil.example/v1"));
-        assert!(!is_first_party_qidi_url("https://evil-qidiai.ltd.attacker.com/v1"));
-        assert!(!is_first_party_qidi_url("https://prefixqidiai.ltd/v1"));
-        assert!(!is_first_party_qidi_url("not-a-url"));
-        assert!(!is_first_party_qidi_url(""));
+        assert!(!is_first_party_xai_url("https://api.x.ai.evil.example/v1"));
+        assert!(!is_first_party_xai_url("https://evil-x.ai.attacker.com/v1"));
+        assert!(!is_first_party_xai_url("https://prefixx.ai/v1"));
+        assert!(!is_first_party_xai_url("not-a-url"));
+        assert!(!is_first_party_xai_url(""));
     }
     #[test]
     fn test_truncate() {
@@ -290,8 +289,28 @@ mod tests {
         );
     }
     #[test]
-    fn is_grok_process_self_true_impossible_pid_false() {
-        assert!(is_grok_process(std::process::id()));
+    fn is_grok_process_grok_named_process_true_impossible_pid_false() {
+        // The rebrand (xai-grok-* → cf-*) renamed the test
+        // binaries, so the test process itself no longer carries
+        // "grok" in its image name / cmdline. Exercise the positive
+        // case portably instead: run a copy of this test binary
+        // from a "grok"-named path (`--list` makes the child list
+        // its tests and exit immediately).
+        let temp = tempfile::TempDir::new().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let grok_probe = temp.path().join("grok_probe");
+        #[cfg(windows)]
+        let grok_probe = grok_probe.with_extension("exe");
+        std::fs::copy(&exe, &grok_probe).unwrap();
+        let mut child = std::process::Command::new(&grok_probe)
+            .arg("--list")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn grok_probe");
+        assert!(is_grok_process(child.id()));
+        let _ = child.wait().expect("wait grok_probe");
         assert!(!is_grok_process(u32::MAX));
     }
 }

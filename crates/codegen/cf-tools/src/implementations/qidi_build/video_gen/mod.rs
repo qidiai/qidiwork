@@ -150,7 +150,7 @@ pub struct VideoGenClient {
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
     /// (free / X Basic). The video tools short-circuit before any HTTP call
-    /// and return the SuperGrok upsell prose. See [`VideoGenClient::is_tier_restricted`].
+    /// and return the SuperQIDI upsell prose. See [`VideoGenClient::is_tier_restricted`].
     tier_restricted: bool,
 }
 
@@ -236,7 +236,7 @@ impl VideoGenClient {
 
     /// Whether the current user's tier (free / X Basic) is zero-limited on
     /// Imagine server-side. The video tools use this to short-circuit with the
-    /// SuperGrok upsell instead of issuing a doomed request.
+    /// SuperQIDI upsell instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -681,7 +681,7 @@ pub enum VideoGenConfig {
         zdr_video_output_s3: Option<Box<ZdrVideoOutputS3Config>>,
         /// `true` when the user is on a tier the Imagine server zero-limits
         /// (free / X Basic). The video tools stay advertised but short-circuit
-        /// at call time with the SuperGrok upsell prose. Set by the host from
+        /// at call time with the SuperQIDI upsell prose. Set by the host from
         /// the subscription tier; always `false` for team / API-key / workspace.
         tier_restricted: bool,
     },
@@ -693,10 +693,11 @@ impl VideoGenConfig {
     }
 }
 
-/// Prose returned to the model (as a normal, successful tool result) when the
-/// current account tier has no video-generation entitlement. The model relays
-/// it to the user.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "当前套餐不包含视频生成功能。请告知用户：升级到更高套餐即可解锁图像与视频生成，详情见 https://www.qidiai.ltd。请勿重试该工具。";
+/// Prose returned to the model (as a normal, successful tool result) when a
+/// free / X Basic user calls a video tool. The model relays it to the user;
+/// the deliberate `/imagine-video` slash command shows the SuperQIDI upsell
+/// modal instead.
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is a SuperQIDI feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to SuperQIDI: https://qidiai.ltd/superqidi?referrer=cf-tools. Do not retry this tool.";
 
 fn default_resolution_name() -> String {
     DEFAULT_RESOLUTION.to_owned()

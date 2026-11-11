@@ -42,6 +42,27 @@ pub(super) fn task_model_override_error(
         is_session_auth,
     )
 }
+/// Post-`insert_pending` failure: record the specific reason on the pending
+/// guard **and** answer the caller's oneshot.
+///
+/// `send_failure` alone reaches only the oneshot. Background-mode callers have
+/// already stopped listening on it, so the failure record came from
+/// `PendingGuard::drop`'s generic "Subagent failed during initialization" and
+/// the real reason (still running, not found, identity conflict, bad cwd,
+/// missing source model, resume-copy abort) was lost. `set_error` is what makes
+/// the single completion summary the parent surfaces carry the true message
+/// instead of the fallback.
+///
+/// Only valid after `insert_pending`: pre-spawn failures go through
+/// `send_pre_spawn_failure`, which records its own synthetic completion.
+fn fail_post_pending(
+    request: SubagentRequest,
+    pending_guard: &mut PendingGuard<'_>,
+    msg: String,
+) {
+    pending_guard.set_error(msg.clone());
+    send_failure(request, &msg);
+}
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -188,11 +209,11 @@ pub(crate) async fn handle_subagent_request(
             "Role prompt_file degraded, continuing without role prompt"
         );
     }
-    let resume_source = if let Some(resume_id) = request
+    request.resume_from = request
         .resume_from
         .as_deref()
-        .filter(|s| is_valid_resume_id(s))
-    {
+        .and_then(sanitize_quoted_arg);
+    let resume_source = if let Some(resume_id) = request.resume_from.as_deref() {
         let coord = coordinator.borrow();
         if coord.is_active(resume_id) {
             let msg = format!(
@@ -200,7 +221,7 @@ pub(crate) async fn handle_subagent_request(
                  Wait for it to complete before resuming."
             );
             drop(coord);
-            send_failure(request, &msg);
+            fail_post_pending(request, &mut pending_guard, msg);
             return;
         }
         match coord
@@ -216,7 +237,7 @@ pub(crate) async fn handle_subagent_request(
                      The subagent may have been evicted or the ID is invalid."
                 );
                 drop(coord);
-                send_failure(request, &msg);
+                fail_post_pending(request, &mut pending_guard, msg);
                 return;
             }
         }
@@ -236,7 +257,7 @@ pub(crate) async fn handle_subagent_request(
             request.runtime_overrides.persona.as_deref(),
             source,
         ) {
-            send_failure(request, &e.to_string());
+            fail_post_pending(request, &mut pending_guard, e.to_string());
             return;
         }
     }
@@ -384,7 +405,7 @@ pub(crate) async fn handle_subagent_request(
                         } else {
                             format!("cwd \"{cwd_path}\" does not exist")
                         };
-                        send_failure(request, &msg);
+                        fail_post_pending(request, &mut pending_guard, msg);
                         return;
                     }
                 }
@@ -410,6 +431,21 @@ pub(crate) async fn handle_subagent_request(
             "Applied capability mode filter to agent tool config"
         );
     }
+    // F4: capability filtering only removes tools that are already in the
+    // agent definition. `AgentBuilder` then re-adds its default
+    // `OpenCodeWriteTool` when it finds no write tool, which re-enabled writes
+    // for read-only/execute children. Propagate the verdict to the builder via
+    // `write_file_enabled` so the fallback injection is suppressed too.
+    let capability_write_allowed = effective_runtime
+        .capability_mode
+        .map(|mode| mode.allows_write())
+        .unwrap_or(true);
+    if !capability_write_allowed {
+        tracing::info!(
+            subagent_id = % request.id,
+            "Capability mode forbids writes; suppressing default write tool injection"
+        );
+    }
     {
         use cf_tools::implementations::qidi_build::task::MAX_SUBAGENT_DEPTH;
         use cf_tools::types::tool::ToolKind;
@@ -429,13 +465,19 @@ pub(crate) async fn handle_subagent_request(
     if request.fork_context {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
-    let (mut effective_sampling_config, mut effective_model_id) = resolve_effective_model_config(
+    let resolved_model = resolve_effective_model_config(
             effective_runtime.model.as_deref(),
             &request.subagent_type,
             &definition.model,
             &ctx,
         )
         .await;
+    // Model resolution still falls back (never fails), but a fallback is a
+    // silent downgrade: carry the notice to the tool-visible result below so
+    // it reaches the model/user instead of dying in a log line.
+    let model_fallback_notice = resolved_model.fallback_notice;
+    let (mut effective_sampling_config, mut effective_model_id) =
+        (resolved_model.config, resolved_model.model_id);
     let subagent_max_turns = resolve_subagent_max_turns(
         definition.max_turns,
         ctx.parent_max_turns,
@@ -474,7 +516,7 @@ pub(crate) async fn handle_subagent_request(
                  is no longer available in the model catalogue.",
                 source.subagent_id,
             );
-            send_failure(request, &msg);
+            fail_post_pending(request, &mut pending_guard, msg);
             return;
         }
     }
@@ -542,7 +584,7 @@ pub(crate) async fn handle_subagent_request(
                 subagent_id = % request.id, error = % msg,
                 "Resume-copy failed, aborting subagent spawn"
             );
-            send_failure(request, &msg);
+            fail_post_pending(request, &mut pending_guard, msg);
             return;
         }
     };
@@ -1177,7 +1219,7 @@ pub(crate) async fn handle_subagent_request(
             ctx.image_gen_config.clone(),
             ctx.video_gen_config.clone(),
             ctx.app_builder_deployer_config.clone(),
-            ctx.write_file_enabled,
+            ctx.write_file_enabled && capability_write_allowed,
             ctx.goal_enabled,
             true,
             ctx.ask_user_question_enabled,
@@ -1606,6 +1648,20 @@ pub(crate) async fn handle_subagent_request(
             }
         }
     };
+    // Surface a model-override fallback (unknown id → inherited model) on the
+    // tool-visible result, not just in the log: the model must be able to see
+    // that the subagent did not run on the model it asked for.
+    if let Some(notice) = model_fallback_notice {
+        if result.success {
+            result.output = format!("{}\n\n{notice}", result.output).into();
+        } else {
+            let error = result.error.get_or_insert_with(String::new);
+            if !error.is_empty() {
+                error.push_str("\n\n");
+            }
+            error.push_str(notice);
+        }
+    }
     if let Some(trace_gcs_config) = gcs_upload_ctx
         .upload_method
         .as_ref()

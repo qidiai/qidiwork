@@ -79,9 +79,20 @@ pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
         .into_iter()
         .map(|mut file| {
             // Strip rules-file YAML frontmatter so it does not leak as raw YAML (matches cf-tools render).
-            if file.file_path.contains("/.qidi/rules/")
-                || file.file_path.contains("/.claude/rules/")
-            {
+            // Path-COMPONENT check: `file_path` renders native separators
+            // on Windows, where a "/.qidi/rules/" substring never matches
+            // and frontmatter would leak into the prompt.
+            let is_rules_file = {
+                let path = std::path::Path::new(&file.file_path);
+                let comps: Vec<std::borrow::Cow<'_, str>> = path
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect();
+                comps.windows(2).any(|w| {
+                    (w[0] == ".qidi" || w[0] == ".claude") && w[1] == "rules"
+                })
+            };
+            if is_rules_file {
                 file.content = cf_tools::implementations::skills::skill::extract_skill_body(
                     &file.content,
                 );
@@ -163,7 +174,7 @@ pub fn discover_plugins(
 /// Returns `Value::Null` if the file does not exist or cannot be
 /// parsed. Non-fatal errors are logged.
 pub fn load_project_config(root_cwd: &Path) -> Value {
-    let config_path = root_cwd.join(".grok").join("config.toml");
+    let config_path = root_cwd.join(".qidi").join("config.toml");
     match cf_config::load_config_file(&config_path) {
         Ok(toml::Value::Table(ref t)) if t.is_empty() => {
             // The config loader returns an empty table when the file
@@ -265,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn discover_skills_finds_skill_md() {
         let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join(".grok").join("skills").join("my-skill");
+        let skills_dir = tmp.path().join(".qidi").join("skills").join("my-skill");
         fs::create_dir_all(&skills_dir).unwrap();
         fs::write(
             skills_dir.join("SKILL.md"),
@@ -285,7 +296,7 @@ mod tests {
     #[tokio::test]
     async fn discover_skills_respects_ignore_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join(".grok").join("skills").join("ignored");
+        let skills_dir = tmp.path().join(".qidi").join("skills").join("ignored");
         fs::create_dir_all(&skills_dir).unwrap();
         fs::write(
             skills_dir.join("SKILL.md"),
@@ -299,6 +310,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
         let skills = discover_skills(tmp.path(), &config).await;
         let found = skills.iter().any(|s| s["name"].as_str() == Some("ignored"));
@@ -313,7 +325,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let skills_dir = tmp
             .path()
-            .join(".grok")
+            .join(".qidi")
             .join("skills")
             .join("serialized-check");
         fs::create_dir_all(&skills_dir).unwrap();
@@ -364,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn discover_agents_md_strips_rules_frontmatter() {
         let tmp = tempfile::tempdir().unwrap();
-        let rules_dir = tmp.path().join(".grok").join("rules");
+        let rules_dir = tmp.path().join(".qidi").join("rules");
         fs::create_dir_all(&rules_dir).unwrap();
         fs::write(
             rules_dir.join("xyzzy-discover-agents-md-test.md"),
@@ -378,7 +390,9 @@ mod tests {
             .find(|f| {
                 f["file_path"]
                     .as_str()
-                    .is_some_and(|p| p.ends_with("/.qidi/rules/xyzzy-discover-agents-md-test.md"))
+                    // Separator-agnostic: discovered paths render native separators on
+                // Windows; the unique file name pins the identity.
+                .is_some_and(|p| p.ends_with("xyzzy-discover-agents-md-test.md"))
             })
             .expect("should discover the rules file");
         let content = rule["content"].as_str().unwrap();
@@ -425,7 +439,7 @@ mod tests {
     #[test]
     fn discover_plugins_finds_manifest_plugin() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path().join(".grok").join("plugins").join("test-plugin");
+        let plugins_dir = tmp.path().join(".qidi").join("plugins").join("test-plugin");
         fs::create_dir_all(&plugins_dir).unwrap();
         fs::write(
             plugins_dir.join("plugin.json"),
@@ -450,7 +464,7 @@ mod tests {
     #[test]
     fn discover_plugins_json_has_expected_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let plugins_dir = tmp.path().join(".grok").join("plugins").join("field-test");
+        let plugins_dir = tmp.path().join(".qidi").join("plugins").join("field-test");
         fs::create_dir_all(plugins_dir.join("skills")).unwrap();
         fs::write(
             plugins_dir.join("plugin.json"),
@@ -489,7 +503,7 @@ mod tests {
     #[test]
     fn load_project_config_reads_toml_as_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         fs::create_dir_all(&grok_dir).unwrap();
         fs::write(
             grok_dir.join("config.toml"),

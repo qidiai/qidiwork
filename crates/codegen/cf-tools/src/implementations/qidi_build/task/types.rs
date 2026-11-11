@@ -110,24 +110,25 @@ pub struct SubagentRuntimeOverrides {
 /// Re-export of [`cf_tool_types::is_not_sentinel`] for existing call sites.
 pub use cf_tool_types::is_not_sentinel;
 
-/// Sanitize a model-emitted `cwd` argument for the `task` tool.
-///
-/// Strips stray surrounding quote/backtick characters (matched or unmatched),
-/// trims whitespace, expands a leading `~` to the user's home directory, and
-/// rejects sentinel placeholders (`""`, `"null"`, `"none"`, `"undefined"`).
+/// Sanitize a model-emitted string argument by trimming whitespace, stripping
+/// stray surrounding quote/backtick characters (matched or unmatched), and
+/// rejecting sentinel placeholders (`""`, `"null"`, `"none"`, `"undefined"`).
+pub fn sanitize_quoted_arg(s: &str) -> Option<String> {
+    let unquoted = s.trim().trim_matches(['"', '\'', '`']);
+    // Re-trim after stripping quotes: this trim flows into the returned
+    // value; the trim inside `is_not_sentinel` does not.
+    let cleaned = unquoted.trim();
+    is_not_sentinel(cleaned).then(|| cleaned.to_string())
+}
+
+/// Sanitize a model-emitted `cwd` argument for the `task` tool, then expand a
+/// leading `~` to the user's home directory.
 ///
 /// Returns `Some(cleaned)` for a usable path, `None` if the value should be
 /// treated as absent. Shared by the tool layer (`task::mod`) and the
 /// defense-in-depth check in `qidi-code`'s subagent coordinator.
 pub fn sanitize_cwd_value(s: &str) -> Option<String> {
-    let unquoted = s.trim().trim_matches(['"', '\'', '`']);
-    // Re-trim after stripping quotes: this trim flows into the returned
-    // value; the trim inside `is_not_sentinel` does not.
-    let cleaned = unquoted.trim();
-    if !is_not_sentinel(cleaned) {
-        return None;
-    }
-    Some(shellexpand::tilde(cleaned).into_owned())
+    sanitize_quoted_arg(s).map(|cleaned| shellexpand::tilde(&cleaned).into_owned())
 }
 
 /// Returns `true` if the string looks like a real subagent ID rather than a
@@ -149,6 +150,24 @@ pub trait SubagentCapabilityModeExt {
 
     /// Return the set of `ToolKind`s allowed under this capability mode.
     fn allowed_tool_kinds(self) -> &'static [crate::types::tool::ToolKind];
+
+    /// Whether this capability mode permits write-capable tools.
+    ///
+    /// This is the single source of truth the subagent spawn path uses to
+    /// decide whether the agent builder may inject its default write tool.
+    /// Filtering `tool_config` alone is not enough: the builder re-adds
+    /// `OpenCodeWriteTool` when it sees no write tool, so the caller must
+    /// also propagate this verdict as `write_file_enabled = false`.
+    ///
+    /// Contract: `ReadOnly` and `Execute` forbid writes; `ReadWrite` and
+    /// `All` permit them.
+    fn allows_write(self) -> bool
+    where
+        Self: Sized,
+    {
+        self.allowed_tool_kinds()
+            .contains(&crate::types::tool::ToolKind::Write)
+    }
 }
 
 /// Prune background-task lifecycle tools (`get_task_output` / `kill_task`) when
@@ -174,14 +193,24 @@ pub fn prune_orphaned_background_task_tools(config: &mut crate::registry::types:
 }
 
 fn is_background_capable_bash_tool(tc: &crate::registry::types::ToolConfig) -> bool {
-    match tc.id.as_str() {
-        "cf_tools::run_terminal_cmd" => tc
+    // Match on the short tool name: ids render as "Namespace:tool" and were
+    // never migrated at rebrand time (see `merge_tool_params` in cf-agent),
+    // so a single hard-coded prefix (`cf_tools::run_terminal_cmd`) misses the
+    // real entries (`QidiBuild:run_terminal_cmd`,
+    // `QidiBuildConcise:run_terminal_cmd`). That misclassification made
+    // `prune_orphaned_background_task_tools` strip get_task_output/kill_task
+    // from depth-max children while the bash tool remained with
+    // `enabled_background=true`, failing registry requirements at spawn
+    // ("enabled_background=true requires ... get_task_output and kill_task").
+    let short = tc.id.rsplit(':').next().unwrap_or(tc.id.as_str());
+    match short {
+        "run_terminal_cmd" => tc
             .params
             .as_ref()
             .and_then(|params| params.get("enabled_background"))
             .and_then(|value| value.as_bool())
             .unwrap_or(true),
-        "OpenCode:bash" => true,
+        "bash" => tc.id.starts_with("OpenCode:"),
         _ => false,
     }
 }
@@ -1007,6 +1036,154 @@ mod tests {
             config.tools.is_empty(),
             "execute tools should still be filtered out"
         );
+    }
+
+    /// Contract matrix (batch 2 / F4): capability mode × action kind.
+    ///
+    /// `write` must never survive `ReadOnly` or `Execute`. This is the
+    /// filtering half of the fix; the other half (the agent builder must not
+    /// re-inject a default write tool) is asserted in `cf-agent`'s
+    /// `builder::tests::write_tool_not_reinjected_when_write_disabled`.
+    #[test]
+    fn capability_mode_action_matrix_matches_contract() {
+        use SubagentCapabilityMode::*;
+
+        // (mode, read allowed, write allowed, execute allowed)
+        let matrix = [
+            (ReadOnly, true, false, false),
+            (ReadWrite, true, true, false),
+            (Execute, true, false, true),
+            (All, true, true, true),
+        ];
+
+        for (mode, read_expected, write_expected, exec_expected) in matrix {
+            let mut config = ToolServerConfig {
+                tools: vec![
+                    tc("cf_tools::read_file", ToolKind::Read),
+                    tc("cf_tools::write", ToolKind::Write),
+                    tc("cf_tools::run_terminal_cmd", ToolKind::Execute),
+                ],
+                behavior_preset: None,
+            };
+
+            mode.filter_tool_config(&mut config);
+
+            let has = |kind: ToolKind| config.tools.iter().any(|tc| tc.kind == Some(kind));
+            assert_eq!(
+                has(ToolKind::Read),
+                read_expected,
+                "{mode:?}: read_file availability must be {read_expected}"
+            );
+            assert_eq!(
+                has(ToolKind::Write),
+                write_expected,
+                "{mode:?}: write availability must be {write_expected}"
+            );
+            assert_eq!(
+                has(ToolKind::Execute),
+                exec_expected,
+                "{mode:?}: run_terminal_cmd availability must be {exec_expected}"
+            );
+            assert_eq!(
+                mode.allows_write(),
+                write_expected,
+                "{mode:?}: allows_write must agree with the filtered write tool"
+            );
+        }
+    }
+
+    #[test]
+    fn only_read_write_and_all_allow_writes() {
+        use SubagentCapabilityMode::*;
+        for mode in [ReadOnly, Execute] {
+            assert!(
+                !mode.allows_write(),
+                "{mode:?} must forbid write-capable tools"
+            );
+        }
+        for mode in [ReadWrite, All] {
+            assert!(
+                mode.allows_write(),
+                "{mode:?} must permit write-capable tools"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_keeps_companions_for_real_qidi_build_bash_id() {
+        // Regression: production ToolConfigs render `QidiBuild:run_terminal_cmd`,
+        // not the legacy `cf_tools::` prefix. A depth-max child (task tool
+        // stripped) must KEEP get_task_output/kill_task while its
+        // background-capable bash remains — pruning them made the registry
+        // requirement "enabled_background=true requires get_task_output and
+        // kill_task" fail every subagent spawn in <1s.
+        let mut config = ToolServerConfig {
+            tools: vec![
+                tc("QidiBuild:run_terminal_cmd", ToolKind::Execute),
+                tc("QidiBuild:get_task_output", ToolKind::BackgroundTaskAction),
+                tc("QidiBuild:kill_task", ToolKind::KillTaskAction),
+            ],
+            behavior_preset: None,
+        };
+
+        super::prune_orphaned_background_task_tools(&mut config);
+
+        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "QidiBuild:run_terminal_cmd",
+                "QidiBuild:get_task_output",
+                "QidiBuild:kill_task",
+            ]
+        );
+    }
+
+    #[test]
+    fn prune_keeps_companions_for_qidi_build_concise_bash_id() {
+        let mut config = ToolServerConfig {
+            tools: vec![
+                tc("QidiBuildConcise:run_terminal_cmd", ToolKind::Execute),
+                tc(
+                    "QidiBuildConcise:get_task_output",
+                    ToolKind::BackgroundTaskAction,
+                ),
+                tc("QidiBuildConcise:kill_task", ToolKind::KillTaskAction),
+            ],
+            behavior_preset: None,
+        };
+
+        super::prune_orphaned_background_task_tools(&mut config);
+
+        assert_eq!(
+            config.tools.len(),
+            3,
+            "concise bash is background-capable by default; companions survive"
+        );
+    }
+
+    #[test]
+    fn prune_still_strips_companions_when_bash_is_foreground_only() {
+        let mut foreground = tc("QidiBuild:run_terminal_cmd", ToolKind::Execute);
+        foreground.params = Some(
+            serde_json::json!({ "enabled_background": false })
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        let mut config = ToolServerConfig {
+            tools: vec![
+                foreground,
+                tc("QidiBuild:get_task_output", ToolKind::BackgroundTaskAction),
+                tc("QidiBuild:kill_task", ToolKind::KillTaskAction),
+            ],
+            behavior_preset: None,
+        };
+
+        super::prune_orphaned_background_task_tools(&mut config);
+
+        let ids: Vec<&str> = config.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["QidiBuild:run_terminal_cmd"]);
     }
 
     #[test]

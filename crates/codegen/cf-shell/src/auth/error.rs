@@ -3,28 +3,28 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AuthError {
-    #[error("尚未登录。请运行 `qidiwork login`。")]
+    #[error("Not logged in. Run `qidi login`.")]
     NotLoggedIn,
 
     /// Token expired and no refresh authority available.
-    #[error("登录令牌已过期。请运行 `qidiwork login` 重新登录。")]
+    #[error("Token expired. Run `qidi login` to re-authenticate.")]
     TokenExpiredNoRefresh,
 
     /// Server rejected the token (401) with no recovery path.
-    #[error("服务端拒绝了认证。请运行 `qidiwork login` 重新登录。")]
+    #[error("Authentication rejected by server. Run `qidi login` to re-authenticate.")]
     ServerRejectedNoRecovery,
 
     /// All recovery strategies exhausted.
-    #[error("认证恢复已尝试全部策略，需要重新登录。")]
+    #[error("Auth recovery exhausted; re-authentication required.")]
     RecoveryExhausted,
 
     /// A session's team principal violates the `force_login_team_uuid` pin.
     /// `message` states which team is required vs. returned.
-    #[error("{message} 请运行 `qidiwork login` 登录到指定的团队。")]
+    #[error("{message} Run `qidi login` to sign in with the required team.")]
     PinnedTeamMismatch { message: String },
 
     /// Cached API-key session rejected because API-key auth is disabled.
-    #[error("管理员已禁用 API Key 认证。请运行 `qidiwork login` 登录。")]
+    #[error("API-key auth is disabled by your administrator. Run `qidi login` to authenticate.")]
     ApiKeyAuthDisabled,
 
     /// Outcome of a refresh-authority attempt. Recoverability (and, for
@@ -106,13 +106,13 @@ impl RefreshTokenFailedReason {
     pub(crate) fn user_message(self) -> &'static str {
         match self {
             Self::RefreshTokenRejected => {
-                "你的会话已过期。请运行 `qidiwork login` 重新登录。"
+                "Your session has expired. Run `qidi login` to sign in again."
             }
             Self::ClientRejected => {
-                "认证暂时不可用。如果持续如此，请运行 `qidiwork login`。"
+                "Authentication is temporarily unavailable. Run `qidi login` if this persists."
             }
             Self::Other => {
-                "无法刷新认证。请运行 `qidiwork login` 重新登录。"
+                "Authentication could not be refreshed. Run `qidi login` to sign in again."
             }
         }
     }

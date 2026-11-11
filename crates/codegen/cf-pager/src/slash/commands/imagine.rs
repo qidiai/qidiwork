@@ -1,11 +1,15 @@
 use agent_client_protocol as acp;
 use cf_tools::implementations::qidi_build::{
-    IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, imagine_instruction, imagine_usage_message,
+    IMAGINE_COMMAND_NAME, imagine_instruction, imagine_usage_message,
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-const REQUIRED_TOOLS: &[&str] = &[IMAGE_GEN_TOOL_NAME];
+/// Client-facing name as advertised in the ACP tools list (the key domain
+/// `CommandRegistry::tools_satisfied` matches against). `IMAGE_GEN_TOOL_NAME`
+/// is the registry id (`qidi_build:ImageGen`), which never appears in that
+/// set -- using it hid /imagine from every surface.
+const REQUIRED_TOOLS: &[&str] = &["image_gen"];
 
 pub struct ImagineCommand;
 
@@ -47,7 +51,7 @@ impl SlashCommand for ImagineCommand {
         CommandResult::InjectSkill {
             display_text: format!("/imagine {prompt}"),
             prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
-                imagine_instruction(),
+                imagine_instruction(prompt),
             ))],
             display_as_skill: false,
             scheduled_task_preview: None,

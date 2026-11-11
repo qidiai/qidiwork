@@ -33,6 +33,12 @@ use crate::implementations::lsp::LspToolInput;
 use crate::implementations::memory::types::{MemoryGetInput, MemorySearchInput};
 use crate::implementations::opencode::write::WriteInput;
 use crate::implementations::search_tool::SearchToolInput;
+use crate::implementations::browser::types::{
+    BrowserClickInput, BrowserNavigateInput, BrowserReadInput, BrowserSnapshotInput,
+    BrowserTypeInput,
+};
+use crate::implementations::think::types::ThinkInput;
+use crate::implementations::skills::deploy::DeploySkillInput;
 use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
 use serde::{Deserialize, Serialize};
@@ -65,6 +71,7 @@ pub enum ToolInput {
     ListDir(ListDirInput),
     TodoWrite(TodoWriteInput),
     Skill(SkillInput),
+    DeploySkill(DeploySkillInput),
     MCPTool(MCPToolInput),
     TaskOutput(TaskOutputToolInput),
     WaitTasks(WaitTasksToolInput),
@@ -84,7 +91,13 @@ pub enum ToolInput {
     CodexReadFile(CodexReadFileInput),
     MemorySearch(MemorySearchInput),
     MemoryGet(MemoryGetInput),
+    Think(ThinkInput),
     SearchTool(SearchToolInput),
+    BrowserNavigate(BrowserNavigateInput),
+    BrowserSnapshot(BrowserSnapshotInput),
+    BrowserClick(BrowserClickInput),
+    BrowserType(BrowserTypeInput),
+    BrowserRead(BrowserReadInput),
     UseTool(UseToolInput),
     EnterPlanMode(EnterPlanModeInput),
     ExitPlanMode(ExitPlanModeInput),

@@ -11,24 +11,20 @@ use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
 use crate::types::resources::SharedResources;
 
-/// For claude model names
-pub const CLAUDE_NAMES: &[&str] = &[
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
-];
-
-pub fn claude_names_for(_version: &str) -> Vec<String> {
-    CLAUDE_NAMES.iter().map(|s| s.to_string()).collect()
+/// The Claude tool names that map to `grok_name` (reverse lookup for
+/// regex matchers). Delegates to the shared vendor-compat table
+/// (`claude_alias`) — same rationale as `kind_for` below: the stub
+/// here returned Claude *model* names, so every hook matcher written
+/// against an external alias (`Bash`, `Read`, ...) silently matched
+/// no Grok tool.
+pub fn claude_names_for(grok_name: &str) -> impl Iterator<Item = &'static str> + '_ {
+    super::claude_alias::claude_names_for(grok_name)
 }
 
-/// For QIDI model names
-pub const QIDI_NAMES: &[&str] = &[
-    "grok-2-latest",
-    "grok-2-vision-latest",
-];
-
-pub fn qidi_names_for(_version: &str) -> Vec<String> {
-    QIDI_NAMES.iter().map(|s| s.to_string()).collect()
+/// The Grok tool names a Claude matcher term fires on. Delegates to
+/// the shared vendor-compat table (`claude_alias`).
+pub fn qidi_names_for(claude_name: &str) -> impl Iterator<Item = &'static str> {
+    super::claude_alias::grok_names_for(claude_name)
 }
 /// The toolset a tool belongs to.
 ///
@@ -120,6 +116,9 @@ pub enum ToolKind {
     UseTool,
     Monitor,
     GoalUpdate,
+    Think,
+    BrowserRead,
+    BrowserAct,
     #[serde(other)]
     Other,
 }
@@ -158,6 +157,12 @@ pub trait Reminder {
 }
 
 /// Map a tool name to its kind/category.
-pub fn kind_for(_tool_name: &str) -> Option<ToolKind> {
-    None
+///
+/// Delegates to the shared vendor-compat table (`claude_alias`): plugin
+/// allowlists written with upstream names (`PowerShell`, `TaskOutput`, ...)
+/// resolve to the same [`ToolKind`] the hook matcher uses. The stub here
+/// previously answered `None` for everything, making every allowlist entry
+/// fail open at `AgentBuilder` time.
+pub fn kind_for(tool_name: &str) -> Option<ToolKind> {
+    super::claude_alias::kind_for(tool_name)
 }

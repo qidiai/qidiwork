@@ -23,6 +23,11 @@ fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
             cursor: true,
             ..Default::default()
         };
+    // Fixture cwd override: the shared fixture's opaque "/tmp" is not
+    // canonicalizable on Windows (per-drive resolution; a runner's
+    // D:\tmp does not exist, so dunce::canonicalize fails NotFound —
+    // production canonicalizes the app cwd for real, effects/mod.rs).
+    launch.cwd = std::env::temp_dir();
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -68,6 +73,9 @@ fn foreign_resume_results_require_launch_token_and_canonical_cwd() {
 
     let mut stale = test_app();
     stale.foreign_session_compat = launch.foreign_session_compat;
+    // See foreign_resume_results_require_launch_token_and_canonical_cwd:
+    // the fixture's "/tmp" is not canonicalizable on Windows runners.
+    stale.cwd = std::env::temp_dir();
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -108,6 +116,9 @@ fn foreign_resume_result_rejects_startup_conflict_before_completion() {
             cursor: true,
             ..Default::default()
         };
+    // See foreign_resume_results_require_launch_token_and_canonical_cwd:
+    // the fixture's "/tmp" is not canonicalizable on Windows runners.
+    app.cwd = std::env::temp_dir();
     let Effect::CanonicalizeForeignResumeCwd {
         requested_cwd,
         launch_token,
@@ -1376,6 +1387,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         false,
         SourceFilter::All,
         None,
+        true,
     );
     assert!(
         !modal_map
@@ -1402,6 +1414,7 @@ fn delete_both_session_clears_modal_and_welcome_content_hits() {
         false,
         SourceFilter::All,
         None,
+        true,
     );
     assert!(
         !welcome_map
@@ -1553,7 +1566,7 @@ fn gate_refreshed_emits_check_subscription_on_gate_lift() {
     // User starts gated (no subscription).
     app.gate = Some(cf_shell::auth::GateInfo {
         message: "SuperGrok subscription required".into(),
-        url: Some("https://grok.com/supergrok".into()),
+        url: Some("https://qidiai.ltd/superqidi".into()),
         label: Some("Subscribe".into()),
     });
     assert!(!app.has_access());

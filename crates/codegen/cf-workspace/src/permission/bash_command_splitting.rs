@@ -767,7 +767,7 @@ mod tests {
                     "cargo".to_owned(),
                     "run".to_owned(),
                     "--bin".to_owned(),
-                    "pager".to_owned()
+                    "qidi-code".to_owned()
                 ],
                 suffix: vec![],
             })
@@ -805,7 +805,7 @@ mod tests {
                     "cargo".to_owned(),
                     "build".to_owned(),
                     "--bin".to_owned(),
-                    "pager".to_owned(),
+                    "qidi-code".to_owned(),
                 ],
                 suffix: vec!["2>&1".to_owned(),],
             })
@@ -858,7 +858,7 @@ mod tests {
                     "cargo".to_owned(),
                     "test".to_owned(),
                     "--package".to_owned(),
-                    "shell".to_owned(),
+                    "qidi-code".to_owned(),
                     "--lib".to_owned(),
                     "--".to_owned(),
                     "permission::bash_command_splitting::tests::test_parse_plain_commands_from_script".to_owned(),

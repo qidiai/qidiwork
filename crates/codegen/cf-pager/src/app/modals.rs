@@ -591,7 +591,11 @@ impl AgentView {
                     if let Some(cmd) = self.prompt.slash_controller.registry().get(&command_clone) {
                         let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
                         if let Some(effort_items) = cmd.suggest_args(&ctx, &next_query)
-                            && Self::arg_items_look_like_effort_phase(&effort_items)
+                            && (Self::arg_items_look_like_effort_phase(&effort_items)
+                                || crate::slash::commands::model::is_group_phase(
+                                    &self.session.models,
+                                    &next_query,
+                                ))
                         {
                             if let Some(ActiveModal::ArgPicker {
                                 args_query,
@@ -892,6 +896,7 @@ impl AgentView {
                     *content_loading,
                     *source_filter,
                     Some(current_repo.as_str()),
+                    !state.query.trim().is_empty(),
                 );
                 let entry_count = entry_map.len();
                 let non_sel: Vec<bool> = entry_map.iter().map(|e| e.is_none()).collect();
@@ -1701,11 +1706,13 @@ impl AgentView {
             } = active_modal
             {
                 // Arg picker: ModalWindow chrome + picker content.
-                let title = match command.as_str() {
-                    "model" | "m" if !args_query.is_empty() => "Pick reasoning effort",
-                    "model" | "m" => "Pick model",
-                    "theme" | "t" => "Pick theme",
-                    _ => "Pick option",
+                let title: String = match command.as_str() {
+                    "model" | "m" => crate::slash::commands::model::picker_phase_title(
+                        &self.session.models,
+                        args_query,
+                    ),
+                    "theme" | "t" => "Pick theme".to_string(),
+                    _ => "Pick option".to_string(),
                 };
                 let picker_entries: Vec<PickerEntry> = items
                     .iter()
@@ -1733,7 +1740,7 @@ impl AgentView {
                 // Surface `i search` in the footer when vim nav mode is active.
                 mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
                 let modal_config = ModalWindowConfig {
-                    title,
+                    title: title.as_str(),
                     tabs: None,
                     shortcuts: &picker_shortcuts,
                     sizing: ModalSizing {
@@ -1918,8 +1925,12 @@ impl AgentView {
                         entries_query.as_deref(),
                     );
                     let entries_data = entries.as_deref().unwrap_or(&[]);
-                    let filtered_indices =
-                        filter_session_entries(entries.as_deref(), filter_query, *source_filter);
+                    let filtered_indices = filter_session_entries(
+                        entries.as_deref(),
+                        filter_query,
+                        *source_filter,
+                        !state.query.trim().is_empty(),
+                    );
                     let built = crate::views::session_picker::build_session_entry_data(
                         entries_data,
                         &filtered_indices,
@@ -2299,6 +2310,7 @@ mod session_picker_delete_tests {
             branch: None,
             repo_name: "repo".into(),
             worktree_label: None,
+            is_subagent: false,
             card_detail: None,
         }
     }
@@ -2753,9 +2765,12 @@ mod command_palette_vim_input_tests {
             }
             let area = Rect::new(0, 0, 80, 24);
             let mut buf = Buffer::empty(area);
-            agent.draw_active_modal(area, &mut buf, crate::theme::Theme::current(), false);
-
-            let theme = crate::theme::Theme::current();
+            // Pin a real-color palette: the inverse-video cursor probe
+            // (bg == text_primary) is meaningless under the terminal-native
+            // palette, where text_primary == bg_base == Reset and EVERY
+            // frame-filled cell matches.
+            let theme = crate::theme::Theme::groknight();
+            agent.draw_active_modal(area, &mut buf, theme, false);
             let search_bar = match agent.active_modal.as_ref() {
                 Some(ActiveModal::CommandPalette { state, .. }) => {
                     state

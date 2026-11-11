@@ -385,6 +385,14 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    /// Switch the active model's reasoning effort AND persist it as
+    /// `[models].default_reasoning_effort` for future sessions. Produced by
+    /// `/effort <level> --save`; the dispatcher emits `Effect::SwitchModel`
+    /// plus `Effect::PersistSetting` (see `dispatch::router`).
+    SwitchModelAndPersistEffort {
+        model_id: acp::ModelId,
+        effort: ReasoningEffort,
+    },
     /// Cancel the currently running turn.
     CancelTurn,
     /// User confirmed a cancel-turn choice from the panel.
@@ -517,7 +525,7 @@ pub enum Action {
     SetContextualHintSendNow(bool),
     SetContextualHintSmallScreen(bool),
     SetContextualHintWordSelect(bool),
-    /// Commit the active theme (canonical name, e.g. `"qidi-dark"`, `"auto"`).
+    /// Commit the active theme (canonical name, e.g. `"groknight"`, `"auto"`).
     SetTheme(String),
     /// Commit the theme used when the OS is in dark mode. Only updates
     /// the live display when `theme = "auto"` AND system is in dark mode.
@@ -855,6 +863,18 @@ pub enum Action {
     /// dispatched sessions run. Bound to Ctrl+L (default), a click on
     /// the header location label, and `/cd` with no argument.
     DashboardOpenLocationPicker,
+    /// Open the dashboard's agent-type picker (F8). Lists the built-in
+    /// agent types plus discovered `.qidi/agents/*.md` definitions; the
+    /// chosen name is staged in `DashboardState::pending_agent_type` and
+    /// rides the next dispatch as `_meta.agentName`. Bound to Alt+A.
+    DashboardOpenAgentPicker,
+    /// Close the agent-type picker without changing the staging. Routed
+    /// from Esc and the modal-chrome close button.
+    DashboardCloseAgentPicker,
+    /// Confirm the agent-type picker's highlighted row: stage `name` as
+    /// the next dispatch's agent type and close the modal. Routed from
+    /// Enter on the highlighted row.
+    DashboardConfirmAgentType(String),
     /// Close the dashboard's location picker modal without changing
     /// the working directory. Routed from Esc, the modal-chrome
     /// `CloseRequested` outcome, and a click outside the modal.
@@ -1316,6 +1336,13 @@ pub enum Effect {
         /// the correct model and agent type from the start — avoids a
         /// follow-up `SetSessionModel` roundtrip.
         model_id: Option<acp::ModelId>,
+        /// F8: agent type staged for this dispatch (`/agent <name>` on the
+        /// dashboard). Injected as `_meta.agentName`; the shell resolves it
+        /// through the agent discovery chain and binds the resolved
+        /// definition to this session (overriding the config/env default).
+        /// `None` (or empty) → nothing written, byte-identical to pre-F8
+        /// behavior. Unknown names fail session/new with `invalid_params`.
+        agent_name: Option<String>,
         /// Client-chosen session ID (`--session-id` / `meta.sessionId`).
         preferred_session_id: Option<String>,
         /// Gateway light-frontend for **this** session only (`/chat` one-shot
@@ -1339,6 +1366,10 @@ pub enum Effect {
         /// right model — mirrors [`Effect::CreateSession::model_id`]. `None`
         /// for the welcome / CLI / fork paths.
         model_id: Option<acp::ModelId>,
+        /// F8: agent type staged for this dispatch — mirrors
+        /// [`Effect::CreateSession::agent_name`]. `None` for the
+        /// resume / CLI / fork paths.
+        agent_name: Option<String>,
         /// Client-chosen session ID (`--session-id` with `--worktree`) used as
         /// the worktree/session id and `meta.sessionId` on fresh create.
         /// Ignored when `load_session_id` is set (resume path owns the id).

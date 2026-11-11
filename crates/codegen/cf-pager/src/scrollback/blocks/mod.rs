@@ -15,7 +15,6 @@ mod subagent;
 mod system;
 mod thinking;
 pub mod tool;
-mod artifact_block;
 mod user;
 
 pub use agent::AgentMessageBlock;
@@ -35,7 +34,6 @@ pub use tool::{
     render_diff_hunks_highlighted,
 };
 pub use user::UserPromptBlock;
-pub use artifact_block::{ArtifactBlock, ArtifactCard};
 
 // Backwards compatibility alias
 pub type EditBlock = EditToolCallBlock;

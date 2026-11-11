@@ -111,8 +111,16 @@ pub async fn run_command_hook(
     //
     // If the command contains shell metacharacters (spaces, pipes, &&, ||,
     // redirects, semicolons, env-var refs) or starts with `~` (tilde
-    // expansion), run it through `sh -c` so that shell command strings
-    // from compatible configs work correctly.
+    // expansion), run it through a shell so that shell command strings
+    // from compatible configs work correctly:
+    //
+    // * Unix: always `sh -c` (POSIX semantics).
+    // * Windows: always `powershell.exe -NoProfile -NonInteractive
+    //   -Command` (fixed, NOT the user's detected terminal shell), so a
+    //   hook config behaves identically on every Windows machine. The
+    //   documented Windows hook convention is PowerShell semantics —
+    //   single-quoted strings, `;` statement separator, `exit N` for
+    //   the decision exit code.
     //
     // Otherwise, treat it as a direct executable path (resolve relative
     // paths from the hook file's directory).
@@ -161,7 +169,11 @@ pub async fn run_command_hook(
         }
         #[cfg(not(unix))]
         {
-            let inv = cf_config::shell::shell_command_argv(&command_str);
+            // Fixed powershell.exe — not the detected terminal
+            // shell (QIDI_SHELL / auto-detect cascade applies to
+            // the interactive terminal only). See
+            // `cf_config::shell::hook_shell_command_argv`.
+            let inv = cf_config::shell::hook_shell_command_argv(&command_str);
             let mut c = tokio::process::Command::new(&inv.program);
             c.args(&inv.args).envs(inv.env);
             c
@@ -786,11 +798,16 @@ mod tests {
 
     fn make_envelope() -> HookEventEnvelope {
         use crate::event::HookPayload;
+        // Hooks spawn with `workspace_root` as their working
+        // directory, so it must be a real, platform-valid path:
+        // a Unix-style `/tmp` fails CreateProcess on Windows
+        // (os error 267) because `C:\tmp` does not exist.
+        let temp = std::env::temp_dir().to_string_lossy().into_owned();
         HookEventEnvelope {
             hook_event_name: crate::event::HookEventName::Stop,
             session_id: "test-session".into(),
-            cwd: "/tmp".into(),
-            workspace_root: "/tmp".into(),
+            cwd: temp.clone(),
+            workspace_root: temp,
             timestamp: "2026-01-01T00:00:00Z".into(),
             transcript_path: None,
             client_identifier: None,
@@ -802,9 +819,18 @@ mod tests {
     }
 
     fn make_ctx() -> RunContext<'static> {
+        // Leaked so the `&'static str` outlives the call; each
+        // test leaks one small string. The workspace root must be
+        // a real directory — see `make_envelope`.
+        let workspace_root: &'static str = Box::leak(
+            std::env::temp_dir()
+                .to_string_lossy()
+                .into_owned()
+                .into_boxed_str(),
+        );
         RunContext {
             session_id: "test-session",
-            workspace_root: "/tmp",
+            workspace_root,
         }
     }
 
@@ -860,9 +886,22 @@ mod tests {
     }
 
     /// Regression: blocking hooks still parse JSON decisions correctly.
+    ///
+    /// The JSON payload is written to a temp file and emitted via
+    /// `cat` (Unix) / `type` (Windows) so the hook output is free
+    /// of shell-quoting semantics — the decision JSON passes through
+    /// verbatim under every shell the runner may use (`sh -c` on
+    /// Unix, fixed `powershell.exe -Command` on Windows).
     #[tokio::test]
     async fn test_hook_blocking_allow() {
-        let spec = make_shell_spec(r#"echo '{"decision":"allow"}'"#);
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("hook-output.json");
+        std::fs::write(&file, r#"{"decision":"allow"}"#).unwrap();
+        #[cfg(unix)]
+        let script = format!("cat \"{}\"; exit 0", file.display());
+        #[cfg(windows)]
+        let script = format!("type \"{}\"; exit 0", file.display());
+        let spec = make_shell_spec(&script);
         let envelope = make_envelope();
         let ctx = make_ctx();
 
@@ -910,6 +949,11 @@ mod tests {
     /// Now the env-var pre-spawn check refuses with a clear reason when
     /// the var is unset (and the dispatcher fail-opens, so the tool call
     /// itself is not blocked).
+    ///
+    /// Unix-only: the fixture is a `#!/bin/sh` script invoked through
+    /// the `${VAR}` → `sh -c` branch; the detected Windows shell
+    /// (PowerShell) cannot execute `.sh` files.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_env_var_interpolation_runs_via_shell() {
         let tmp = tempfile::tempdir().unwrap();
@@ -963,6 +1007,11 @@ mod tests {
     /// it on the spawned child so shell expansion via the `sh -c` branch
     /// resolves correctly; otherwise such hooks fail to find the
     /// command.
+    ///
+    /// Unix-only: the fixture is a `#!/bin/sh` script invoked through
+    /// the `${VAR}` → `sh -c` branch; the detected Windows shell
+    /// (PowerShell) cannot execute `.sh` files.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_claude_project_dir_is_exported() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1205,7 +1254,7 @@ mod tests {
     async fn test_tilde_expansion_runs_via_shell() {
         let tmp = tempfile::tempdir().unwrap();
         // Create the script at <tmp>/.grok-test-hooks-gb856/tilde-test.sh
-        let hook_dir = tmp.path().join(".grok-test-hooks-gb856");
+        let hook_dir = tmp.path().join(".qidi-test-hooks-gb856");
         std::fs::create_dir_all(&hook_dir).unwrap();
         let script = hook_dir.join("tilde-test.sh");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
@@ -1270,6 +1319,11 @@ mod tests {
     /// Hooks that explicitly handle the unset case via parameter expansion
     /// (e.g. `${VAR:-/some/default}`) must NOT be refused -- the user has
     /// expressed intent for what should happen when the var is unset.
+    ///
+    /// Unix-only: `${VAR:-default}` is bash parameter expansion; the
+    /// detected Windows shell (PowerShell) parses `${...:-...}` as an
+    /// (unset) variable name, so the command degenerates to empty.
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_parameter_expansion_default_is_not_refused() {
         let tmp = tempfile::tempdir().unwrap();

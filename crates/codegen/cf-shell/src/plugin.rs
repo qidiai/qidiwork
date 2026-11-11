@@ -94,8 +94,8 @@ impl std::fmt::Display for UninstallError {
             Self::NotFound { name } => {
                 write!(
                     f,
-                    "未找到插件 \"{name}\"。\n\
-                     可运行 `qidiwork plugin list` 查看已安装插件。"
+                    "Plugin \"{name}\" not found.\n\
+                     Run `qidi plugin list` to see installed plugins."
                 )
             }
             Self::NeedsConfirm {
@@ -216,8 +216,8 @@ impl std::fmt::Display for UpdateError {
             Self::NotFound { name } => {
                 write!(
                     f,
-                    "未找到插件 \"{name}\"。\n\
-                     可运行 `qidiwork plugin list` 查看已安装插件。"
+                    "Plugin \"{name}\" not found.\n\
+                     Run `qidi plugin list` to see installed plugins."
                 )
             }
         }
@@ -607,7 +607,7 @@ impl std::fmt::Display for MarketplaceInstallError {
                     write!(
                         f,
                         "Unknown marketplace \"{qualifier}\". No marketplaces are registered; \
-                         add one with `grok plugin marketplace add`."
+                         add one with `qidi plugin marketplace add`."
                     )
                 } else {
                     let list = bullet_list(registered);
@@ -644,8 +644,8 @@ impl std::fmt::Display for MarketplaceInstallError {
                 write!(
                     f,
                     "No marketplace plugin named \"{name}\" in any registered marketplace.\n\
-                     Install a local directory with `grok plugin install ./{name}`, or add a \
-                     source with `grok plugin marketplace add`."
+                     Install a local directory with `qidi plugin install ./{name}`, or add a \
+                     source with `qidi plugin marketplace add`."
                 )?;
                 if !skipped_sources.is_empty() {
                     write!(
@@ -662,7 +662,7 @@ impl std::fmt::Display for MarketplaceInstallError {
                 write!(
                     f,
                     "Multiple marketplaces provide a plugin named \"{name}\":\n{list}\n\
-                     Pin one with `grok plugin install {name}@<qualifier>`."
+                     Pin one with `qidi plugin install {name}@<qualifier>`."
                 )
             }
             Self::PartialScan {
@@ -674,7 +674,7 @@ impl std::fmt::Display for MarketplaceInstallError {
                     f,
                     "Couldn't scan every marketplace while resolving \"{name}\", so it can't be \
                      resolved safely. Unscanned source(s):\n{list}\n\
-                     Retry, or pin the source explicitly with `grok plugin install {name}@<qualifier>`."
+                     Retry, or pin the source explicitly with `qidi plugin install {name}@<qualifier>`."
                 )
             }
             Self::Sync {
@@ -1562,10 +1562,10 @@ mod tests {
     fn registered_source_label_uses_addressable_qualifier() {
         assert_eq!(
             registered_source_label(&git_source(
-                "QIDI Official",
-                "https://github.com/qidiai/plugin-marketplace.git"
+                "xAI Official",
+                "https://github.com/xai-org/plugin-marketplace.git"
             )),
-            "QIDI Official (qidiai/plugin-marketplace)"
+            "xAI Official (xai-org/plugin-marketplace)"
         );
         assert_eq!(
             registered_source_label(&local_source("Local Dev", "/tmp/p")),
@@ -1586,12 +1586,12 @@ mod tests {
         assert_eq!(
             candidate_label(
                 &git_source(
-                    "QIDI Official",
-                    "https://github.com/qidiai/plugin-marketplace.git"
+                    "xAI Official",
+                    "https://github.com/xai-org/plugin-marketplace.git"
                 ),
                 "sentry"
             ),
-            "QIDI Official (pin: sentry@qidiai/plugin-marketplace)"
+            "xAI Official (pin: sentry@xai-org/plugin-marketplace)"
         );
         assert_eq!(
             candidate_label(&local_source("Local Dev", "/tmp/p"), "sentry"),
@@ -1604,14 +1604,14 @@ mod tests {
         let err = MarketplaceInstallError::UnknownQualifier {
             qualifier: "acme/repo".into(),
             registered: vec![
-                "QIDI Official (qidiai/plugin-marketplace)".into(),
+                "xAI Official (xai-org/plugin-marketplace)".into(),
                 "Local Dev (local/local-dev)".into(),
             ],
         };
         let msg = err.to_string();
         assert!(msg.contains("Unknown marketplace \"acme/repo\""), "{msg}");
         assert!(
-            msg.contains("  - QIDI Official (qidiai/plugin-marketplace)"),
+            msg.contains("  - xAI Official (xai-org/plugin-marketplace)"),
             "{msg}"
         );
         assert!(msg.contains("  - Local Dev (local/local-dev)"), "{msg}");
@@ -1620,7 +1620,7 @@ mod tests {
     #[test]
     fn ambiguous_qualifier_error_lists_source_names() {
         let err = MarketplaceInstallError::AmbiguousQualifier {
-            qualifier: "qidiai/plugin-marketplace".into(),
+            qualifier: "xai-org/plugin-marketplace".into(),
             sources: vec!["Mirror A".into(), "Mirror B".into()],
         };
         let msg = err.to_string();
@@ -1640,8 +1640,8 @@ mod tests {
             skipped_sources: vec![],
         };
         let msg = err.to_string();
-        assert!(msg.contains("grok plugin install ./sentry"), "{msg}");
-        assert!(msg.contains("grok plugin marketplace add"), "{msg}");
+        assert!(msg.contains("qidi plugin install ./sentry"), "{msg}");
+        assert!(msg.contains("qidi plugin marketplace add"), "{msg}");
         assert!(!msg.contains("could not be synced"), "{msg}");
     }
 
@@ -1662,7 +1662,7 @@ mod tests {
     fn name_ambiguous_error_lists_candidates_and_pin_hint() {
         let err = MarketplaceInstallError::NameAmbiguous {
             name: "sentry".into(),
-            candidates: vec!["QIDI Official (pin: sentry@qidiai/plugin-marketplace)".into()],
+            candidates: vec!["xAI Official (pin: sentry@xai-org/plugin-marketplace)".into()],
         };
         let msg = err.to_string();
         assert!(
@@ -1670,11 +1670,11 @@ mod tests {
             "{msg}"
         );
         assert!(
-            msg.contains("  - QIDI Official (pin: sentry@qidiai/plugin-marketplace)"),
+            msg.contains("  - xAI Official (pin: sentry@xai-org/plugin-marketplace)"),
             "{msg}"
         );
         assert!(
-            msg.contains("grok plugin install sentry@<qualifier>"),
+            msg.contains("qidi plugin install sentry@<qualifier>"),
             "{msg}"
         );
     }
@@ -1768,12 +1768,12 @@ mod tests {
         }
     }
 
-    const OFFICIAL_URL: &str = "https://github.com/qidiai/plugin-marketplace.git";
+    const OFFICIAL_URL: &str = "https://github.com/xai-org/plugin-marketplace.git";
 
     #[test]
     fn plan_install_qualifier_unknown_lists_registered_labels() {
         let sources = [
-            git_source("QIDI Official", OFFICIAL_URL),
+            git_source("xAI Official", OFFICIAL_URL),
             local_source("Local Dev", "/tmp/p"),
         ];
         let err = plan_install(&sources, "sentry", Some("acme/repo"), |_| Ok(Vec::new()))
@@ -1787,7 +1787,7 @@ mod tests {
                 assert_eq!(
                     registered,
                     vec![
-                        "QIDI Official (qidiai/plugin-marketplace)".to_string(),
+                        "xAI Official (xai-org/plugin-marketplace)".to_string(),
                         "Local Dev (local/local-dev)".to_string(),
                     ]
                 );
@@ -1800,18 +1800,18 @@ mod tests {
     fn plan_install_qualifier_ambiguous_lists_source_names() {
         let sources = [
             git_source("Mirror A", OFFICIAL_URL),
-            git_source("Mirror B", "git@github.com:qidiai/plugin-marketplace.git"),
+            git_source("Mirror B", "git@github.com:xai-org/plugin-marketplace.git"),
         ];
         let err = plan_install(
             &sources,
             "sentry",
-            Some("qidiai/plugin-marketplace"),
+            Some("xai-org/plugin-marketplace"),
             |_| Ok(Vec::new()),
         )
         .expect_err("two sources share the owner/repo");
         match err {
             MarketplaceInstallError::AmbiguousQualifier { qualifier, sources } => {
-                assert_eq!(qualifier, "qidiai/plugin-marketplace");
+                assert_eq!(qualifier, "xai-org/plugin-marketplace");
                 assert_eq!(
                     sources,
                     vec!["Mirror A".to_string(), "Mirror B".to_string()]
@@ -1823,11 +1823,11 @@ mod tests {
 
     #[test]
     fn plan_install_qualifier_not_found_when_scan_lacks_name() {
-        let sources = [git_source("QIDI Official", OFFICIAL_URL)];
+        let sources = [git_source("xAI Official", OFFICIAL_URL)];
         let err = plan_install(
             &sources,
             "sentry",
-            Some("qidiai/plugin-marketplace"),
+            Some("xai-org/plugin-marketplace"),
             |_| Ok(vec![mp_entry("other")]),
         )
         .expect_err("source has no plugin named sentry");
@@ -1837,7 +1837,7 @@ mod tests {
                 source_display,
             } => {
                 assert_eq!(name, "sentry");
-                assert_eq!(source_display, "QIDI Official");
+                assert_eq!(source_display, "xAI Official");
             }
             other => panic!("expected QualifiedNameNotFound, got: {other}"),
         }
@@ -1845,11 +1845,11 @@ mod tests {
 
     #[test]
     fn plan_install_qualifier_sync_failure_is_hard_error() {
-        let sources = [git_source("QIDI Official", OFFICIAL_URL)];
+        let sources = [git_source("xAI Official", OFFICIAL_URL)];
         let err = plan_install(
             &sources,
             "sentry",
-            Some("qidiai/plugin-marketplace"),
+            Some("xai-org/plugin-marketplace"),
             |_| Err("network down".to_string()),
         )
         .expect_err("sync failed");
@@ -1858,7 +1858,7 @@ mod tests {
                 source_display,
                 detail,
             } => {
-                assert_eq!(source_display, "QIDI Official");
+                assert_eq!(source_display, "xAI Official");
                 assert_eq!(detail, "network down");
             }
             other => panic!("expected Sync, got: {other}"),
@@ -1869,12 +1869,12 @@ mod tests {
     fn plan_install_qualifier_ok_selects_source_and_entry() {
         let sources = [
             local_source("Local Dev", "/tmp/p"),
-            git_source("QIDI Official", OFFICIAL_URL),
+            git_source("xAI Official", OFFICIAL_URL),
         ];
         let plan = plan_install(
             &sources,
             "SeNtRy",
-            Some("qidiai/plugin-marketplace"),
+            Some("xai-org/plugin-marketplace"),
             |_| Ok(vec![mp_entry("sentry")]),
         )
         .expect("resolves the official source");
@@ -1912,7 +1912,7 @@ mod tests {
     fn plan_install_bare_name_official_priority_selects_official_and_sets_note() {
         let sources = [
             git_source("Third Party", "https://github.com/acme/x.git"),
-            git_source("QIDI Official", OFFICIAL_URL),
+            git_source("xAI Official", OFFICIAL_URL),
         ];
         let plan = plan_install(&sources, "sentry", None, |_| Ok(vec![mp_entry("sentry")]))
             .expect("official source wins the tie");
@@ -1971,11 +1971,11 @@ mod tests {
     #[test]
     fn plan_install_bare_name_official_match_proceeds_despite_skip() {
         let sources = [
-            git_source("QIDI Official", OFFICIAL_URL),
+            git_source("xAI Official", OFFICIAL_URL),
             git_source("Flaky Remote", "https://github.com/acme/a.git"),
         ];
         let plan = plan_install(&sources, "sentry", None, |source| {
-            if source.name == "QIDI Official" {
+            if source.name == "xAI Official" {
                 Ok(vec![mp_entry("sentry")])
             } else {
                 Err("sync failed".to_string())
@@ -2172,17 +2172,17 @@ mod tests {
     fn resolve_qualified_source_name_with_matches_git_owner_repo() {
         let sources = vec![
             git_source(
-                "QIDI Official",
-                "https://github.com/qidiai/plugin-marketplace.git",
+                "xAI Official",
+                "https://github.com/xai-org/plugin-marketplace.git",
             ),
             git_source(
                 "Internal",
                 "https://github.com/example/plugin-marketplace-internal.git",
             ),
         ];
-        let name = resolve_qualified_source_name_with(&sources, "qidiai/plugin-marketplace")
+        let name = resolve_qualified_source_name_with(&sources, "xai-org/plugin-marketplace")
             .expect("qualifier should match the official source");
-        assert_eq!(name, "QIDI Official");
+        assert_eq!(name, "xAI Official");
     }
 
     #[test]
@@ -2199,8 +2199,8 @@ mod tests {
     #[test]
     fn resolve_qualified_source_name_with_unknown_qualifier_errors() {
         let sources = vec![git_source(
-            "QIDI Official",
-            "https://github.com/qidiai/plugin-marketplace.git",
+            "xAI Official",
+            "https://github.com/xai-org/plugin-marketplace.git",
         )];
         let err = resolve_qualified_source_name_with(&sources, "bogus/repo")
             .expect_err("unknown qualifier should error");

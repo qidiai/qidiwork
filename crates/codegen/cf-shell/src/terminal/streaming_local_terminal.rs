@@ -1188,6 +1188,173 @@ async fn run_output_collector(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Does the terminal actually run POSIX (`bash -c`) snippets here?
+    ///
+    /// Mirrors the dispatch in [`super::spawn_shell_command`]: an empty-args
+    /// command is handed to `cf_config::shell::shell_command_argv()`, which
+    /// honours `QIDI_SHELL` (`bash` | `pwsh` | `powershell` | `cmd`) before
+    /// auto-detecting. Since 2026-11-03 the tool layer sets `QIDI_SHELL=bash`,
+    /// so a PowerShell-only snippet reaches Git Bash, dies there with
+    /// `command not found` (exit 127) and never blocks at all — the kill tests
+    /// then either fail outright (`AlreadyExited != Killed`) or pass on a lucky
+    /// race against process death, without ever proving the sleep ran.
+    ///
+    /// Only Git Bash gets the POSIX form; PowerShell/Pwsh keep the historic
+    /// snippet. `Cmd` keeps the PowerShell form as well: it is never
+    /// auto-detected, and rather than pretending to support it, a cmd-only host
+    /// will see these tests fail loudly (verified with `QIDI_SHELL=cmd`).
+    /// Adapting the remaining PowerShell-only snippets in this module — and the
+    /// cmd case for them — is a separate work item.
+    #[cfg(not(unix))]
+    fn posix_snippet_active() -> bool {
+        matches!(
+            cf_config::shell::detect_windows_shell(),
+            cf_config::shell::WindowsShell::GitBash(_)
+        )
+    }
+
+    /// Pick the PowerShell or the POSIX form of a snippet, according to the
+    /// shell the terminal really spawns into on this host.
+    #[cfg(not(unix))]
+    fn shell_snippet(ps: &str, sh: &str) -> String {
+        if posix_snippet_active() {
+            sh.to_string()
+        } else {
+            ps.to_string()
+        }
+    }
+
+    /// On Unix the terminal always spawns a POSIX shell with `-c`
+    /// (`default_shell_path()`), so the POSIX form is the only correct one.
+    #[cfg(unix)]
+    fn shell_snippet(_ps: &str, sh: &str) -> String {
+        sh.to_string()
+    }
+
+    /// Marker files for a probe run: `(start, finish)`. `start` is written
+    /// before the sleep and `finish` only once the sleep has returned. Names
+    /// carry the test tag and the process id, so parallel tests and parallel
+    /// CI runs cannot collide.
+    fn probe_marker_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let stem = format!("qidi-terminal-probe-{tag}-{pid}", pid = std::process::id());
+        let dir = std::env::temp_dir();
+        (
+            dir.join(format!("{stem}.start")),
+            dir.join(format!("{stem}.finish")),
+        )
+    }
+
+    /// Drop both markers of a probe (idempotent; used before *and* after a run
+    /// so a stale file from an earlier invocation can never fake a pass).
+    fn cleanup_probe_markers(markers: &(std::path::PathBuf, std::path::PathBuf)) {
+        let _ = std::fs::remove_file(&markers.0);
+        let _ = std::fs::remove_file(&markers.1);
+    }
+
+    /// Shell-quoted form of a marker path.
+    ///
+    /// Forward slashes because one string is embedded in both a PowerShell and
+    /// a Git Bash command: MSYS accepts `C:/Users/...` and PowerShell does too,
+    /// while backslashes would need doubling to survive POSIX single quotes
+    /// (which, unlike PowerShell's, are not a literal-quote in every shell).
+    /// Single quotes are safe on both as long as the temp dir contains no `'`.
+    fn quoted_path(path: &std::path::Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\\', "/"))
+    }
+
+    /// "Write a marker, sleep, write another marker" in whichever shell is
+    /// active, so a test can observe *where* the process got to.
+    ///
+    /// `;` rather than `&&` between the statements is deliberate: if only the
+    /// sleeper died while the shell survived, `finish` would still be written.
+    /// A missing `finish` therefore proves the terminal process itself was
+    /// terminated mid-sleep, not merely that `sleep` failed.
+    fn marker_probe_snippet(
+        start: &std::path::Path,
+        finish: &std::path::Path,
+        ps_sleep: &str,
+        sh_sleep: &str,
+    ) -> String {
+        let (start, finish) = (quoted_path(start), quoted_path(finish));
+        shell_snippet(
+            &format!(
+                "Set-Content -LiteralPath {start} -Value started; {ps_sleep}; Set-Content \
+                 -LiteralPath {finish} -Value finished"
+            ),
+            &format!("echo started > {start}; {sh_sleep}; echo finished > {finish}"),
+        )
+    }
+
+    /// Cross-platform still-running command for the kill test: `sleep 30`
+    /// under a POSIX shell (Unix, or Git Bash on Windows), `Start-Sleep`
+    /// under PowerShell — chosen from the shell the terminal actually uses.
+    ///
+    /// It also leaves the two observable markers described on
+    /// [`marker_probe_snippet`], which is what lets `test_kill_returns_signal`
+    /// tell "alive, then killed" apart from "exited instantly with 127".
+    fn kill_probe_command(start: &std::path::Path, finish: &std::path::Path) -> String {
+        marker_probe_snippet(start, finish, "Start-Sleep -Seconds 30", "sleep 30")
+    }
+
+    /// The 600 s sleep the process-group tests kill: two consecutive
+    /// `Start-Sleep -Seconds 300` (PowerShell) / `sleep 1` repeated 600 times
+    /// (Git Bash), never a shorter stand-in.
+    ///
+    /// The POSIX form is a loop rather than `sleep 300 & sleep 300 & wait` on
+    /// purpose (measured 2026-11-06): Git Bash starts an extra runtime process
+    /// before it parses `-c` (`bash.exe -c` → `<git>/usr/bin/bash.exe -c
+    /// <snippet>`, an MSYS launcher in front of the interpreter), and every `&`
+    /// leaves a second live shell behind, so the live set no longer matches
+    /// PowerShell's known-good shape (the shell plus the `sleep` it blocks on).
+    /// With the loop the shapes agree, and the group kill reaches the
+    /// interpreter because process-wrap's `start_kill()` + `wait()` relays onto
+    /// the outermost `bash.exe`.
+    const PROCESS_GROUP_SLEEP_PS: &str = "Start-Sleep -Seconds 300; Start-Sleep -Seconds 300";
+    #[cfg(not(unix))]
+    const PROCESS_GROUP_SLEEP_SH: &str = "i=0; while [ $i -lt 600 ]; do sleep 1; i=$((i+1)); done";
+    #[cfg(unix)]
+    const PROCESS_GROUP_SLEEP_SH: &str = "sleep 300 & sleep 300 & wait";
+
+    /// Cross-platform two-children-plus-wait snippet for process-group
+    /// semantics tests (POSIX job-control syntax; PowerShell equivalent),
+    /// bracketed by the same start/finish markers as the other probes, so
+    /// "the process really ran" and "the kill really cut the sleep short" are
+    /// observable instead of inferred.
+    ///
+    /// Both markers are read through [`wait_for_marker`] rather than once: the
+    /// test reaches the kill as soon as `InProgress` is reported, which can be
+    /// before the first marker write has become visible, and a missing `finish`
+    /// must be "still absent after ample time" rather than "absent at one
+    /// instant". The unwritable-snippet failure mode is caught by the
+    /// deterministic [`test_process_group_probe_control_completes_without_kill`].
+    fn process_group_marker_probe_command(
+        start: &std::path::Path,
+        finish: &std::path::Path,
+    ) -> String {
+        marker_probe_snippet(
+            start,
+            finish,
+            PROCESS_GROUP_SLEEP_PS,
+            PROCESS_GROUP_SLEEP_SH,
+        )
+    }
+
+    /// Short-sleep variant of [`process_group_marker_probe_command`] for the
+    /// anti-vacuity control: same tree shape, own markers, sleeps 0.3 s
+    /// instead of ten minutes.
+    fn process_group_control_probe_command(
+        start: &std::path::Path,
+        finish: &std::path::Path,
+    ) -> String {
+        marker_probe_snippet(
+            start,
+            finish,
+            "Start-Sleep -Milliseconds 300",
+            "sleep 0.3",
+        )
+    }
+    use super::*;
     use crate::terminal::DEFAULT_OUTPUT_BYTE_LIMIT;
     use cf_paths::AbsPathBuf;
 
@@ -1250,10 +1417,142 @@ mod tests {
         assert!(statuses.contains(&acp::ToolCallStatus::Completed));
     }
 
+    /// How often [`test_kill_returns_signal`] polls for the probe's start marker.
+    const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// How long [`test_kill_reaps_process_tree`] waits for the reaped processes
+    /// to leave the MSYS `/proc` table after a successful kill.
+    ///
+    /// Measured 2026-11-09: on Windows the killed tree is already gone from the
+    /// process table at the instant `wait()` returns (0 ms), so 2 s is a wide
+    /// margin, not a tight budget. A pid that is still visible after this long
+    /// was simply not reclaimed.
+    const REAP_OBSERVE_DEADLINE: Duration = Duration::from_secs(2);
+
+    /// Pids whose MSYS `/proc/<pid>/cmdline` contains `needle`.
+    ///
+    /// Git Bash's `/proc` keeps a live process *with its full argv* after the
+    /// shell execs into the target (`ps -W` only shows the truncated image
+    /// path, so it cannot answer this), which is why this reads `/proc` and not
+    /// `ps`. Matching only sees the bytes before a `cmdline`'s first NUL, so a
+    /// needle that starts with the test tag is matched on the payload, never on
+    /// the leading `/usr/bin/bash` of a wrapper. Our own pid is skipped in case
+    /// the harness command line ever contains the run tag.
+    #[cfg(unix)]
+    fn pids_with_cmdline(needle: &str) -> Vec<u32> {
+        let mut pids = Vec::new();
+        let entries = match std::fs::read_dir("/proc") {
+            Ok(entries) => entries,
+            Err(_) => return pids,
+        };
+        for entry in entries.flatten() {
+            let pid = match entry.file_name().to_string_lossy().parse::<u32>() {
+                Ok(pid) => pid,
+                Err(_) => continue,
+            };
+            if pid == std::process::id() {
+                continue;
+            }
+            // An entry that cannot be read has exited mid-scan.
+            let cmdline = match std::fs::read(entry.path().join("cmdline")) {
+                Ok(raw) => String::from_utf8_lossy(&raw).replace('\0', " "),
+                Err(_) => continue,
+            };
+            if cmdline.contains(needle) {
+                pids.push(pid);
+            }
+        }
+        pids
+    }
+
+    /// Windows counterpart of [`pids_with_cmdline`], over the same MSYS `/proc`
+    /// (see its doc for why not `ps -W`).
+    ///
+    /// The scan has to run *inside* Git Bash: MSYS `/proc` is a virtual mount
+    /// that only that shell resolves. Measured 2026-11-09, both attempts to
+    /// reach it from Rust directly fail — `read_dir("/proc")` yields nothing for
+    /// a Win32 process, and `cygpath -w /proc` does not map the virtual mount
+    /// (it echoes `/proc` back, so `read_dir` fails with `InvalidFilename`).
+    /// NULs never cross a command line either, so `CreateProcess` never sees
+    /// one. The needle is restricted to a plain tag so it cannot carry quoting
+    /// or a NUL into the query.
+    #[cfg(windows)]
+    fn pids_with_cmdline(needle: &str) -> Vec<u32> {
+        debug_assert!(
+            !needle.is_empty()
+                && needle
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "needle must be a plain tag, got {needle:?}"
+        );
+        let bash = match cf_config::shell::detect_windows_shell() {
+            cf_config::shell::WindowsShell::GitBash(path) => path.clone(),
+            _ => return Vec::new(),
+        };
+        // Print the `<pid>/cmdline` wrapper only for matches; `-a` keeps the
+        // read binary-safe, and the wrapper is cut back to a pid in Rust.
+        let query = concat!(
+            "for d in /proc/[0-9]*/cmdline; do ",
+            "[ -f \"$d\" ] && grep -qaF -- '$NEEDLE' \"$d\" && printf '%s\\n' \"$d\"; ",
+            "done; true"
+        )
+        .replace("$NEEDLE", needle);
+        let output = match std::process::Command::new(&bash)
+            .arg("-c")
+            .arg(&query)
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return Vec::new(),
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let path = line.trim();
+                let pid = path.strip_suffix("/cmdline")?.rsplit('/').next()?;
+                pid.parse::<u32>().ok()
+            })
+            .filter(|pid| *pid != std::process::id())
+            .collect()
+    }
+
+
+    /// Deadline for the probe to reach its start marker. Generous on purpose:
+    /// PowerShell has to boot a CLR runtime, Git Bash has to fork MSYS, and a
+    /// cold-first-spawn host can take a couple of seconds for either.
+    const PROBE_START_DEADLINE: Duration = Duration::from_secs(20);
+
+    /// How long a marker write may take to become visible to this process.
+    ///
+    /// Ten seconds is deliberately generous because the same budget covers two
+    /// different waits: a marker written by an already-running shell (pure
+    /// visibility lag, needs well under a second) and the first marker of a
+    /// freshly spawned one, where the shell itself still has to start and
+    /// parse its `-c` payload. Callers that have already waited for
+    /// `InProgress` only need the former, but nothing is lost by allowing for
+    /// the latter — the successful path returns the moment the file appears,
+    /// so only a genuinely absent marker pays the full deadline.
+    const MARKER_VISIBLE_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// Poll until `path` shows up, giving up after [`MARKER_VISIBLE_DEADLINE`].
+    /// Returns whether it appeared.
+    async fn wait_for_marker(path: &std::path::Path) -> bool {
+        let deadline = tokio::time::Instant::now() + MARKER_VISIBLE_DEADLINE;
+        while !path.exists() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(PROBE_POLL_INTERVAL).await;
+        }
+        true
+    }
+
     #[tokio::test]
     async fn test_kill_returns_signal() {
         let session_id = format!("s1-kill-{}", std::process::id());
         let tool_id = format!("t1-kill-{}", std::process::id());
+        let markers = probe_marker_paths("kill");
+        cleanup_probe_markers(&markers);
 
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1267,24 +1566,44 @@ mod tests {
                     session_id: acp::SessionId::new(session_id_clone),
                 };
 
+                let command = kill_probe_command(&markers.0, &markers.1);
                 let handle = tokio::task::spawn_local(async move {
-                    runner.run(make_request(&tool_id_clone, "sleep 30")).await
+                    runner.run(make_request(&tool_id_clone, &command)).await
                 });
 
-                // Wait for the process to start
-                let mut attempts = 0;
-                let max_attempts = 20;
+                // Pre-conditions the old 25ms/500ms window could not express:
+                // the probe must have *already written its start marker* (so
+                // the snippet really runs in this shell — a mismatched one
+                // exits 127 and writes nothing) *and* the runner must have
+                // emitted InProgress. Only then does `KillOutcome::Killed`
+                // mean "a live process was terminated" instead of "we won a
+                // race against a process that was already gone".
+                let mut started = false;
+                let deadline = tokio::time::Instant::now() + PROBE_START_DEADLINE;
                 loop {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    let statuses = extract_statuses(&notifier.notifications.lock().await);
-                    if statuses.contains(&acp::ToolCallStatus::InProgress) {
+                    let marker_written = markers.0.exists();
+                    let in_progress = extract_statuses(&notifier.notifications.lock().await)
+                        .contains(&acp::ToolCallStatus::InProgress);
+                    if marker_written && in_progress {
+                        started = true;
                         break;
                     }
-                    attempts += 1;
-                    if attempts >= max_attempts {
-                        panic!("Process did not start within expected time");
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
                     }
+                    tokio::time::sleep(PROBE_POLL_INTERVAL).await;
                 }
+                assert!(
+                    started,
+                    "probe never reported in: start marker {} written = {}, \
+                     InProgress seen = {} within {} ms — the kill probe does not \
+                     match the shell this host spawns commands into",
+                    markers.0.display(),
+                    markers.0.exists(),
+                    extract_statuses(&notifier.notifications.lock().await)
+                        .contains(&acp::ToolCallStatus::InProgress),
+                    PROBE_START_DEADLINE.as_millis(),
+                );
 
                 assert_eq!(
                     kill_terminal(&session_id, &tool_id).await,
@@ -1292,12 +1611,95 @@ mod tests {
                 );
 
                 let result = handle.await.unwrap().unwrap();
+                // Windows: TerminateProcess yields exit_code 1 and no signal
+                // number; Unix delivers SIGKILL ("signal 9").
+                #[cfg(unix)]
                 assert_eq!(result.signal, Some("signal 9".to_string()));
+                #[cfg(windows)]
+                {
+                    assert_eq!(result.signal, None, "no signal on Windows kill");
+                    assert_eq!(result.exit_code, Some(1), "terminated process exit code");
+                }
+
+                // Side effects: the 30 s sleep was genuinely cut short, so the
+                // post-sleep marker must not exist, while the pre-sleep one
+                // must still prove the run got going.
+                assert!(
+                    markers.0.exists(),
+                    "start marker {} missing after the kill — the probe cannot \
+                     have been running when it was killed",
+                    markers.0.display()
+                );
+                assert!(
+                    !markers.1.exists(),
+                    "finish marker {} exists — the sleep ran to completion, so \
+                     nothing was actually interrupted by kill_terminal",
+                    markers.1.display()
+                );
 
                 let statuses = extract_statuses(&notifier.notifications.lock().await);
                 assert_eq!(statuses.last(), Some(&acp::ToolCallStatus::Failed));
             })
             .await;
+
+        cleanup_probe_markers(&markers);
+    }
+
+    /// Anti-vacuity control for [`test_kill_returns_signal`].
+    ///
+    /// The kill test asserts the *finish* marker stays absent. That alone is
+    /// also satisfied by a probe snippet this shell cannot execute at all
+    /// (exit 127, no markers, nothing slept). This control runs the same
+    /// snippet shape with a short sleep and no kill, and requires the sleep to
+    /// complete and both markers to appear — so the absence asserted in the
+    /// kill test can only come from the kill.
+    #[tokio::test]
+    async fn test_kill_probe_control_completes_without_kill() {
+        let session_id = format!("s1-kill-ctrl-{}", std::process::id());
+        let tool_id = format!("t1-kill-ctrl-{}", std::process::id());
+        let markers = probe_marker_paths("kill-ctrl");
+        cleanup_probe_markers(&markers);
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let notifier = Arc::new(TestNotifier {
+                    notifications: Mutex::new(vec![]),
+                });
+                let runner = StreamingLocalTerminalRunner {
+                    notifier: notifier.clone(),
+                    session_id: acp::SessionId::new(session_id),
+                };
+
+                let command = marker_probe_snippet(
+                    &markers.0,
+                    &markers.1,
+                    "Start-Sleep -Milliseconds 300",
+                    "sleep 0.3",
+                );
+                let result = runner.run(make_request(&tool_id, &command)).await.unwrap();
+
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "untouched probe must exit cleanly; output: {:?}",
+                    result.combined_output
+                );
+                assert!(
+                    markers.0.exists(),
+                    "control probe must write its start marker in this shell ({})",
+                    markers.0.display()
+                );
+                assert!(
+                    markers.1.exists(),
+                    "control probe must reach the post-sleep marker ({}) — if it \
+                     does not, the probe snippet does not fit this shell and the \
+                     kill test's 'finish marker absent' proves nothing",
+                    markers.1.display()
+                );
+            })
+            .await;
+
+        cleanup_probe_markers(&markers);
     }
 
     #[tokio::test]
@@ -1306,10 +1708,25 @@ mod tests {
             .run_until(async {
                 let session_id = format!("ext-create-{}", std::process::id());
 
+                // Direct argv spawn is POSIX-only (there is no echo.exe on
+                // Windows); an empty-args snippet routes through the
+                // platform shell (pwsh/cmd/Git Bash) instead.
+                #[cfg(unix)]
                 let id = create_terminal(
                     &session_id,
                     "echo",
                     &["hello".to_string()],
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                #[cfg(not(unix))]
+                let id = create_terminal(
+                    &session_id,
+                    &shell_snippet("Write-Output hello", "echo hello"),
+                    &[],
                     HashMap::new(),
                     None,
                     None,
@@ -1332,10 +1749,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_ext_release_cleans_up() {
+        let markers = probe_marker_paths("ext-release");
+        cleanup_probe_markers(&markers);
         tokio::task::LocalSet::new()
             .run_until(async {
                 let session_id = format!("ext-release-{}", std::process::id());
 
+                #[cfg(unix)]
                 let id = create_terminal(
                     &session_id,
                     "sleep",
@@ -1346,8 +1766,34 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                #[cfg(not(unix))]
+                let id = create_terminal(
+                    &session_id,
+                    &marker_probe_snippet(&markers.0, &markers.1, "Start-Sleep -Seconds 30", "sleep 30"),
+                    &[],
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
+
+                // The registry assertions below cannot tell "released a live
+                // process" from "released a process that died instantly in
+                // this shell". The start marker can: it is written before the
+                // 30 s sleep, so waiting for it *before* the release proves
+                // the sleep really started and the release therefore landed on
+                // a running terminal.
+                assert!(
+                    wait_for_marker(&markers.0).await,
+                    "probe start marker {} never appeared, so this shell ({}) \
+                     did not run the sleep snippet and the release assertions \
+                     below would pass vacuously",
+                    markers.0.display(),
+                    cf_config::shell::detect_windows_shell().name(),
+                );
 
                 release_terminal(&session_id, &id).await;
 
@@ -1355,15 +1801,24 @@ mod tests {
                 assert_eq!(kill_terminal(&session_id, &id).await, Ok(None));
             })
             .await;
+
+        cleanup_probe_markers(&markers);
     }
 
     #[tokio::test]
     async fn test_kill_and_release_all_kills_non_bg_and_preserves_bg() {
+        // One marker pair per terminal: the normal one must be killed while
+        // sleeping, the backgrounded one must keep sleeping after the sweep.
+        let normal_markers = probe_marker_paths("killall-normal");
+        let bg_markers = probe_marker_paths("killall-bg");
+        cleanup_probe_markers(&normal_markers);
+        cleanup_probe_markers(&bg_markers);
         tokio::task::LocalSet::new()
             .run_until(async {
                 let session_id = format!("kill-all-{}", std::process::id());
 
                 // Create two terminals: one normal, one we'll background.
+                #[cfg(unix)]
                 let normal_id = create_terminal(
                     &session_id,
                     "sleep",
@@ -1374,7 +1829,24 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                #[cfg(not(unix))]
+                let normal_id = create_terminal(
+                    &session_id,
+                    &marker_probe_snippet(
+                        &normal_markers.0,
+                        &normal_markers.1,
+                        "Start-Sleep -Seconds 30",
+                        "sleep 30",
+                    ),
+                    &[],
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
+                #[cfg(unix)]
                 let bg_id = create_terminal(
                     &session_id,
                     "sleep",
@@ -1385,9 +1857,48 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                #[cfg(not(unix))]
+                let bg_id = create_terminal(
+                    &session_id,
+                    &marker_probe_snippet(
+                        &bg_markers.0,
+                        &bg_markers.1,
+                        "Start-Sleep -Seconds 30",
+                        "sleep 30",
+                    ),
+                    &[],
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 // Wait for both to start.
                 tokio::time::sleep(Duration::from_millis(100)).await;
+
+                // "In the registry" does not mean "still running": a shell that
+                // cannot execute the snippet exits at once and the sweep below
+                // would then pass without ever killing a live process. Both
+                // start markers are written before the 30 s sleep, so waiting
+                // for them here (still before any kill) proves both terminals
+                // were observed alive in this shell.
+                assert!(
+                    wait_for_marker(&normal_markers.0).await,
+                    "normal terminal's probe start marker {} never appeared, so \
+                     this shell ({}) did not run the sleep snippet and the \
+                     kill-all assertions below would pass vacuously",
+                    normal_markers.0.display(),
+                    cf_config::shell::detect_windows_shell().name(),
+                );
+                assert!(
+                    wait_for_marker(&bg_markers.0).await,
+                    "backgrounded terminal's probe start marker {} never \
+                     appeared, so this shell ({}) did not run the sleep snippet \
+                     and the kill-all assertions below would pass vacuously",
+                    bg_markers.0.display(),
+                    cf_config::shell::detect_windows_shell().name(),
+                );
 
                 // Mark one as backgrounded.
                 background_terminal(&session_id, &bg_id).await;
@@ -1415,6 +1926,9 @@ mod tests {
                 release_terminal(&session_id, &bg_id).await;
             })
             .await;
+
+        cleanup_probe_markers(&normal_markers);
+        cleanup_probe_markers(&bg_markers);
     }
 
     /// Verify that `ProcessSession` (setsid) prevents child processes from
@@ -1459,11 +1973,118 @@ mod tests {
         );
     }
 
+    /// `kill_terminal` must reclaim the whole spawned tree, not just the
+    /// outermost `bash.exe`: after a `Killed` outcome neither the shell nor the
+    /// `sleep` it blocks on may survive in the MSYS `/proc` table.
+    ///
+    /// Guarded twice against passing vacuously. The probe has to *write its
+    /// start marker* (so the snippet really ran in this shell, and something
+    /// was alive when the kill landed), and the feature string has to be *found
+    /// alive before* the kill — an empty `/proc` scan would otherwise satisfy
+    /// "no process left" without any reap having happened. After the kill only
+    /// pids that were already alive before it count as survivors, so the
+    /// scan's own short-lived shell can never turn a clean reap red.
+    #[tokio::test]
+    async fn test_kill_reaps_process_tree() {
+        let session_id = format!("s1-reap-{}", std::process::id());
+        let tool_id = format!("t1-reap-{}", std::process::id());
+        let markers = probe_marker_paths("reap");
+        cleanup_probe_markers(&markers);
+        // The tag itself is the needle, with a sentinel on both sides so a
+        // pid or timestamp in some unrelated command line cannot alias it.
+        let needle = format!("qidi-reap-{}-sentinel", std::process::id());
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let notifier = Arc::new(TestNotifier {
+                    notifications: Mutex::new(vec![]),
+                });
+                let session_id_clone = session_id.clone();
+                let tool_id_clone = tool_id.clone();
+                let runner = StreamingLocalTerminalRunner {
+                    notifier: notifier.clone(),
+                    session_id: acp::SessionId::new(session_id_clone),
+                };
+
+                // The feature string rides on `sleep`'s own argv, not on
+                // `echo`'s: the shell execs into the foreground `sleep 30
+                // <tag>`, so both the interpreter the terminal spawned and the
+                // child it blocks on carry the tag in `/proc`.
+                let command = marker_probe_snippet(
+                    &markers.0,
+                    &markers.1,
+                    &format!("Start-Sleep -Seconds 30; Write-Host {needle}"),
+                    &format!("sleep 30 {needle}; sleep 30"),
+                );
+                let handle = tokio::task::spawn_local(async move {
+                    runner.run(make_request(&tool_id_clone, &command)).await
+                });
+
+                assert!(
+                    wait_for_marker(&markers.0).await,
+                    "probe never wrote its start marker {} — the kill probe does \
+                     not match the shell this host spawns commands into",
+                    markers.0.display()
+                );
+                let before_kill = pids_with_cmdline(&needle);
+                assert!(
+                    !before_kill.is_empty(),
+                    "feature string {needle:?} is not visible in MSYS /proc before \
+                     the kill — the survival check would be vacuous"
+                );
+
+                assert_eq!(
+                    kill_terminal(&session_id, &tool_id).await,
+                    Ok(Some(KillOutcome::Killed))
+                );
+
+                let is_survivor = |pids: &[u32]| -> Vec<u32> {
+                    pids.iter()
+                        .copied()
+                        .filter(|pid| before_kill.contains(pid))
+                        .collect()
+                };
+                let deadline = tokio::time::Instant::now() + REAP_OBSERVE_DEADLINE;
+                let mut survivors = is_survivor(&pids_with_cmdline(&needle));
+                while !survivors.is_empty() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(PROBE_POLL_INTERVAL).await;
+                    survivors = is_survivor(&pids_with_cmdline(&needle));
+                }
+                assert!(
+                    survivors.is_empty(),
+                    "processes {survivors:?} (alive before the kill: {before_kill:?}) \
+                     still matched {needle:?} {} ms after kill_terminal reported \
+                     Killed — the tree was not reaped",
+                    REAP_OBSERVE_DEADLINE.as_millis()
+                );
+
+                // The kill cut the sleeps short, so the post-sleep marker must
+                // be absent, and the command must not look successful.
+                let result = handle.await.unwrap().unwrap();
+                assert!(
+                    !markers.1.exists(),
+                    "finish marker {} exists — the sleeps ran to completion",
+                    markers.1.display()
+                );
+                assert_eq!(
+                    result.exit_code,
+                    Some(1),
+                    "killed command should not exit cleanly; output: {:?}",
+                    result.combined_output
+                );
+            })
+            .await;
+
+        cleanup_probe_markers(&markers);
+    }
+
     /// Verify that process group kill still works after switching from
     /// ProcessGroup::leader() to ProcessSession. A parent shell spawns
     /// a background child; killing the terminal should reap both.
     #[tokio::test]
     async fn test_process_group_kill_with_session() {
+        let markers = probe_marker_paths("pgkill");
+        cleanup_probe_markers(&markers);
         tokio::task::LocalSet::new()
             .run_until(async {
                 let session_id = format!("pgkill-{}", std::process::id());
@@ -1479,10 +2100,9 @@ mod tests {
                     session_id: acp::SessionId::new(session_id_clone),
                 };
 
+                let command = process_group_marker_probe_command(&markers.0, &markers.1);
                 let handle = tokio::task::spawn_local(async move {
-                    runner
-                        .run(make_request(&tool_id_clone, "sleep 300 & sleep 300 & wait"))
-                        .await
+                    runner.run(make_request(&tool_id_clone, &command)).await
                 });
 
                 // Wait for the process to start.
@@ -1497,6 +2117,26 @@ mod tests {
                     assert!(attempts < 40, "process did not start in time");
                 }
 
+                // Wait until the probe has actually reached its sleep. The
+                // `InProgress` status above only proves the child was spawned;
+                // it can be reported before the shell has run the first
+                // `echo`, so killing on it alone would sometimes cut the probe
+                // down before it wrote `start` — making the side-effect
+                // assertions below fail for a reason that has nothing to do
+                // with process-group kill. Waiting for `start` first is what
+                // makes "the sleep was running when the kill landed" true by
+                // construction, so the `finish` assertion below then proves the
+                // kill cut it short.
+                assert!(
+                    wait_for_marker(&markers.0).await,
+                    "start marker {} still missing {} s after the process was \
+                     reported in progress ({}), so the group probe never ran in \
+                     this shell and there is nothing to kill",
+                    markers.0.display(),
+                    MARKER_VISIBLE_DEADLINE.as_secs(),
+                    cf_config::shell::detect_windows_shell().name(),
+                );
+
                 // Kill — should reap the whole process group.
                 assert_eq!(
                     kill_terminal(&session_id, &tool_id).await,
@@ -1504,22 +2144,95 @@ mod tests {
                 );
 
                 let result = handle.await.unwrap().unwrap();
+                // Windows: TerminateProcess -> exit_code 1, no signal number.
+                #[cfg(unix)]
                 assert!(
                     result.signal.is_some(),
                     "process should have been killed by signal"
                 );
+                #[cfg(windows)]
+                assert_eq!(result.exit_code, Some(1), "group-killed exit code");
+
+                // Side effect: the kill must have cut the sleep short. The
+                // start marker was already awaited before the kill, so this
+                // half is exactly the "was it interrupted" question; a snippet
+                // the shell could not execute is ruled out by the awaited
+                // start above and by
+                // [`test_process_group_probe_control_completes_without_kill`].
+                assert!(
+                    !wait_for_marker(&markers.1).await,
+                    "finish marker {} appeared — the 600 s sleep ran to \
+                     completion, so nothing was interrupted by the group kill",
+                    markers.1.display()
+                );
             })
             .await;
+
+        cleanup_probe_markers(&markers);
+    }
+
+    /// Anti-vacuity control for [`test_process_group_kill_with_session`].
+    ///
+    /// That test asserts the *finish* marker stays absent, which a snippet the
+    /// shell cannot execute would also satisfy. This control runs the same
+    /// probe shape with a 0.3 s sleep and no kill, in the same runner, and
+    /// requires the sleep to complete and both markers to appear — so the
+    /// absence in the kill test can only come from the kill.
+    #[tokio::test]
+    async fn test_process_group_probe_control_completes_without_kill() {
+        let markers = probe_marker_paths("pgkill-ctrl");
+        cleanup_probe_markers(&markers);
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let session_id = format!("pgkill-ctrl-{}", std::process::id());
+                let tool_id = format!("pgkill-ctrl-tool-{}", std::process::id());
+                let notifier = Arc::new(TestNotifier {
+                    notifications: Mutex::new(vec![]),
+                });
+                let runner = StreamingLocalTerminalRunner {
+                    notifier: notifier.clone(),
+                    session_id: acp::SessionId::new(session_id),
+                };
+
+                let command = process_group_control_probe_command(&markers.0, &markers.1);
+                let result = runner.run(make_request(&tool_id, &command)).await.unwrap();
+                assert_eq!(
+                    result.exit_code,
+                    Some(0),
+                    "untouched group probe must exit cleanly; output: {:?}",
+                    result.combined_output
+                );
+
+                assert!(
+                    markers.0.exists(),
+                    "control probe must write its start marker in this shell ({})",
+                    markers.0.display()
+                );
+                assert!(
+                    markers.1.exists(),
+                    "control probe must reach the post-sleep marker ({}) — if it \
+                     does not, the group probe does not fit this shell and the \
+                     kill test's 'finish marker absent' proves nothing",
+                    markers.1.display()
+                );
+            })
+            .await;
+
+        cleanup_probe_markers(&markers);
     }
 
     #[tokio::test]
     async fn test_kill_and_release_all_noop_for_other_sessions() {
+        let markers = probe_marker_paths("killall-other");
+        cleanup_probe_markers(&markers);
         tokio::task::LocalSet::new()
             .run_until(async {
                 let session_a = format!("kill-all-a-{}", std::process::id());
                 let session_b = format!("kill-all-b-{}", std::process::id());
 
                 // Create a terminal in session B.
+                #[cfg(unix)]
                 let id_b = create_terminal(
                     &session_b,
                     "sleep",
@@ -1530,8 +2243,33 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                #[cfg(not(unix))]
+                let id_b = create_terminal(
+                    &session_b,
+                    &marker_probe_snippet(&markers.0, &markers.1, "Start-Sleep -Seconds 30", "sleep 30"),
+                    &[],
+                    HashMap::new(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
+
+                // Being in the registry is not the same as still running, so
+                // "untouched" below could hold trivially if the shell had
+                // exited at once. The start marker is written before the 30 s
+                // sleep; waiting for it (before any kill) proves session B's
+                // terminal was really sleeping when session A was swept.
+                assert!(
+                    wait_for_marker(&markers.0).await,
+                    "session B probe start marker {} never appeared, so this \
+                     shell ({}) did not run the sleep snippet and the \
+                     'untouched' assertion below would pass vacuously",
+                    markers.0.display(),
+                    cf_config::shell::detect_windows_shell().name(),
+                );
 
                 // Kill all for session A (different session).
                 kill_and_release_all_for_session(&session_a).await;
@@ -1546,5 +2284,7 @@ mod tests {
                 release_terminal(&session_b, &id_b).await;
             })
             .await;
+
+        cleanup_probe_markers(&markers);
     }
 }

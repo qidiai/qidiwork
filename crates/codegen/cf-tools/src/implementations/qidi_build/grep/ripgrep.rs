@@ -35,6 +35,97 @@ fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
+/// Whether the ripgrep binary resolves to a runnable executable.
+///
+/// The opencode and qidi_build grep/glob implementations shell out to
+/// `rg`; their integration tests exercise that real pipeline and need a
+/// working binary. Ripgrep is not preinstalled on GitHub's Windows
+/// runners, and Windows builds skip the auto-bundle (see `build.rs`:
+/// "Users install ripgrep separately (winget / scoop)"), so on such
+/// machines the rg-dependent tests skip with an explanatory message
+/// instead of panicking with "program not found".
+#[cfg(test)]
+pub(crate) fn ripgrep_available() -> bool {
+    probe_rg_executable(&rg_path())
+}
+
+/// Probe one executable path by running `rg --version`.
+///
+/// Split out from [`rg_path`] so tests can point the probe at a known
+/// missing path without poisoning the process-wide `OnceLock` caches.
+fn probe_rg_executable(exec: &std::path::Path) -> bool {
+    std::process::Command::new(exec)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Cached verdict on whether the resolved ripgrep binary is runnable.
+///
+/// Probe once per process: spawning `rg --version` on every tool call would
+/// add latency, and the binary cannot appear mid-process (Windows locks
+/// running executables, and PATH is fixed at startup).
+pub fn ripgrep_available_cached() -> bool {
+    static RG_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *RG_AVAILABLE.get_or_init(|| probe_rg_executable(&rg_path()))
+}
+
+/// User-facing notice emitted (once) when the built-in grep cannot run.
+pub const RG_UNAVAILABLE_NOTICE: &str = "warning: built-in grep is unavailable \
+    (ripgrep `rg` was not found or is not executable). Use `git grep` for \
+    repository searches, or install ripgrep (winget/scoop/apt).";
+
+/// Emit a single startup warning when ripgrep cannot be executed.
+///
+/// Called once from process initialization; the `OnceLock` makes repeated
+/// calls cheap and silent. Windows builds without the bundled zip land here
+/// because `rg` is not preinstalled (see `cf-shell/build.rs`).
+pub fn warn_if_ripgrep_unavailable() {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    if ripgrep_available_cached() {
+        return;
+    }
+    WARNED.get_or_init(|| {
+        // stderr keeps the notice visible in both TUI and headless modes;
+        // tracing alone is filtered out by the default `error` level.
+        eprintln!("{RG_UNAVAILABLE_NOTICE}");
+        tracing::warn!(
+            rg = %rg_path().display(),
+            "built-in grep is unavailable; use `git grep` for repository searches"
+        );
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn probe_rejects_missing_binary() {
+        let missing = std::env::temp_dir().join("qidi-rg-does-not-exist-0123456789");
+        assert!(
+            !probe_rg_executable(&missing),
+            "probe must return false for a missing binary"
+        );
+    }
+
+    #[test]
+    fn unavailable_notice_names_the_workaround() {
+        assert!(
+            RG_UNAVAILABLE_NOTICE.contains("ripgrep"),
+            "notice must name ripgrep: {RG_UNAVAILABLE_NOTICE}"
+        );
+        assert!(
+            RG_UNAVAILABLE_NOTICE.contains("git grep"),
+            "notice must point users at `git grep`: {RG_UNAVAILABLE_NOTICE}"
+        );
+    }
+}
+
 /// Get the path to the ripgrep executable.
 ///
 /// In release builds with bundling enabled, this extracts the bundled ripgrep

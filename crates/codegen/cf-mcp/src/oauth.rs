@@ -22,7 +22,13 @@ use crate::rmcp::transport::auth::{AuthorizationManager, OAuthClientConfig};
 /// Client name advertised to MCP servers during Dynamic Client Registration
 /// (RFC 7591). Surfaces as the application name on third-party OAuth consent
 /// screens (e.g. Linear, GitHub), so keep this human-recognizable.
-const MCP_OAUTH_CLIENT_NAME: &str = "Grok";
+///
+/// This change is not retroactive: DCR results are persisted per server, so a
+/// connection authorized under the previous name stays registered with that old
+/// name on the provider side until a fresh registration happens. Under RFC 7591
+/// an identical registration may return the existing `client_id`, and whether
+/// the `client_name` is refreshed is up to the provider.
+const MCP_OAUTH_CLIENT_NAME: &str = "QIDI Code";
 
 /// How often the interactive OAuth flow polls the credential store to detect
 /// a login completed in another window or process.
@@ -352,13 +358,8 @@ async fn run_browser_auth_flow(
     tracing::info!(server = server_name, "Opening browser for OAuth consent");
     if let Err(e) = webbrowser::open(&auth_url) {
         // eprintln! corrupts the TUI alternate screen (in-process, fd 2).
-        // Fail fast with the URL instead of hanging on a callback nobody can
-        // trigger: the error propagates through the dedup broadcast and the
-        // caller's reporting path, so the user sees where to authorize.
-        tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth");
-        return Err(format!(
-            "无法打开浏览器完成 {server_name} 的 MCP 授权({e});请在系统设置确认可启动浏览器后重试,或手动访问授权链接:\n{auth_url}"
-        ));
+        // TODO: surface auth URL via ACP notification instead.
+        tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth; user must visit URL manually");
     }
 
     // 5. Wait for the OAuth callback OR for tokens to appear on disk.
@@ -374,6 +375,10 @@ async fn run_browser_auth_flow(
     //    If the user then completes the browser flow before another process
     //    writes new tokens, `exchange_code_for_token` would use the clobbered
     //    config and the server would reject with `invalid_grant: Invalid redirect_uri`.
+    //    This prohibition applies only *while waiting*: once the poll hits, the
+    //    wait is over (the callback server is aborted, no exchange will run), so
+    //    the hit branch performs exactly that reload — see the `poll_store` arm
+    //    of the `select!` below.
     let parsed_server_url = match url::Url::parse(server_url) {
         Ok(u) => Some(u),
         Err(e) => {
@@ -431,6 +436,27 @@ async fn run_browser_auth_flow(
         }
         _ = poll_store => {
             callback_server.abort();
+            // Another flow wrote fresh tokens. Adopt the stored
+            // client config now: the wait is over (callback server
+            // aborted, no exchange will run), so the client-config
+            // clobber `initialize_from_store` performs (see the
+            // poll comment above) can no longer break our own
+            // `exchange_code_for_token` — and the stored client_id
+            // is the one the fresh tokens were actually issued to,
+            // which keeps later `refresh_token` grants paired with
+            // the right client. The tokens themselves need no
+            // separate reload: rmcp's `get_credentials` reads the
+            // credential store live, so every subsequent request
+            // already sees the fresh token.
+            {
+                let mut mgr = auth_manager.lock().await;
+                if let Ok(true) = mgr.initialize_from_store().await {
+                    tracing::info!(
+                        server = server_name,
+                        "Loaded stored client config for fresh tokens from another auth flow"
+                    );
+                }
+            }
             tracing::info!(
                 server = server_name,
                 "Fresh tokens detected on disk from another auth flow; skipping callback wait"
@@ -616,5 +642,245 @@ mod tests {
             "GET-only route must reject POST"
         );
         handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod dcr_registration_tests {
+    //! T-0109: Dynamic Client Registration (RFC 7591) broadcast contract.
+    //!
+    //! `MCP_OAUTH_CLIENT_NAME` is the string a third-party provider renders as
+    //! our application name on its consent screen (Linear, GitHub, ...), so the
+    //! value we actually put on the wire is a user-visible contract. These tests
+    //! run the same call sequence as production (`servers.rs`:
+    //! `discover_and_prepare_auth` → `AuthorizationManager::new`
+    //! → `discover_metadata` → `register_client`) against an in-process mock
+    //! authorization server and assert on the registration request body the
+    //! provider receives.
+    //!
+    //! Scope: registration only. The browser consent round (authorization
+    //! redirect + token exchange) is not exercised here, and no real provider is
+    //! contacted.
+
+    use super::{AuthorizationManager, MCP_OAUTH_CLIENT_NAME};
+
+    /// In-process mock OAuth authorization server: RFC 8414 metadata plus an
+    /// RFC 7591 registration endpoint, both pointing back at the mock itself.
+    ///
+    /// No extra dev-dependencies are allowed in this crate, so this is a
+    /// hand-rolled HTTP/1.1 server over `tokio::net::TcpListener` speaking just
+    /// enough for reqwest (which is what rmcp's `AuthorizationManager` uses):
+    /// one request per connection, `Content-Length` request framing, and
+    /// `Connection: close` on every reply so no keep-alive parsing is needed.
+    ///
+    /// Routes:
+    /// * `GET  /.well-known/oauth-authorization-server` → RFC 8414 metadata
+    /// * `POST /register` → forwards the request body to the test over an mpsc
+    ///   channel, then replies with the minimum rmcp can parse
+    ///   (`client_id` + `redirect_uris` are required fields of
+    ///   `ClientRegistrationResponse`)
+    /// * anything else → 404. That is deliberate: rmcp probes RFC 9728
+    ///   protected-resource metadata first, and a 200 there would hijack
+    ///   discovery away from the OAuth endpoint we want it to reach.
+    #[allow(clippy::type_complexity)]
+    async fn spawn_mock_authorization_server() -> (
+        String,
+        tokio::sync::mpsc::Receiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock AS: bind loopback ephemeral port");
+        let base = format!(
+            "http://{}",
+            listener.local_addr().expect("mock AS: local_addr")
+        );
+
+        let metadata = serde_json::json!({
+            "issuer": base,
+            "authorization_endpoint": format!("{base}/authorize"),
+            "token_endpoint": format!("{base}/token"),
+            "registration_endpoint": format!("{base}/register"),
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "scopes_supported": ["read"],
+        })
+        .to_string();
+        let registration_ok = concat!(
+            r#"{"client_id":"mock-client-0001","client_secret":null,"#,
+            r#""client_name":"Mock DCR Client","#,
+            r#""redirect_uris":["http://localhost:1/callback"]}"#,
+        )
+        .to_string();
+        let not_found = r#"{"error":"not_found"}"#.to_string();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let tx = tx.clone();
+                let metadata = metadata.clone();
+                let registration_ok = registration_ok.clone();
+                let not_found = not_found.clone();
+                tokio::spawn(async move {
+                    let mut socket = socket;
+
+                    // --- headers: read until the blank line ---
+                    let mut raw: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    let head_end = loop {
+                        let Ok(n) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        raw.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if raw.len() > 128 * 1024 {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+                    let request_line = head.split("\r\n").next().unwrap_or_default();
+                    let mut words = request_line.split_whitespace();
+                    let (Some(method), Some(path)) = (words.next(), words.next()) else {
+                        return;
+                    };
+
+                    // --- body: exactly Content-Length bytes ---
+                    let lowered = head.to_ascii_lowercase();
+                    let content_length: usize = lowered
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse().ok())
+                        .unwrap_or(0);
+                    let mut body = raw[head_end..].to_vec();
+                    while body.len() < content_length {
+                        let Ok(n) = socket.read(&mut chunk).await else {
+                            break;
+                        };
+                        if n == 0 {
+                            break;
+                        }
+                        body.extend_from_slice(&chunk[..n]);
+                    }
+
+                    let (status, reply) = match (method, path) {
+                        ("GET", "/.well-known/oauth-authorization-server") => {
+                            ("200 OK", metadata.clone())
+                        }
+                        ("POST", "/register") => {
+                            // Hand the captured registration request to the test
+                            // before replying, so `recv()` below can never race
+                            // the client off a not-yet-served request.
+                            let _ = tx
+                                .send(String::from_utf8_lossy(&body).to_string())
+                                .await;
+                            ("200 OK", registration_ok.clone())
+                        }
+                        _ => ("404 Not Found", not_found.clone()),
+                    };
+                    let framing = format!(
+                        "HTTP/1.1 {status}\r\n\
+                         Content-Type: application/json\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        reply.len()
+                    );
+                    let _ = socket.write_all(framing.as_bytes()).await;
+                    let _ = socket.write_all(reply.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+
+        (base, rx, server)
+    }
+
+    /// The DCR request body must carry `MCP_OAUTH_CLIENT_NAME` verbatim — pinned
+    /// twice: as the constant (so a rename of the value updates the expectation)
+    /// and as the literal "QIDI Code" (so an accidental edit of the constant is
+    /// caught as a change to the externally visible broadcast).
+    #[tokio::test]
+    async fn dcr_registration_broadcasts_current_client_name() {
+        let (base, mut captured, server) = spawn_mock_authorization_server().await;
+
+        // Same sequence as `servers.rs::discover_and_prepare_auth`.
+        let mut manager = AuthorizationManager::new(base.as_str())
+            .await
+            .expect("mock AS: create AuthorizationManager");
+        let metadata = manager
+            .discover_metadata()
+            .await
+            .expect("mock AS: RFC 8414 discovery");
+        assert!(
+            metadata.registration_endpoint.is_some(),
+            "discovery must reach the mock and advertise registration_endpoint, got {metadata:?}"
+        );
+        manager.set_metadata(metadata);
+
+        let callback = format!("{base}/callback");
+        let config = manager
+            .register_client(MCP_OAUTH_CLIENT_NAME, &callback, &["read"])
+            .await
+            .expect("mock AS: RFC 7591 dynamic client registration");
+        assert_eq!(config.client_id, "mock-client-0001");
+
+        let raw = captured
+            .recv()
+            .await
+            .expect("mock AS never saw a registration request");
+        server.abort();
+
+        let request: serde_json::Value =
+            serde_json::from_str(&raw).expect("registration body must be JSON");
+
+        // --- the contract under test ---
+        assert_eq!(
+            request["client_name"], MCP_OAUTH_CLIENT_NAME,
+            "DCR must broadcast MCP_OAUTH_CLIENT_NAME verbatim; body: {raw}"
+        );
+        assert_eq!(
+            request["client_name"], "QIDI Code",
+            "MCP_OAUTH_CLIENT_NAME no longer matches the pinned broadcast value; body: {raw}"
+        );
+
+        // --- the rest of the public-client shape rmcp sends ---
+        assert_eq!(
+            request["token_endpoint_auth_method"], "none",
+            "desktop client must register as a public client (no secret); body: {raw}"
+        );
+        assert_eq!(
+            request["redirect_uris"],
+            serde_json::json!([callback]),
+            "the redirect_uri we pass must be broadcast unchanged; body: {raw}"
+        );
+        assert_eq!(
+            request["scope"], "read",
+            "rmcp joins scopes into a space-separated string; body: {raw}"
+        );
+        assert_eq!(
+            request["application_type"], "native",
+            "rmcp's SEP-837 default application_type; body: {raw}"
+        );
+        let grant_types = request["grant_types"]
+            .as_array()
+            .expect("grant_types must be an array");
+        assert!(
+            grant_types.contains(&serde_json::json!("authorization_code")),
+            "body: {raw}"
+        );
+        assert!(
+            grant_types.contains(&serde_json::json!("refresh_token")),
+            "body: {raw}"
+        );
     }
 }

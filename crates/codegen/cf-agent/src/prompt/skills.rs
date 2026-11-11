@@ -13,6 +13,12 @@ pub use cf_tools::implementations::skills::types::{SkillInfo, SkillScope};
 /// Re-export so agent-side discovery (and the shell) can name the resolved
 /// vendor-compat config without reaching into `cf_tools` directly.
 pub use cf_tools::types::compat::CompatConfig;
+/// Re-export the skill-listing projection mode and built-in essential
+/// allowlist (owned by `cf_tools`, where `SkillManager` lives) so config
+/// consumers can name them via `cf_agent`.
+pub use cf_tools::types::skill_discovery_tracker::{
+    DEFAULT_ESSENTIAL_SKILLS, DEFAULT_SUBAGENT_DENIED_SKILLS, SkillsMode, SubagentSkillListing,
+};
 
 use cf_tools::implementations::skills::discovery::{
     find_command_paths, find_skill_md_paths, find_skill_paths, is_valid_skill_name,
@@ -44,6 +50,90 @@ pub struct SkillsConfig {
     /// Launcher-injected platform bundled skill dirs (tagged `Bundled` scope).
     #[serde(default)]
     pub bundled_skill_dirs: Vec<String>,
+
+    /// Model-facing skill listing projection mode (P0-3 phase 1). `None`
+    /// (unset) resolves to the default [`SkillsMode::Essential`], which lists
+    /// only the core programming skills (see [`DEFAULT_ESSENTIAL_SKILLS`]) so
+    /// a fresh session starts cheap. Set `mode = "full"` to list every
+    /// discovered skill (historical behavior).
+    ///
+    /// Kept as `Option` so an unset mode is *omitted* from the persisted
+    /// config instead of pinned to the current default: the resolved default
+    /// lives in [`SkillsConfig::mode_or_default`], not on disk. Mirrors the
+    /// `load_envrc` precedent (`#[serde(default, skip_serializing_if = ...)]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SkillsMode>,
+
+    /// Override for the essential allowlist (skill `name`s). `None` uses the
+    /// built-in [`DEFAULT_ESSENTIAL_SKILLS`]. Only consulted when the resolved
+    /// mode is `Essential`. `skip_serializing_if` keeps an unset allowlist out
+    /// of `config.toml` (explicit None handling, not reliant on the toml
+    /// serializer's None-skip behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub essential_allow: Option<Vec<String>>,
+
+    /// Baseline skill listing a **subagent** session injects at startup (F2).
+    /// `None` (unset) resolves to [`SubagentSkillListing::Essential`]. A child
+    /// session injects this listing unconditionally, bypassing the
+    /// cross-session announcement ledger (see `SkillManager`); `full` restores
+    /// the whole catalog, `none` suppresses the injection entirely. Independent
+    /// of [`SkillsConfig::mode`], which governs the primary session.
+    ///
+    /// Kept as `Option` so an unset value stays out of the persisted config,
+    /// matching the `mode` precedent; the resolved default lives in
+    /// [`SkillsConfig::subagent_listing_or_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_listing: Option<SubagentSkillListing>,
+
+    /// Skills a **subagent** session may not activate (F2S).
+    ///
+    /// `None` (unset) resolves to the built-in dangerous set
+    /// ([`DEFAULT_SUBAGENT_DENIED_SKILLS`]: image generation, document OCR, the
+    /// `bid-*` office family, and the `wecom-*` enterprise-WeChat family), so
+    /// children are gated out of the box. An entry matches a skill `name`
+    /// **exactly or as a prefix** (`"bid-"` covers every `bid-*` skill).
+    /// `Some(vec![])` disables the gate for children entirely.
+    ///
+    /// The `wecom-` family is the outbound-messaging face of the gate:
+    /// `wecom-unified` posts through the user's own `wecom-cli` credentials,
+    /// which bypasses the audited `wecom-bridge` daemon (source validation,
+    /// human confirmation, audit log), so a child that could load it could fan
+    /// conversation content out of the workspace. The gate is re-applied on
+    /// every mid-session skill-discovery flush, not just at spawn — a child
+    /// cannot re-open the family by writing a `SKILL.md`.
+    ///
+    /// A permission boundary, not a listing projection: denied skills are
+    /// removed from the child's listing *and* its activatable set under every
+    /// [`SubagentSkillListing`] value. The primary session is never gated.
+    ///
+    /// Kept as `Option` so an unset value stays out of the persisted config,
+    /// matching the `mode` / `subagent_listing` precedent; resolution lives in
+    /// `cf_tools`'s `SubagentSkillDenylist` (the single source of truth for
+    /// matching semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_denied_skills: Option<Vec<String>>,
+}
+
+impl SkillsConfig {
+    /// Resolved listing projection mode: the configured value, or
+    /// [`SkillsMode::Essential`] when unset.
+    ///
+    /// All consumers must resolve through this (never read `self.mode`
+    /// directly) so `None` and the explicitly-default `Some(Essential)` behave
+    /// identically.
+    pub fn mode_or_default(&self) -> SkillsMode {
+        self.mode.unwrap_or_default()
+    }
+
+    /// Resolved subagent baseline listing mode: the configured value, or
+    /// [`SubagentSkillListing::Essential`] when unset.
+    ///
+    /// All consumers must resolve through this (never read
+    /// `self.subagent_listing` directly) so `None` and the
+    /// explicitly-default `Some(Essential)` behave identically.
+    pub fn subagent_listing_or_default(&self) -> SubagentSkillListing {
+        self.subagent_listing.unwrap_or_default()
+    }
 }
 
 /// List all discovered skills with their metadata.
@@ -169,7 +259,7 @@ pub fn collect_skill_config_dirs(
 
     // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat
     // config; `.grok` and `.agents` are always present. When all cells are on
-    // this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`.
+    // this list equals the historical `[".qidi", ".agents", ".claude", ".cursor"]`.
     let config_dir_names = compat.skill_config_dirs();
 
     // Priority 1 & 2: Walk from cwd up to the git root.
@@ -726,6 +816,163 @@ mod tests {
         fs::write(dir.join("SKILL.md"), content).unwrap();
     }
 
+    // ── Listing projection mode (P0-3 phase 1) ───────────────────────────
+
+    #[test]
+    fn mode_or_default_resolves_unset_to_essential() {
+        let cfg = SkillsConfig::default();
+        assert!(cfg.mode.is_none(), "unset mode must stay None");
+        assert_eq!(cfg.mode_or_default(), SkillsMode::Essential);
+
+        let full = SkillsConfig {
+            mode: Some(SkillsMode::Full),
+            ..Default::default()
+        };
+        assert_eq!(full.mode_or_default(), SkillsMode::Full);
+
+        let explicit_essential = SkillsConfig {
+            mode: Some(SkillsMode::Essential),
+            ..Default::default()
+        };
+        assert_eq!(explicit_essential.mode_or_default(), SkillsMode::Essential);
+    }
+
+    // ── Subagent baseline listing (F2) ───────────────────────────────────
+
+    #[test]
+    fn subagent_listing_or_default_resolves_unset_to_essential() {
+        let cfg = SkillsConfig::default();
+        assert!(
+            cfg.subagent_listing.is_none(),
+            "unset subagent_listing must stay None"
+        );
+        assert_eq!(
+            cfg.subagent_listing_or_default(),
+            SubagentSkillListing::Essential,
+            "an unset subagent_listing must resolve to Essential"
+        );
+
+        for (value, expected) in [
+            (SubagentSkillListing::Full, SubagentSkillListing::Full),
+            (
+                SubagentSkillListing::None,
+                SubagentSkillListing::None,
+            ),
+            (
+                SubagentSkillListing::Essential,
+                SubagentSkillListing::Essential,
+            ),
+        ] {
+            let cfg = SkillsConfig {
+                subagent_listing: Some(value),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.subagent_listing_or_default(),
+                expected,
+                "a set subagent_listing must round-trip through the resolver"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_listing_round_trips_and_is_skipped_when_unset() {
+        let unset: SkillsConfig = serde_json::from_str("{\"paths\":[]}").unwrap();
+        assert!(
+            unset.subagent_listing.is_none(),
+            "absent key must default to None"
+        );
+        let serialized = serde_json::to_string(&unset).unwrap();
+        assert!(
+            !serialized.contains("subagent_listing"),
+            "unset subagent_listing must stay out of the serialized config:\n{serialized}"
+        );
+
+        for (raw, expected) in [
+            ("\"none\"", SubagentSkillListing::None),
+            ("\"full\"", SubagentSkillListing::Full),
+            ("\"essential\"", SubagentSkillListing::Essential),
+        ] {
+            let cfg: SkillsConfig =
+                serde_json::from_str(&format!("{{\"paths\":[],\"subagent_listing\":{raw}}}"))
+                    .unwrap();
+            assert_eq!(
+                cfg.subagent_listing_or_default(),
+                expected,
+                "deserialized `{raw}` must resolve to {expected:?}"
+            );
+        }
+    }
+
+    // ── Subagent skill gate (F2S) ────────────────────────────────────────
+
+    #[test]
+    fn subagent_denied_skills_is_unset_by_default_and_kept_out_of_the_config() {
+        let cfg = SkillsConfig::default();
+        assert!(
+            cfg.subagent_denied_skills.is_none(),
+            "an unset gate must stay None: the built-in default set is resolved \
+             downstream (cf_tools::...::SubagentSkillDenylist), so it is never \
+             pinned to disk"
+        );
+        let serialized = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !serialized.contains("subagent_denied_skills"),
+            "an unset gate must stay out of the serialized config:\n{serialized}"
+        );
+    }
+
+    #[test]
+    fn subagent_denied_skills_round_trips_including_an_explicit_empty_list() {
+        let cfg: SkillsConfig = serde_json::from_str(
+            r#"{"paths":[],"subagent_denied_skills":["bid-","random-tool"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.subagent_denied_skills,
+            Some(vec!["bid-".to_owned(), "random-tool".to_owned()]),
+            "a configured denylist must round-trip verbatim"
+        );
+
+        let opened: SkillsConfig =
+            serde_json::from_str(r#"{"paths":[],"subagent_denied_skills":[]}"#).unwrap();
+        assert_eq!(
+            opened.subagent_denied_skills,
+            Some(Vec::new()),
+            "`[]` (gate fully open) must be distinct from unset"
+        );
+        assert!(
+            serde_json::to_string(&opened)
+                .unwrap()
+                .contains("subagent_denied_skills"),
+            "an explicit empty denylist must be persisted, not dropped as unset"
+        );
+    }
+
+    #[test]
+    fn default_denied_set_covers_the_documented_dangerous_families() {
+        for exact in ["qwen-image-lowvram", "pdf-to-word-ocr", "seal-extractor"] {
+            assert!(
+                DEFAULT_SUBAGENT_DENIED_SKILLS.contains(&exact),
+                "{exact} must be in the built-in denylist"
+            );
+        }
+        assert!(
+            DEFAULT_SUBAGENT_DENIED_SKILLS.contains(&"bid-"),
+            "the `bid-` prefix entry must be in the built-in denylist so the \
+             whole bid-* family is covered"
+        );
+        assert!(
+            DEFAULT_SUBAGENT_DENIED_SKILLS.contains(&"wecom-"),
+            "the `wecom-` prefix entry must be in the built-in denylist so the \
+             whole wecom-* outbound-messaging family is covered"
+        );
+        assert!(
+            !DEFAULT_SUBAGENT_DENIED_SKILLS.contains(&"check-work"),
+            "core programming skills must never be gated"
+        );
+    }
+
     // ── Server-synced skills (injected server_skill_dirs) ────────────────
 
     #[tokio::test]
@@ -735,7 +982,7 @@ mod tests {
         write_skill_md(&server.path().join("dup"), "dup");
 
         let cwd = tempfile::tempdir().unwrap();
-        write_skill_md(&cwd.path().join(".grok").join("skills").join("dup"), "dup");
+        write_skill_md(&cwd.path().join(".qidi").join("skills").join("dup"), "dup");
 
         let config = SkillsConfig {
             server_skill_dirs: vec![server.path().to_string_lossy().into_owned()],
@@ -771,7 +1018,7 @@ mod tests {
         write_skill_md(&bundled.path().join("dup"), "dup");
 
         let cwd = tempfile::tempdir().unwrap();
-        write_skill_md(&cwd.path().join(".grok").join("skills").join("dup"), "dup");
+        write_skill_md(&cwd.path().join(".qidi").join("skills").join("dup"), "dup");
 
         let config = SkillsConfig {
             bundled_skill_dirs: vec![bundled.path().to_string_lossy().into_owned()],
@@ -832,7 +1079,7 @@ mod tests {
     fn find_skill_paths_flat_layout() {
         // Traditional flat layout: skills/<name>/SKILL.md
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
 
         write_skill_md(&grok_dir.join("skills").join("alpha"), "alpha");
         write_skill_md(&grok_dir.join("skills").join("beta"), "beta");
@@ -846,7 +1093,7 @@ mod tests {
     fn find_skill_paths_nested_layout() {
         // Nested: skills/team/infra/SKILL.md, skills/team/training/SKILL.md
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         let skills = grok_dir.join("skills");
 
         write_skill_md(&skills.join("team").join("infra"), "infra");
@@ -864,7 +1111,7 @@ mod tests {
     fn find_skill_paths_mixed_flat_and_nested() {
         // Mix of flat and nested skills
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         let skills = grok_dir.join("skills");
 
         // Flat
@@ -882,7 +1129,7 @@ mod tests {
     fn find_skill_paths_dir_without_skill_md_is_skipped() {
         // A subdirectory exists but has no SKILL.md — should not appear
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         let skills = grok_dir.join("skills");
 
         write_skill_md(&skills.join("valid"), "valid");
@@ -902,7 +1149,7 @@ mod tests {
     fn find_skill_paths_no_skills_dir() {
         // .grok exists but no skills/ subdirectory
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         fs::create_dir_all(&grok_dir).unwrap();
 
         let paths = find_skill_paths(&grok_dir);
@@ -944,7 +1191,7 @@ mod tests {
     fn find_skill_paths_parent_and_child_both_have_skill_md() {
         // A directory has SKILL.md and also has subdirectories with SKILL.md
         let tmp = tempfile::tempdir().unwrap();
-        let grok_dir = tmp.path().join(".grok");
+        let grok_dir = tmp.path().join(".qidi");
         let skills = grok_dir.join("skills");
 
         // Parent skill
@@ -955,7 +1202,11 @@ mod tests {
         let paths = find_skill_paths(&grok_dir);
         assert_eq!(paths.len(), 2);
 
-        let path_strs: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        // Path::join renders platform separators; normalize before matching.
+        let path_strs: Vec<String> = paths
+            .iter()
+            .map(|p| p.display().to_string().replace("\\", "/"))
+            .collect();
         assert!(path_strs.iter().any(|p| p.contains("parent/SKILL.md")));
         assert!(path_strs.iter().any(|p| p.contains("child/SKILL.md")));
     }
@@ -1313,7 +1564,7 @@ mod tests {
         // Create workspace user dir with a skill
         let user_dir = repo_root.join("x").join("testuser");
         write_skill_md(
-            &user_dir.join(".grok").join("skills").join("my-tool"),
+            &user_dir.join(".qidi").join("skills").join("my-tool"),
             "my-tool",
         );
 
@@ -1343,7 +1594,7 @@ mod tests {
         // User dir with a skill
         let user_dir = repo_root.join("x").join("testuser");
         write_skill_md(
-            &user_dir.join(".grok").join("skills").join("dedup-skill"),
+            &user_dir.join(".qidi").join("skills").join("dedup-skill"),
             "dedup-skill",
         );
 
@@ -1371,7 +1622,7 @@ mod tests {
         // Create a skill that would only be found via workspace user path
         let user_dir = repo_root.join("x").join("ghost");
         write_skill_md(
-            &user_dir.join(".grok").join("skills").join("ghost-skill"),
+            &user_dir.join(".qidi").join("skills").join("ghost-skill"),
             "ghost-skill",
         );
 
@@ -1400,7 +1651,7 @@ mod tests {
 
         // User dir with nested skills
         let user_dir = repo_root.join("x").join("nested-user");
-        let skills_base = user_dir.join(".grok").join("skills");
+        let skills_base = user_dir.join(".qidi").join("skills");
         write_skill_md(&skills_base.join("flat-skill"), "flat-skill");
         write_skill_md(&skills_base.join("team").join("deep-skill"), "deep-skill");
 
@@ -1788,6 +2039,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
 
         let skills = list_skills(
@@ -1821,6 +2073,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
 
         let skills = list_skills(
@@ -1844,14 +2097,14 @@ mod tests {
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        let auto_dir = repo_root.join(".grok").join("skills").join("dup-skill");
+        let auto_dir = repo_root.join(".qidi").join("skills").join("dup-skill");
         write_skill_md(&auto_dir, "dup-skill");
 
         // Add the same auto-discovered skills root as a config path.
         let config = SkillsConfig {
             paths: vec![
                 repo_root
-                    .join(".grok")
+                    .join(".qidi")
                     .join("skills")
                     .to_str()
                     .unwrap()
@@ -1861,6 +2114,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
 
         let skills = list_skills(
@@ -1884,13 +2138,13 @@ mod tests {
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        let auto_dir = repo_root.join(".grok").join("skills").join("overlap-skill");
+        let auto_dir = repo_root.join(".qidi").join("skills").join("overlap-skill");
         write_skill_md(&auto_dir, "overlap-skill");
 
         let config = SkillsConfig {
             paths: vec![
                 repo_root
-                    .join(".grok")
+                    .join(".qidi")
                     .join("skills")
                     .to_str()
                     .unwrap()
@@ -1967,15 +2221,15 @@ mod tests {
         init_git_repo(&repo_root);
 
         // Same skill name in local (higher-priority) and repo (lower-priority) sources.
-        write_skill_md(&cwd.join(".grok").join("skills").join("same"), "same");
-        let repo_skill_dir = repo_root.join(".grok").join("skills").join("same");
+        write_skill_md(&cwd.join(".qidi").join("skills").join("same"), "same");
+        let repo_skill_dir = repo_root.join(".qidi").join("skills").join("same");
         write_skill_md(&repo_skill_dir, "same");
 
         // Ignore the local skill path. Repo fallback should remain visible.
         let config = SkillsConfig {
             paths: vec![],
             ignore: vec![
-                cwd.join(".grok")
+                cwd.join(".qidi")
                     .join("skills")
                     .to_str()
                     .unwrap()
@@ -1984,6 +2238,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
 
         let skills = list_skills(
@@ -2022,11 +2277,11 @@ mod tests {
         init_git_repo(&repo_root);
 
         write_skill_md(
-            &repo_root.join(".grok").join("skills").join("commit"),
+            &repo_root.join(".qidi").join("skills").join("commit"),
             "commit",
         );
         write_skill_md(
-            &repo_root.join(".grok").join("skills").join("review"),
+            &repo_root.join(".qidi").join("skills").join("review"),
             "review",
         );
 
@@ -2036,6 +2291,7 @@ mod tests {
             disabled: vec!["commit".to_string()],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
         let skills = list_skills(
             Some(repo_root.to_str().unwrap()),
@@ -2070,7 +2326,7 @@ mod tests {
         init_git_repo(&repo_root);
 
         write_skill_md(
-            &repo_root.join(".grok").join("skills").join("deploy"),
+            &repo_root.join(".qidi").join("skills").join("deploy"),
             "deploy",
         );
 
@@ -2080,6 +2336,7 @@ mod tests {
             disabled: vec![],
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
+            ..Default::default()
         };
         let skills = list_skills(
             Some(repo_root.to_str().unwrap()),
@@ -2439,7 +2696,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         // Not a git repo → falls to the cwd-only branch (no upward walk).
-        for name in [".grok", ".agents", ".claude", ".cursor"] {
+        for name in [".qidi", ".agents", ".claude", ".cursor"] {
             fs::create_dir_all(cwd.join(name)).unwrap();
         }
 
@@ -2460,7 +2717,7 @@ mod tests {
             "cursor must be gated off: {dirs:?}"
         );
         assert!(ends_with(&dirs, ".claude"), "claude must remain: {dirs:?}");
-        assert!(ends_with(&dirs, ".grok"), "grok must remain: {dirs:?}");
+        assert!(ends_with(&dirs, ".qidi"), "grok must remain: {dirs:?}");
     }
 
     // ── Same-scope frontmatter-name collisions (copied skill dirs) ──────
@@ -2641,7 +2898,7 @@ mod tests {
             ),
         ]);
         assert_eq!(out.len(), 1);
-        assert!(out[0].path.contains(".grok"));
+        assert!(out[0].path.contains(".qidi"));
     }
 
     #[tokio::test]
@@ -2655,7 +2912,7 @@ mod tests {
         fs::create_dir_all(&repo_root).unwrap();
         init_git_repo(&repo_root);
 
-        let skills_dir = repo_root.join(".grok").join("skills");
+        let skills_dir = repo_root.join(".qidi").join("skills");
         write_skill_md(&skills_dir.join("zz-copyfix-japandi"), "zz-copyfix-japandi");
         // The copy keeps the original's frontmatter name.
         write_skill_md(
@@ -2683,6 +2940,11 @@ mod tests {
             .find(|s| s.name == "zz-copyfix-japandi2")
             .unwrap();
         assert_eq!(rekeyed.display_name.as_deref(), Some("zz-copyfix-japandi"));
-        assert!(rekeyed.path.ends_with("zz-copyfix-japandi2/SKILL.md"));
+        assert!(
+            rekeyed
+                .path
+                .replace("\\", "/")
+                .ends_with("zz-copyfix-japandi2/SKILL.md"),
+        );
     }
 }

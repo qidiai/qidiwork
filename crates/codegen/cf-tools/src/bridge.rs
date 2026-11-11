@@ -116,16 +116,55 @@ impl ToolBridge {
             .and_then(|r| r.tool_for_kind(kind).map(str::to_string))
     }
 
+    /// Every registered tool of `kind`, as `(registry_id,
+    /// client_name)` pairs — both domains (design doc Q1 规则 1,
+    /// v3.2 双域; `registry_id` = B-12 gate-judgment domain,
+    /// `client_name` = `use_tool` relay/lookup domain). Plural
+    /// counterpart of [`Self::tool_for_kind`]: returns **all**
+    /// registered instances of the kind, not the first — multi-
+    /// instance kinds (`List` → `list_dir` + `glob`) are fully
+    /// enumerated. Sync — the registry read is a microsecond
+    /// `RwLock::read` (same discipline as [`Self::tool_kind`]).
+    pub fn tools_for_kind(&self, kind: ToolKind) -> Vec<(String, String)> {
+        self.registry.tools_for_kind(kind)
+    }
+
     /// [`ToolKind`] for a registered tool by client-facing name, or
     /// `None` for unknown names. Sync — uses the registry's
     /// `RwLock::read`.
+    ///
+    /// Uses the same colon↔underscore-tolerant lookup as dispatch: model
+    /// callbacks carry the relay-sanitized wire name (`qidi_build_X`), which
+    /// an exact lookup would miss, leaving colon-family tools with
+    /// `is_read_only = false`.
     pub fn tool_kind(&self, tool_name: &str) -> Option<ToolKind> {
-        self.registry.get_tool_metadata(tool_name).map(|m| m.kind())
+        self.registry
+            .get_tool_metadata_for_dispatch(tool_name)
+            .map(|m| m.kind())
     }
 
     /// Get only built-in tool definitions (exclude MCP tools).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.registry.tool_definitions_builtins_only()
+    }
+
+    /// Registration-time (declared) kind of a tool by client-facing name —
+    /// the trust source for the Phase B resident-set projection (design doc
+    /// Q1 规则 2). `None` for unknown names.
+    pub fn declared_kind_of(&self, tool_name: &str) -> Option<ToolKind> {
+        self.registry.declared_kind_of(tool_name)
+    }
+
+    /// `LocalRegistry` key for a client-facing name, if registered (used to
+    /// build the per-turn defs snapshot's canonical domain, C-8a).
+    pub fn registry_id_of(&self, tool_name: &str) -> Option<String> {
+        self.registry.registry_id_of(tool_name)
+    }
+
+    /// Built-in tools as `(client_name, declared_kind, definition)` in
+    /// registration order — the Phase B segmentation input.
+    pub fn builtin_seg_entries(&self) -> Vec<(String, ToolKind, ToolDefinition)> {
+        self.registry.builtin_seg_entries()
     }
 
     /// Render a prompt template through [`TemplateRenderer`] with extra
@@ -264,6 +303,70 @@ impl ToolBridge {
             .and_then(|t| t.listing_snapshot())
     }
 
+    /// The baseline skill listing a **subagent** session injects at startup
+    /// (F2), rendered read-only with the requested projection; also installs
+    /// the projected runtime set into `AvailableSkills` (O-1).
+    ///
+    /// Drains any pending reconciliation (`clear_pending`) so the child's
+    /// stale baseline pending cannot re-fire on the first tool call, then
+    /// renders the listing *without* touching `announced_names` — the
+    /// announcement ledger stays pristine, so a child never pollutes the
+    /// primary session's inherited state.
+    ///
+    /// The same projection is written into `AvailableSkills` so the skill
+    /// tool's activatable set matches the listing: without it, an `Essential`
+    /// listing would advertise only allowlisted skills while the tool could
+    /// still activate every startup skill (per-session `finalize()` seeds
+    /// `AvailableSkills` with the unprojected catalog).
+    ///
+    /// The F2S subagent gate rides on top of every projection: the skills
+    /// denied by `[skills].subagent_denied_skills` (default: the built-in
+    /// `DEFAULT_SUBAGENT_DENIED_SKILLS`) are removed from both the listing and
+    /// the runtime set. Because the gate is a permission boundary rather than a
+    /// context-cost projection, `SubagentSkillListing::None` **also** installs
+    /// the runtime set (all skills minus the denied ones) instead of leaving
+    /// `finalize()`'s unprojected catalog activatable — otherwise `none` would
+    /// bypass the gate. The primary session never reaches this method.
+    ///
+    /// `subagent_denied` is the raw `[skills].subagent_denied_skills` value,
+    /// resolved here through `SubagentSkillDenylist::resolve` (`None` → the
+    /// built-in set, `Some(vec![])` → fully open). Taking it at this seam — the
+    /// same one that carries the listing knob — means the gate cannot be
+    /// forgotten by a caller that never seeds the manager, and stays inert for
+    /// anything that is not a subagent injection.
+    ///
+    /// Returns the rendered listing snapshot, or `None` when the projection is
+    /// `SubagentSkillListing::None` (no injection) / no skill qualifies / no
+    /// `SkillManager` is registered. The runtime set is installed regardless.
+    pub async fn subagent_skill_listing(
+        &self,
+        listing: crate::types::skill_discovery_tracker::SubagentSkillListing,
+        subagent_denied: Option<Vec<String>>,
+    ) -> Option<crate::types::skill_discovery_tracker::SkillListingSnapshot> {
+        let denied =
+            crate::types::skill_discovery_tracker::SubagentSkillDenylist::resolve(subagent_denied);
+        let registry = &*self.registry;
+        let mut res = registry.resources.lock().await;
+        let (snapshot, runtime_skills) = {
+            let tracker =
+                res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()?;
+            tracker.clear_pending();
+            (
+                tracker.listing_for_subagent(listing, &denied),
+                tracker.subagent_runtime_skills(listing, &denied),
+            )
+        };
+        // Write the runtime projection directly -- the shell never sees this.
+        res.insert(crate::types::resources::AvailableSkills(runtime_skills));
+        // Tell the skill tool *why* a denied skill is missing: the runtime set
+        // above no longer contains it, so without this the tool can only say
+        // "not found", conflating a policy denial with a typo. The resource is
+        // only ever installed on the subagent path; a primary session has no
+        // denylist in scope.
+        res.insert(denied);
+        snapshot
+    }
+
     /// Seed the SkillDiscoveryTracker with session context and startup skills.
     ///
     /// Must be called at session start so the `SkillDiscoveryReminder` can
@@ -271,6 +374,10 @@ impl ToolBridge {
     /// `display_cwd`: If set (forked sessions), skill paths in
     /// model-visible announcements are rewritten from real cwd to this
     /// value. Runtime invocation uses the real path.
+    ///
+    /// `mode` / `essential_allow`: essential-skill listing projection
+    /// (P0-3 phase 1). `Full` lists everything; `Essential` lists only the
+    /// resolved allowlist. See `SkillManager::set_skills_mode`.
     pub async fn seed_skill_discovery(
         &self,
         cwd: Option<std::path::PathBuf>,
@@ -280,6 +387,8 @@ impl ToolBridge {
         context_window_tokens: Option<u64>,
         skill_budget_percent: Option<f64>,
         compat: crate::types::compat::CompatConfig,
+        mode: crate::types::skill_discovery_tracker::SkillsMode,
+        essential_allow: Option<Vec<String>>,
     ) {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
@@ -296,6 +405,7 @@ impl ToolBridge {
             tracker.set_read_tool_name(name);
         }
         tracker.set_compat(compat);
+        tracker.set_skills_mode(mode, essential_allow);
         tracker.seed(
             cwd,
             git_root,
@@ -393,8 +503,20 @@ impl ToolBridge {
     ) -> Option<crate::types::skill_discovery_tracker::SkillUpdateEffects> {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
+        // R5/F2S: the resolved subagent denylist is installed only by
+        // `subagent_skill_listing` (the child injection seam); a primary
+        // session never has it. It must be re-read on **every** flush, because
+        // this single seam backs all four flush sites (`run_loop`'
+        // RefreshSkillBaseline, `tool_calls` post-tool discovery, session
+        // setup, and the baseline-change path): without it, one mid-session
+        // discovery would replace `AvailableSkills` with the unfiltered
+        // catalog and re-open `wecom-*` / `bid-*` for the rest of the child's
+        // life, bypassing the commit-23987bfb gate.
+        let denied =
+            res.get::<crate::types::skill_discovery_tracker::SubagentSkillDenylist>()
+                .cloned();
         let tracker = res.get_mut::<crate::types::skill_discovery_tracker::SkillManager>()?;
-        let (runtime_skills, effects) = tracker.take_pending()?;
+        let (runtime_skills, effects) = tracker.take_pending_gated(denied.as_ref())?;
 
         // Write the runtime projection directly -- the shell never sees this.
         res.insert(crate::types::resources::AvailableSkills(runtime_skills));
@@ -716,9 +838,12 @@ mod tests {
             "fixture_str_replace",
         );
         register_fixture(&toolset, "Delete", ToolKind::Delete, "fixture_delete");
+        // A snake_case name that does NOT shadow a reserved built-in
+        // (registering an MCP tool named `run_terminal_cmd` is rejected
+        // by the reserved-name guard since the hub-merge).
         register_fixture(
             &toolset,
-            "run_terminal_cmd",
+            "fixture_terminal_cmd",
             ToolKind::Execute,
             "fixture_run_terminal_cmd",
         );
@@ -727,13 +852,82 @@ mod tests {
         assert_eq!(bridge.tool_kind("StrReplace"), Some(ToolKind::Edit));
         assert_eq!(bridge.tool_kind("Delete"), Some(ToolKind::Delete));
         assert_eq!(
-            bridge.tool_kind("run_terminal_cmd"),
+            bridge.tool_kind("fixture_terminal_cmd"),
             Some(ToolKind::Execute)
         );
 
         assert_eq!(bridge.tool_kind("not_a_registered_tool"), None);
         // Exact client-name lookup is case-sensitive.
         assert_eq!(bridge.tool_kind("write"), None);
+    }
+
+    /// P2-B regression: callbacks carry the relay-sanitized underscore wire
+    /// name, so a colon-registered Read-kind tool must still resolve its
+    /// kind — otherwise `is_read_only` is permanently false for the
+    /// colon family.
+    #[test]
+    fn tool_kind_resolves_underscored_wire_name_for_colon_tool() {
+        let bridge = ToolBridge::for_test();
+        let toolset = bridge.toolset();
+        register_fixture(
+            &toolset,
+            "fixture_ns:ReadThing",
+            ToolKind::Read,
+            "fixture_ns:ReadThing",
+        );
+
+        assert_eq!(
+            bridge.tool_kind("fixture_ns_ReadThing"),
+            Some(ToolKind::Read),
+            "underscored wire name must resolve the colon-registered Read tool"
+        );
+        assert_eq!(
+            bridge.tool_kind("fixture_ns:ReadThing"),
+            Some(ToolKind::Read),
+            "canonical colon name must keep resolving"
+        );
+    }
+
+    /// Design doc Q1 规则 1 (bridge surface): `tools_for_kind`
+    /// enumerates **every** registered instance of a kind as
+    /// `(registry_id, client_name)` pairs — the plural
+    /// counterpart of the single-first `tool_for_kind`. Two
+    /// fixtures of one kind prove the plural behavior; the
+    /// dual domains are asserted per pair.
+    #[test]
+    fn tools_for_kind_enumerates_all_instances_in_both_domains() {
+        let bridge = ToolBridge::for_test();
+        let toolset = bridge.toolset();
+        register_fixture(
+            &toolset,
+            "fixture_list_a",
+            ToolKind::List,
+            "fixture_list_a",
+        );
+        register_fixture(
+            &toolset,
+            "fixture_list_b",
+            ToolKind::List,
+            "fixture_list_b",
+        );
+        register_fixture(&toolset, "Write", ToolKind::Write, "fixture_write");
+
+        let lists = bridge.tools_for_kind(ToolKind::List);
+        assert_eq!(lists.len(), 2, "both List instances must be enumerated");
+        let mut client_names: Vec<&str> =
+            lists.iter().map(|(_, c)| c.as_str()).collect();
+        client_names.sort_unstable();
+        assert_eq!(
+            client_names,
+            vec!["fixture_list_a", "fixture_list_b"],
+            "client_name domain must carry both instances"
+        );
+        for (registry_id, client_name) in &lists {
+            assert_eq!(registry_id, client_name, "no-override fixtures keep both domains equal");
+        }
+        // Single instance kind → one pair; absent kind → empty.
+        assert_eq!(bridge.tools_for_kind(ToolKind::Write).len(), 1);
+        assert!(bridge.tools_for_kind(ToolKind::Lsp).is_empty());
     }
 
     // ── drain_between_turn_bash_completions owner scoping (the "While you
@@ -828,6 +1022,115 @@ mod tests {
         assert!(
             !ids.contains(&"parent-task"),
             "another session's task must NOT leak into this session: {ids:?}"
+        );
+    }
+
+    // ── R5: the subagent gate must survive a mid-session discovery flush ──
+
+    fn skill_fixture(name: &str, path: &str) -> crate::implementations::skills::types::SkillInfo {
+        crate::implementations::skills::types::SkillInfo {
+            name: name.to_owned(),
+            description: format!("desc for {name}"),
+            path: path.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A child session whose discovery reminder fires: the flush replaces
+    /// `AvailableSkills`, so it must re-apply the gate. The denylist resource is
+    /// installed by `subagent_skill_listing` in the real spawn path; seeding it
+    /// here marks the session as a subagent exactly the same way.
+    #[tokio::test]
+    async fn pending_flush_keeps_the_subagent_gate_closed() {
+        use crate::types::resources::AvailableSkills;
+        use crate::types::skill_discovery_tracker::{SkillManager, SubagentSkillDenylist};
+
+        let bridge = ToolBridge::for_test();
+        {
+            let mut res = bridge.registry.resources.lock().await;
+            let tracker = res.get_or_default::<SkillManager>();
+            tracker.seed(
+                None,
+                None,
+                vec![skill_fixture("check-work", "/ck/SKILL.md")],
+                None,
+                None,
+                None,
+            );
+            // Drain the startup baseline: the bypass is the discovery flush.
+            let _ = tracker.take_pending();
+            tracker.add_discovered(vec![
+                skill_fixture("fresh-safe", "/fs/SKILL.md"),
+                skill_fixture("wecom-unified", "/wu/SKILL.md"),
+                skill_fixture("bid-review", "/br/SKILL.md"),
+            ]);
+            // What `subagent_skill_listing` installs for a child session.
+            res.insert(SubagentSkillDenylist::default());
+        }
+
+        bridge
+            .apply_pending_skill_update()
+            .await
+            .expect("the queued discovery must flush");
+
+        let res = bridge.registry.resources.lock().await;
+        let available = &res
+            .get::<AvailableSkills>()
+            .expect("the flush must install the runtime set")
+            .0;
+        let names: Vec<&str> = available.iter().map(|s| s.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"fresh-safe"),
+            "the safe discovery must stay activatable: {names:?}"
+        );
+        for denied in ["wecom-unified", "bid-review"] {
+            assert!(
+                !names.contains(&denied),
+                "{denied} must not be activatable after the flush: {names:?}"
+            );
+        }
+        assert!(
+            res.contains::<SubagentSkillDenylist>(),
+            "the gate must still be installed after the flush"
+        );
+    }
+
+    /// Requirement 3: a primary session installs no denylist resource, so the
+    /// same flush path keeps its full catalog — the gate is a subagent-only
+    /// boundary, not a global one.
+    #[tokio::test]
+    async fn pending_flush_leaves_the_primary_session_ungated() {
+        use crate::types::resources::AvailableSkills;
+        use crate::types::skill_discovery_tracker::SkillManager;
+
+        let bridge = ToolBridge::for_test();
+        {
+            let mut res = bridge.registry.resources.lock().await;
+            let tracker = res.get_or_default::<SkillManager>();
+            tracker.seed(
+                None,
+                None,
+                vec![skill_fixture("check-work", "/ck/SKILL.md")],
+                None,
+                None,
+                None,
+            );
+            let _ = tracker.take_pending();
+            tracker.add_discovered(vec![skill_fixture("wecom-unified", "/wu/SKILL.md")]);
+        }
+
+        bridge
+            .apply_pending_skill_update()
+            .await
+            .expect("the queued discovery must flush");
+
+        let res = bridge.registry.resources.lock().await;
+        let available = &res.get::<AvailableSkills>().expect("runtime set installed").0;
+        let names: Vec<&str> = available.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"wecom-unified"),
+            "a primary session must keep wecom-unified activatable: {names:?}"
         );
     }
 }

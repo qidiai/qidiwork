@@ -108,6 +108,10 @@ pub(crate) use laziness::*;
 mod hooks_plugins;
 #[path = "acp_session_impl/mcp.rs"]
 mod mcp;
+// 载荷单价 tap（推进方案 v2.3 放行版）——纯观测层，主回路/子代理/compaction
+// 三路覆盖 + /context 域行。pub(crate)：helpers/session_compact.rs 也要调用。
+#[path = "acp_session_impl/payload_accounting.rs"]
+pub(crate) mod payload_accounting;
 #[path = "acp_session_impl/model_switch.rs"]
 mod model_switch;
 #[path = "acp_session_impl/prompt_queue.rs"]
@@ -130,9 +134,15 @@ use session_mode::*;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
 use sampler_turn::*;
+#[path = "acp_session_impl/reasoning_pregenerate.rs"]
+mod reasoning_pregenerate;
+use reasoning_pregenerate::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
+#[path = "acp_session_impl/tool_args_repair.rs"]
+mod tool_args_repair;
+use tool_args_repair::*;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
 use mcp_snapshot::*;
@@ -634,6 +644,18 @@ pub(crate) struct SessionActor {
     /// `reconstruct_full_config` threads it into the sampler config, and the
     /// sampler itself sends the matching `x-grok-doom-loop-check` header.
     pub(crate) doom_loop_recovery: Option<cf_sampling_types::DoomLoopRecoveryPolicy>,
+    /// Dynamic tool pipeline switch (P0-2 第二步, design doc
+    /// §6 Phase A) — **resolved once at session startup**
+    /// (`Config::resolve_dynamic_tools`, default `false`) and
+    /// frozen for the session's lifetime: a mid-session
+    /// config.toml edit must not change the live session's
+    /// defs (design doc A-4). Phase A semantics: every value
+    /// ships the full defs via the single assembly path
+    /// (`false` silently, `true` with a warn that the
+    /// resident/imported segmentation is not implemented yet —
+    /// design doc A-3, Sonnet 2.12: no half-implemented
+    /// on-state, no config validation rejection).
+    pub(crate) dynamic_tools: bool,
     /// Telemetry-only per-turn doom-loop recovery tally (attempts, whether a
     /// budget-spent accept happened, tightest trigger label). Accumulated by
     /// the event drainer, taken at turn end for the per-turn analytics event.
@@ -893,6 +915,19 @@ pub(crate) struct SessionActor {
     /// Set when the MCP server set changes and a reminder needs injection.
     /// Cleared by `maybe_inject_mcp_reminder` after injecting.
     pub(crate) mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// Phase C Reasoning-summary pre-generation reentrancy guard: held `true`
+    /// while a background pre-generation task runs, so the per-turn hook never
+    /// spawns a second one. Session-scoped (one pre-generation per session);
+    /// the task resets it to `false` on exit.
+    pub(crate) reasoning_pregenerating: Arc<std::sync::atomic::AtomicBool>,
+    /// N2 (step-5 第五方审计): end time of the last completed pre-generation
+    /// run, stamped by the background task on every completed run (success or
+    /// error; a panicking run leaves it unset, which conservatively allows the
+    /// next round). Read at claim time to enforce the cross-run minimum gap
+    /// (`reasoning_summarizer::CROSS_RUN_MIN_GAP`). The actor is
+    /// single-threaded, so a `Cell` suffices.
+    pub(crate) reasoning_pregen_last_run_end:
+        std::cell::Cell<Option<std::time::Instant>>,
     pub(crate) mcp_connecting_reminder_injected: std::cell::Cell<bool>,
     /// Wakes waiters when MCP background handshakes finish and
     /// `initializing_servers` is cleared. Used by
@@ -1275,7 +1310,7 @@ fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[C
     // world-readable conversation data (may contain sensitive tool outputs).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         if let Err(e) = builder.create(&dir) {
@@ -1617,6 +1652,24 @@ mod prompt_queue_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
 mod record_response_token_usage_tests;
+/// P0-2 A-closure: `/context` tool-definition accounting must
+/// match the per-turn tool-set caliber (shared web_search drop).
+#[cfg(test)]
+#[path = "acp_session_tests/tool_definition_caliber_tests.rs"]
+mod tool_definition_caliber_tests;
+/// P0-2 第二步 Phase A 验收（设计稿 §6 Phase A：
+/// A-1~A-4 + 契约 C-4 条件版 / C-7）——
+/// `dynamic_tools` 骨架的空操作定调、旗标纪律、
+/// plan 恒等与 meta 二元保留。
+#[cfg(test)]
+#[path = "acp_session_tests/dynamic_tools_phase_a_tests.rs"]
+mod dynamic_tools_phase_a_tests;
+/// P0-2 第二步 Phase B 验收（设计稿 §6 Phase B：C-10/11/12
+/// + 金标准全链 + imported 生命周期）——三段投影分流、
+/// append-only、use_tool 中转端到端。
+#[cfg(test)]
+#[path = "acp_session_tests/dynamic_tools_phase_b_tests.rs"]
+mod dynamic_tools_phase_b_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replay_buffer_send_update_tests.rs"]
 mod replay_buffer_send_update_tests;
@@ -1636,6 +1689,12 @@ mod rewrite_zero_turn_prefix_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/subagent_usage_fold_tests.rs"]
 mod subagent_usage_fold_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/subagent_skill_listing_tests.rs"]
+mod subagent_skill_listing_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/subagent_skill_listing_spawn_tests.rs"]
+mod subagent_skill_listing_spawn_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn_completion_emit_tests.rs"]
 mod turn_completion_emit_tests;
@@ -1811,6 +1870,9 @@ mod between_turn_completion_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/tool_args_repair_tests.rs"]
+mod tool_args_repair_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;

@@ -169,7 +169,11 @@ fn merge_tool_params(
     map: &serde_json::Map<String, serde_json::Value>,
 ) {
     for tc in &mut tool_config.tools {
-        if ids.contains(&tc.id.as_str()) {
+        // Namespace-agnostic: callers pass legacy `cf_tools::*` ids while live
+        // ToolConfigs render `Namespace:tool`; matching on the short name keeps
+        // both spellings firing (the ids were never migrated at rebrand time,
+        // which silently dropped web_fetch/bash/ask params injection).
+        if ids.iter().any(|i| *i == tc.id || short_tool_name(i) == short_tool_name(&tc.id)) {
             let params = tc.params.get_or_insert_with(serde_json::Map::new);
             for (k, v) in map {
                 params.insert(k.clone(), v.clone());
@@ -705,6 +709,18 @@ impl AgentBuilder {
             )));
         }
         if definition.inject_default_tools {
+            {
+                use cf_tools::implementations::think;
+                tool_config.tools.push((&think::ThinkImpl).into());
+            }
+            {
+                use cf_tools::implementations::browser;
+                tool_config.tools.push((&browser::NavigateImpl).into());
+                tool_config.tools.push((&browser::SnapshotImpl).into());
+                tool_config.tools.push((&browser::ClickImpl).into());
+                tool_config.tools.push((&browser::TypeImpl).into());
+                tool_config.tools.push((&browser::ReadImpl).into());
+            }
             if self.memory_backend.is_some() {
                 use cf_tools::implementations::memory;
                 tool_config
@@ -1136,6 +1152,8 @@ impl AgentBuilder {
                     self.context_window_tokens,
                     skill_budget_percent,
                     self.compat,
+                    self.skills_config.mode_or_default(),
+                    self.skills_config.essential_allow.clone(),
                 )
                 .await;
         }
@@ -1774,6 +1792,52 @@ mod tests {
         .await
         .unwrap()
     }
+    /// F4 regression: the default write-tool fallback must honour
+    /// `write_file_enabled`. A read-only/execute subagent has its write tool
+    /// filtered out of `tool_config` by capability mode; before this fix the
+    /// builder saw "no write tool" and re-injected `OpenCodeWriteTool`.
+    #[tokio::test]
+    async fn write_tool_not_reinjected_when_write_disabled() {
+        use cf_tools::computer::local::LocalTerminalBackend;
+        use cf_tools::notification::ToolNotificationHandle;
+
+        let build_names = |write_enabled: bool| async move {
+            let def = crate::config::AgentDefinition::default_qidi_build();
+            let agent = AgentBuilder::new(
+                std::env::temp_dir(),
+                Arc::new(LocalTerminalBackend::new()),
+                ToolNotificationHandle::noop(),
+            )
+            .from_definition(def)
+            .with_write_file_enabled(write_enabled)
+            .build()
+            .await
+            .unwrap();
+            agent
+                .tool_definitions()
+                .await
+                .iter()
+                .map(|d| d.function.name.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let enabled = build_names(true).await;
+        assert!(
+            enabled.iter().any(|n| n == "write"),
+            "default agent with write_file_enabled=true must expose the write tool: {enabled:?}"
+        );
+
+        let disabled = build_names(false).await;
+        assert!(
+            !disabled.iter().any(|n| n == "write"),
+            "write tool must not be re-injected when write_file_enabled=false: {disabled:?}"
+        );
+        assert!(
+            disabled.iter().any(|n| n == "read_file"),
+            "disabling writes must not remove unrelated read tools: {disabled:?}"
+        );
+    }
+
     /// Build a default agent under a session allowlist + the agent's own
     /// allowlist, returning the effective (short) tool names.
     async fn session_clamp_tool_names(
@@ -2185,7 +2249,7 @@ mod tests {
         .from_definition(definition)
         .with_web_search_config(WebSearchConfig::Enabled {
             api_key: "test-key".into(),
-            base_url: "https://api.x.ai/v1".into(),
+            base_url: "https://api.example.test/v1".into(),
             model: "test-web-search-model".into(),
             extra_headers: Default::default(),
             alpha_test_key: None,
@@ -2311,7 +2375,7 @@ mod tests {
         let web_search_config = if web_search_enabled {
             WebSearchConfig::Enabled {
                 api_key: "test-key".into(),
-                base_url: "https://api.x.ai/v1".into(),
+                base_url: "https://api.example.test/v1".into(),
                 model: "test-web-search-model".into(),
                 extra_headers: Default::default(),
                 alpha_test_key: None,

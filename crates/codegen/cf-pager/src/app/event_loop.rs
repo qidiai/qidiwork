@@ -572,10 +572,13 @@ pub(crate) async fn run(
             }
         }
     }
+    // --tools/--disallowed-tools are TUI + headless flags
+    // (threaded through ConnectFlags → cli_agent_overrides in
+    // both modes; leader mode warns and ignores them — agent
+    // config is fixed at leader startup), so they no longer
+    // belong on this headless-only warning list.
     let headless_only: &[(&str, bool)] = &[
         ("--agents", args.agents_json.is_some()),
-        ("--tools", args.cli_tools.is_some()),
-        ("--disallowed-tools", args.cli_disallowed_tools.is_some()),
         ("--max-turns", args.max_turns.is_some()),
     ];
     for &(flag, set) in headless_only {
@@ -656,10 +659,12 @@ pub(crate) async fn run(
             };
         } else {
             // --force-login: find the grok.com method from the advertised list
+            // Accept both the canonical `qidi.com` id and the legacy
+            // `grok.com` spelling (pre-rebrand sessions/peers).
             let grok_com = connection
                 .auth_methods
                 .iter()
-                .find(|m| m.id().0.as_ref() == "grok.com");
+                .find(|m| cf_shell::agent::auth_method::is_qidi_com_method_id(m.id().0.as_ref()));
             if let Some(method) = grok_com {
                 app.login_label = Some(method.name().to_string());
                 app.login_method_id = Some(method.id().clone());
@@ -1141,7 +1146,12 @@ pub(crate) async fn run(
                 Err(e) => {
                     // VTE terminals / SSH PTYs can emit garbage that crossterm's
                     // parser rejects; skip transient errors rather than kill the
-                    // TUI (ratatui#1275), bailing only if they never stop.
+                    // TUI (ratatui#1275). Sustained error storms (late startup
+                    // probe replies, PTY desync) no longer exit the reader: a
+                    // dead reader permanently kills keyboard+mouse input for a
+                    // live TUI with no self-healing. Each crossterm read()
+                    // parses independently, so backing off and retrying once
+                    // the garbage subsides is safe.
                     consecutive_event_errors += 1;
                     if consecutive_event_errors >= 50 {
                         let tiers = (consecutive_event_errors - 50).min(6);
@@ -1203,15 +1213,6 @@ pub(crate) async fn run(
     let mut subscription_watch_at: Option<Instant> = if app.subscription_watch_wanted() {
         app.subscription_watch_interval()
             .map(|iv| Instant::now() + iv)
-    } else {
-        None
-    };
-
-    // Office-artifact manifest watch (see `app::office_watch`). Fires
-    // immediately at startup so artifacts written before this session
-    // render without waiting a tick.
-    let mut office_watch_at: Option<Instant> = if app.office_watch_wanted() {
-        Some(Instant::now())
     } else {
         None
     };
@@ -1540,7 +1541,7 @@ pub(crate) async fn run(
             } else if app.voice_cmd_tx.is_none() {
                 app.voice_state = VoiceState::Idle;
                 app.voice_ui_active = false;
-                app.show_toast("语音通道无法启动——请重启 QIDI");
+                app.show_toast("Voice pipeline could not start — restart qidi");
             } else {
                 // Defensive: a queued start with the pipeline already up (which
                 // shouldn't occur) — drop it so we don't re-enter every tick.
@@ -1595,15 +1596,6 @@ pub(crate) async fn run(
             && let Some(iv) = app.subscription_watch_interval()
         {
             subscription_watch_at = Some(Instant::now() + iv);
-        }
-
-        // Office watch: constant cadence; `office_watch_wanted` also
-        // covers the late-arm case where the workspace dir is created
-        // mid-session.
-        if office_watch_at.is_none() && app.office_watch_wanted() {
-            office_watch_at = Some(
-                Instant::now() + crate::app::office_watch::OFFICE_WATCH_INTERVAL,
-            );
         }
 
         // Future that sleeps until the next animation tick, or waits forever if none.
@@ -1668,13 +1660,6 @@ pub(crate) async fn run(
 
         let subscription_watch = async {
             match subscription_watch_at {
-                Some(at) => sleep_until(at).await,
-                None => std::future::pending().await,
-            }
-        };
-
-        let office_watch = async {
-            match office_watch_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -1998,19 +1983,6 @@ pub(crate) async fn run(
                 let effs = app.fire_subscription_check("watch");
                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                     break;
-                }
-            }
-
-            _ = office_watch => {
-                office_watch_at = None;
-                // Redraw only when the poll actually mutated the scrollback
-                // (artifact block pushed/replaced); otherwise the block would
-                // stay invisible until the next unrelated input event, since
-                // idle turns stop the animation tick.
-                if app.poll_office_watch() {
-                    app.draw(terminal);
-                    last_draw_at = Instant::now();
-                    draw_scheduled_at = None;
                 }
             }
 

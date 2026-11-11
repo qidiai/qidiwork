@@ -953,7 +953,7 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         profile_formats: manager.profile_formats().to_vec(),
     }
 }
-const PROD_COMPUTER_HUB_URL: &str = "wss://qidiwork.qidiai.ltd/v1/tools";
+const PROD_COMPUTER_HUB_URL: &str = "wss://computer-hub.grok.com/v1/tools";
 const WORKSPACE_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 fn workspace_err(message: impl Into<String>) -> ControlError {
     ControlError {
@@ -2413,7 +2413,7 @@ mod tests {
     /// Relay demand gate (relay-on-demand): Stdio registrations must NOT
     /// signal relay demand — a leader serving only interactive clients (TUI
     /// dashboard, IDE) keeps the grok.com relay off. The first Headless
-    /// registration (devbox / `grok agent headless` flow) flips the watch so
+    /// registration (devbox / `qidi agent headless` flow) flips the watch so
     /// `run_leader` starts the deferred relay connection.
     #[tokio::test]
     async fn relay_demand_signals_only_on_headless_registration() {

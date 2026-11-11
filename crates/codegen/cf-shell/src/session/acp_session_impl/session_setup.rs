@@ -57,6 +57,13 @@ impl SessionActor {
     /// conversation is the inherited zero-turn shape). Both drain the current
     /// bridge's pending baseline.
     ///
+    /// A subagent (`PromptAudience::Subagent`) conversation is handled
+    /// separately: its listing is injected read-only via
+    /// [`super::spawn::inject_subagent_baseline_listing`] (the same helper the
+    /// spawn path uses), and no pending effects are returned. Reaching this
+    /// method for a subagent only happens on the zero-turn rebuild, never at
+    /// spawn (subagents do not send `SessionCommand::Initialize`).
+    ///
     /// Idempotent: strips any existing baseline skill reminder before
     /// injecting, so a reminder-using -> reminder-using rebuild -- where
     /// `rewrite_zero_turn_prefix` keeps the inherited reminder (it only drops it
@@ -83,6 +90,26 @@ impl SessionActor {
                 Some(cf_sampling_types::SyntheticReason::SystemReminder)
             )
         });
+        // F2R: a subagent session injects its baseline skill listing
+        // unconditionally and read-only against the ledger. Its real
+        // initialization point is the spawn path
+        // (`spawn_session_actor` -> `inject_subagent_baseline_listing`) because
+        // subagents never send `SessionCommand::Initialize`; this branch covers
+        // the zero-turn agent rebuild (`handle_rebuild_agent_for_definition`),
+        // which a subagent can also drive. Both share one implementation, so
+        // the projection/ledger policy cannot drift.
+        if self.rebuild_spec.prompt_audience
+            == cf_agent::prompt::context::PromptAudience::Subagent
+        {
+            super::spawn::inject_subagent_baseline_listing(
+                conversation,
+                &bridge,
+                &self.rebuild_spec.skills_config,
+                is_cursor,
+            )
+            .await;
+            return None;
+        }
         let effects = bridge.apply_pending_skill_update().await?;
         if let Some(item) = self.wrap_skill_reminder(&effects) {
             conversation.push(item);
@@ -251,10 +278,14 @@ impl SessionActor {
             return None;
         }
         let text = effects.system_reminder.as_deref()?;
+        Some(self.wrap_reminder_text(text))
+    }
+    /// Build the wrapped `<system[_-]reminder>` carrier around `text` using
+    /// the harness's current tag. Shared by [`Self::wrap_skill_reminder`]
+    /// (effects path) and the subagent baseline path.
+    fn wrap_reminder_text(&self, text: &str) -> ConversationItem {
         let tag = self.reminder_wrapper_tag();
-        Some(ConversationItem::system_reminder(format!(
-            "<{tag}>\n{text}\n</{tag}>"
-        )))
+        ConversationItem::system_reminder(format!("<{tag}>\n{text}\n</{tag}>"))
     }
     /// Apply skill update side-effects produced by the tools layer.
     ///
@@ -347,7 +378,13 @@ impl SessionActor {
         };
         let current_model = &current_config.model;
         let base_url = &current_config.base_url;
-        if !crate::util::is_cli_chat_proxy_url(base_url) {
+        // Test builds allow the mock cli-chat-proxy on localhost; production
+        // builds compile to the shared predicate unchanged.
+        #[cfg(test)]
+        let trusted = crate::util::is_cli_chat_proxy_url_for_idle_refresh(base_url);
+        #[cfg(not(test))]
+        let trusted = crate::util::is_cli_chat_proxy_url(base_url);
+        if !trusted {
             return;
         }
         tracing::info!(
@@ -355,7 +392,6 @@ impl SessionActor {
             threshold_secs = Self::IDLE_REFRESH_THRESHOLD_SECS,
             "Session resumed after idle — refreshing model metadata from cli-chat-proxy"
         );
-        let creds = self.chat_state_handle.get_credentials().await;
         let Some(ref am) = self.auth_manager else {
             tracing::debug!("No auth manager available for model metadata refresh");
             return;
@@ -392,20 +428,35 @@ impl SessionActor {
                 crate::http::process_client_mode(),
             )
             .timeout(std::time::Duration::from_secs(5));
-        let response = match request.send().await {
-            Ok(r) => r,
+        let req = match request.build() {
+            Ok(req) => req,
             Err(e) => {
-                tracing::warn!(error = % e, "Failed to fetch models for idle refresh");
+                tracing::warn!(error = % e, "Failed to build models request for idle refresh");
                 return;
             }
         };
+        let (response, sent_bearer) =
+            match cf_auth::execute_with_stamp(&middleware_client, req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = % e, "Failed to fetch models for idle refresh");
+                    return;
+                }
+            };
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            // Attribute the send-time stamped bearer (the credential
+            // that actually went on the wire), not a pre-auth
+            // `get_credentials` snapshot: `am.auth()` above may have
+            // refreshed the token after any such snapshot was taken,
+            // and the middleware stamps the live one. Re-reading a
+            // snapshot here would attribute a stale credential on
+            // every post-refresh 401.
             crate::auth::attribution::record_consumer_401(
                 am,
                 None,
                 crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
                 "",
-                creds.api_key.as_deref(),
+                sent_bearer.as_ref().map(|s| s.0.as_str()),
             );
         }
         let result = if !response.status().is_success() {
@@ -558,12 +609,14 @@ impl SessionActor {
             .unwrap_or(0);
         let use_backend_search =
             self.agent.borrow().backend_search_enabled() && self.supports_backend_search.get();
-        let tool_defs: Vec<_> = self
-            .prepare_tool_definitions_inner()
-            .await
-            .into_iter()
-            .filter(|td| !use_backend_search || td.function.name != "web_search")
-            .collect();
+        // Same `web_search` drop as the per-turn tool list
+        // (`turn_base_tool_specs`) — shared via
+        // `drop_web_search_for_backend_search`, so the /context
+        // token/count accounting matches the toolset a turn sends.
+        let tool_defs = drop_web_search_for_backend_search(
+            self.prepare_tool_definitions_inner().await,
+            use_backend_search,
+        );
         let tool_definitions_count = tool_defs.len();
         let tool_definitions_tokens = cf_chat_state::estimate_tool_definitions_tokens(&tool_defs);
         let message_count = self.chat_state_handle.get_conversation_len().await;
@@ -627,6 +680,12 @@ impl SessionActor {
                 &announcement.text,
                 announcement.server_count,
             ));
+        }
+        // ── 载荷单价 tap 域行（P2-6）：tap 观测过才产生行（注册表为空 =
+        // 零行 = /context 零行为变更）；经既有 TokenUsageCategory→LegendRow
+        // 管道直达 /context，cf-pager 泛化渲染零改动。
+        for row in super::payload_accounting::context_rows(self.session_info.id.0.as_ref()) {
+            rows.push(row);
         }
         rows
     }

@@ -1885,7 +1885,7 @@ fn media_gen_block(tc: &acp::ToolCall, success: bool) -> RenderBlock {
     RenderBlock::ToolCall(ToolCallBlock::Other(block))
 }
 /// Plain-text body of a media-variant tool that returned `ToolOutput::Text`
-/// rather than a media file (the free / X Basic SuperGrok-upsell short-circuit).
+/// rather than a media file (the free / X Basic SuperQIDI-upsell short-circuit).
 /// `None` for real media outputs — including ZDR upload-only results — so their
 /// typed rendering is untouched.
 fn media_gen_text(tc: &acp::ToolCall) -> Option<String> {
@@ -6035,13 +6035,13 @@ mod tests {
         );
     }
     /// A tier-restricted (free / X Basic) imagine call short-circuits with the
-    /// SuperGrok upsell as `ToolOutput::Text` on a `Completed` status. The media
+    /// SuperQIDI upsell as `ToolOutput::Text` on a `Completed` status. The media
     /// renderer has no file to open, so it must surface the upsell text in the
     /// card body (not a bare title) and must NOT mark the card as an error.
     #[test]
     fn tier_restricted_media_shows_upsell_text_not_error() {
-        let upsell = "Image generation is a SuperGrok feature. Upgrade at \
-             https://grok.com/supergrok?referrer=cf-tools";
+        let upsell = "Image generation is a SuperQIDI feature. Upgrade at \
+             https://qidiai.ltd/superqidi?referrer=cf-tools";
         let output = ToolOutput::Text(cf_tools::types::output::TextOutput::from(upsell));
         let tc = acp::ToolCall::new(
             acp::ToolCallId::new(Arc::from("tier-restricted-img")),
@@ -6068,7 +6068,7 @@ mod tests {
                 .output
                 .as_deref()
                 .unwrap_or_default()
-                .contains("SuperGrok"),
+                .contains("SuperQIDI"),
             "upsell text must be shown in the card body, got: {:?}",
             block.output
         );

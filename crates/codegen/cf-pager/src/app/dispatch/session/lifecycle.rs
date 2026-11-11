@@ -133,7 +133,9 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
     if in_git_repo {
         match app.new_session_worktree_mode {
             WorktreeMode::Always => {
-                dispatch_new_worktree_session(app, None, None, None, None, None, None)
+                dispatch_new_worktree_session(
+                    app, None, None, None, None, None, None, None,
+                )
             }
             WorktreeMode::Never => dispatch_new_session_inner(app, None),
             WorktreeMode::Ask => {
@@ -267,18 +269,87 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
 ) -> Vec<Effect> {
-    let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
+    let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id, None);
     effects
 }
 /// Sibling that returns the new `AgentId` alongside
 /// the effects. Used by `dispatch_dashboard_dispatch` so it doesn't
 /// rely on the (correct-but-brittle) `app.agents.last()` lookup.
+///
+/// F8: `agent_name` is the dashboard-staged agent type (`/agent <name>`);
+/// `None` for every non-dashboard path so those stay byte-identical.
 pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
+    agent_name: Option<String>,
 ) -> (AgentId, Vec<Effect>) {
-    let mut effects =
-        unregister_session_effect(get_active_agent(app).and_then(|a| a.session.session_id.clone()));
+    // `/new` switches away without ever firing `on_session_end`, so the
+    // outgoing session's memory would otherwise never be persisted (the
+    // "flush black hole"). Best-effort: capture the outgoing agent + session
+    // BEFORE we unregister/switch away and fire a `/flush` at it. `/flush` is
+    // a shell-side ACP builtin (the pager just passes the text through), and
+    // `Effect::SendPrompt` carries an explicit `agent_id` + `session_id`, so
+    // this targets the OLD session — never the one we're about to create.
+    // Fire-and-forget: the effect layer only spawns a task and logs failures;
+    // an unknown/absent session is a silent no-op (`handle_prompt_response`
+    // uses `if let Some(agent) = app.agents.get_mut(&agent_id)`).
+    //
+    // Gate the flush on the outgoing session actually advertising `/flush`.
+    // The shell registers `/flush` behind `BuiltinGate::Memory`
+    // (`cf-shell/src/session/slash_commands.rs`) and only advertises it via
+    // `AvailableCommandsUpdate` while that gate is open
+    // (`send_available_commands_update` filters through
+    // `slash_commands::available_commands` → `CommandAvailability::allows`).
+    // With the memory gate CLOSED the command is NOT advertised, so the shell
+    // resolver would treat a stray "/flush" as an ordinary user prompt — an
+    // extra LLM turn that pollutes the outgoing session's history instead of
+    // flushing it.
+    //
+    // Honesty note on what this guard does and does not cover:
+    // `available_commands` is only a *snapshot* taken at session start (and
+    // refreshed on each `AvailableCommandsUpdate`), so this check is
+    // best-effort protection against misfiring — NOT a live guarantee that the
+    // memory gate is open. A mid-session gate change such as `/memory off` is
+    // not reflected here until the shell pushes a fresh update, so the "stale
+    // snapshot" window (gate closed, no update delivered yet) is left
+    // uncovered by this guard; the shell narrows that window by
+    // re-advertising the commands after a switch.
+    //
+    // Resolve the outgoing session off `active_view` directly rather than via
+    // `get_active_agent`: the latter penetrates into a focused subagent view
+    // (`ctx.rs:38-49`), and that child's `session.available_commands` is never
+    // populated → the guard would always read "no /flush" and silently skip
+    // the flush whenever a subagent view is focused. The root `AgentView` is
+    // the one that owns the outgoing session.
+    let outgoing = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get(&id).and_then(|a| {
+            a.session.session_id.clone().map(|sid| {
+                let has_flush = a
+                    .session
+                    .available_commands
+                    .iter()
+                    .any(|c| c.name == "flush");
+                (a.session.id, sid, has_flush)
+            })
+        }),
+        _ => None,
+    };
+    let flushing_previous = outgoing
+        .as_ref()
+        .is_some_and(|(_, _, has_flush)| *has_flush);
+    let mut effects = Vec::new();
+    if let Some((old_agent_id, old_session_id, true)) = outgoing {
+        effects.push(Effect::SendPrompt {
+            agent_id: old_agent_id,
+            session_id: old_session_id,
+            text: "/flush".to_string(),
+            prompt_id: uuid::Uuid::new_v4().to_string(),
+            skill_token_ranges: Vec::new(),
+        });
+    }
+    effects.extend(unregister_session_effect(
+        get_active_agent(app).and_then(|a| a.session.session_id.clone()),
+    ));
     let (effective_cwd, inherit_worktree) = get_active_agent(app)
         .map(|a| (a.session.cwd.clone(), a.session.is_worktree))
         .unwrap_or_else(|| (app.cwd.clone(), false));
@@ -352,6 +423,11 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         agent.active_pane = ActivePane::Prompt;
     }
     switch_to_agent(app, agent_id, SwitchCause::New);
+    if flushing_previous {
+        // Routed to the freshly-activated (new) agent so the user actually
+        // sees it — the old agent is no longer the active view.
+        app.show_toast("Flushing memory for previous session\u{2026}");
+    }
     if app.screen_mode.is_minimal() {
         app.minimal_state.welcome_pending = true;
     }
@@ -372,6 +448,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             agent_id,
             cwd: effective_cwd,
             model_id,
+            agent_name,
             preferred_session_id,
             chat_kind,
         });
@@ -474,6 +551,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
                     worktree_label,
                     None,
                     None,
+                    None,
                     worktree_ref,
                     None,
                 ));
@@ -495,6 +573,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
                     app,
                     None,
                     worktree_label,
+                    None,
                     None,
                     None,
                     worktree_ref,
@@ -526,6 +605,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
                         worktree_label,
                         None,
                         None,
+                        None,
                         worktree_ref,
                         Some(sid),
                     ));
@@ -537,6 +617,7 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
                     app,
                     None,
                     worktree_label,
+                    None,
                     None,
                     None,
                     worktree_ref,
@@ -558,12 +639,16 @@ pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<
     effects
 }
 /// Create a placeholder agent in a new git worktree, then create a session.
+///
+/// F8: `agent_name` is the dashboard-staged agent type — `None` for the
+/// resume / CLI / fork paths (byte-identical to pre-F8 behavior).
 pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
     app: &mut AppView,
     load_session_id: Option<String>,
     label: Option<String>,
     prompt: Option<String>,
     model_id: Option<acp::ModelId>,
+    agent_name: Option<String>,
     git_ref: Option<String>,
     preferred_session_id: Option<String>,
 ) -> Vec<Effect> {
@@ -702,6 +787,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         label,
         git_ref,
         model_id,
+        agent_name,
         preferred_session_id,
         chat_kind,
     }];
@@ -717,7 +803,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
             Some(crate::app::session_startup::DeferredSessionStartup::NewWithId { session_id });
         return vec![];
     }
-    let (agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
+    let (agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None, None);
     for e in &mut effects {
         if let Effect::CreateSession {
             preferred_session_id,
@@ -788,6 +874,7 @@ pub(in crate::app::dispatch) fn skip_picker_and_create_session(
         agent_id,
         cwd: app.cwd.clone(),
         model_id: None,
+        agent_name: None,
         preferred_session_id,
         chat_kind,
         

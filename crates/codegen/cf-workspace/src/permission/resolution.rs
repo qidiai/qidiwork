@@ -223,7 +223,7 @@ fn find_project_grok_configs(cwd: &Path) -> Vec<PathBuf> {
     if let Some(ref root) = git_root {
         let mut current = Some(cwd.to_path_buf());
         while let Some(dir) = current {
-            let p = dir.join(".grok").join("config.toml");
+            let p = dir.join(".qidi").join("config.toml");
             if p.is_file() {
                 configs.push(p);
             }
@@ -234,7 +234,7 @@ fn find_project_grok_configs(cwd: &Path) -> Vec<PathBuf> {
         }
         configs.reverse();
     } else {
-        let p = cwd.join(".grok").join("config.toml");
+        let p = cwd.join(".qidi").join("config.toml");
         if p.is_file() {
             configs.push(p);
         }
@@ -1724,18 +1724,31 @@ mod tests {
         // Should return candidate paths
         assert!(!paths.is_empty(), "should return candidate paths");
 
-        // None should actually load
+        // None should actually load. The candidate list intentionally
+        // includes real global paths (~/.claude/settings.json), which on
+        // a developer machine exist: exclude anything under the real home
+        // so the assertion tests THIS fixture, not the host's state.
+        let real_home = dirs::home_dir();
         let loaded: Vec<_> = paths
             .iter()
+            .filter(|p| {
+                real_home
+                    .as_ref()
+                    .map(|h| !p.starts_with(h))
+                    .unwrap_or(true)
+            })
             .filter_map(|p| load_claude_settings(p))
             .collect();
         assert!(
             loaded.is_empty(),
-            "no settings files exist, none should load"
+            "no settings files exist (under the fixture), none should load"
         );
     }
 
     #[test]
+    /// HOME env override is ineffective on Windows (dirs::home_dir
+    /// uses the known-folder API), so this POSIX-env fixture is unix-only.
+    #[cfg(unix)]
     fn project_claude_absent_when_home_is_git_repo() {
         // Home-is-a-git-repo (dotfiles in $HOME): for a cwd under home, the
         // repo-root walk must NOT reach $HOME and treat `~/.claude` as
@@ -1966,6 +1979,11 @@ mod tests {
     }
 
     #[test]
+    /// Unix-only: the HOME/QIDI_HOME isolation this test relies on is
+    /// ineffective on Windows (dirs::home_dir uses the known-folder API
+    /// and ignores the env), where the real global ~/.claude env would
+    /// leak into the assertion.
+    #[cfg(unix)]
     fn load_claude_env_empty_when_no_settings() {
         // Isolate QIDI_HOME (claude-import marker) AND HOME (global `~/.claude`)
         // so neither a dev machine's import marker nor its real `~/.claude` env

@@ -77,6 +77,53 @@ pub fn validate_name_override(index: usize, tool_id: &str, name: Option<&str>, _
                 },
             ));
         }
+        // Reject anything outside the tool-id charset (`[a-zA-Z0-9_-]+`):
+        // name overrides become client-facing tool names, so they must be
+        // valid tool ids themselves (spaces, dots, `:` separators and
+        // non-ASCII would collide with the wire/tool-registry grammar).
+        if cf_tool_protocol::ToolId::new(n.to_string()).is_err() {
+            return Err(ToolConfigEntryError::new(
+                index,
+                tool_id.to_string(),
+                ToolConfigEntryErrorKind::NameOverrideInvalid {
+                    name: n.to_string(),
+                    error: "name override must be a valid tool id (charset [a-zA-Z0-9_-])"
+                        .to_string(),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject two config entries whose client-facing names collide after the
+/// relay's colon↔underscore folding (`foo:bar` vs `foo_bar`).
+///
+/// `validate_name_override` only sees one entry, so it cannot detect a
+/// collision between an override that drops a colon and another entry's
+/// colon-form id. Relays sanitize `:` to `_` on the wire, which would make
+/// both entries indistinguishable to the model — reject the config instead
+/// of dispatching to a guess.
+pub fn validate_wire_name_collisions(
+    tools: &[crate::registry::types::ToolConfig],
+) -> Result<(), ToolConfigEntryError> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (idx, tc) in tools.iter().enumerate() {
+        let client = tc.name_override.as_deref().unwrap_or(tc.id.as_str());
+        let folded = client.replace(':', "_");
+        if let Some(prev) = seen.insert(folded.clone(), idx) {
+            return Err(ToolConfigEntryError::new(
+                idx,
+                tc.id.clone(),
+                ToolConfigEntryErrorKind::NameOverrideInvalid {
+                    name: client.to_string(),
+                    error: format!(
+                        "client-facing name '{folded}' collides with tools[{prev}] in the \
+                         colon↔underscore wire domain"
+                    ),
+                },
+            ));
+        }
     }
     Ok(())
 }

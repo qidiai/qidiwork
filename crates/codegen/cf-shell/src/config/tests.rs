@@ -324,7 +324,7 @@ fn memory_config_defaults_are_correct() {
         assert!((mem.search.source_weights["session"] - 1.0).abs() < f32::EPSILON);
         assert!((mem.search.source_weights["global"] - 1.0).abs() < f32::EPSILON);
         assert!(mem.initial_injection.enabled);
-        assert_eq!(mem.initial_injection.min_score, None);
+        assert_eq!(mem.initial_injection.min_score, Some(0.35));
         assert!(mem.session.save_on_end);
         assert!(mem.flush.enabled);
         assert_eq!(mem.flush.soft_threshold_tokens, 4000);
@@ -2130,7 +2130,7 @@ fn validate_roles_accepts_valid_prompt_file() {
 #[test]
 fn discover_roles_loads_from_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grok").join("roles");
+    let roles_dir = tmp.path().join(".qidi").join("roles");
     std::fs::create_dir_all(&roles_dir).unwrap();
     std::fs::write(
             roles_dir.join("reviewer.toml"),
@@ -2149,7 +2149,7 @@ fn discover_roles_loads_from_directory() {
 #[test]
 fn discover_roles_inline_takes_precedence() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grok").join("roles");
+    let roles_dir = tmp.path().join(".qidi").join("roles");
     std::fs::create_dir_all(&roles_dir).unwrap();
     std::fs::write(
             roles_dir.join("researcher.toml"),
@@ -2173,7 +2173,7 @@ fn discover_roles_inline_takes_precedence() {
 #[test]
 fn discover_roles_ignores_non_toml_files() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let roles_dir = tmp.path().join(".grok").join("roles");
+    let roles_dir = tmp.path().join(".qidi").join("roles");
     std::fs::create_dir_all(&roles_dir).unwrap();
     std::fs::write(roles_dir.join("readme.md"), "This is not a role definition")
         .unwrap();
@@ -2222,7 +2222,7 @@ fn persona_lookup_returns_none_for_unknown() {
 #[test]
 fn discover_personas_loads_from_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().join(".grok").join("personas");
+    let dir = tmp.path().join(".qidi").join("personas");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
             dir.join("friendly.toml"),
@@ -2237,7 +2237,7 @@ fn discover_personas_loads_from_directory() {
 #[test]
 fn discover_personas_inline_takes_precedence() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().join(".grok").join("personas");
+    let dir = tmp.path().join(".qidi").join("personas");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("strict.toml"), r#"instructions = "File-based strict""#)
         .unwrap();
@@ -2254,16 +2254,19 @@ fn discover_personas_inline_takes_precedence() {
         Some("Inline strict"),
     );
 }
+// Unix-only: the user layer is planted under a HOME override, which
+// dirs::home_dir() ignores on Windows (reads the OS profile).
+#[cfg(unix)]
 #[test]
 fn bundled_personas_and_roles_have_lowest_priority_in_resolve_order() {
     let tmp = tempfile::TempDir::new().unwrap();
     let home = tmp.path().join("home");
     let workspace = tmp.path().join("workspace");
-    let bundled = home.join(".grok").join("bundled");
-    std::fs::create_dir_all(workspace.join(".grok").join("roles")).unwrap();
-    std::fs::create_dir_all(workspace.join(".grok").join("personas")).unwrap();
-    std::fs::create_dir_all(home.join(".grok").join("roles")).unwrap();
-    std::fs::create_dir_all(home.join(".grok").join("personas")).unwrap();
+    let bundled = home.join(".qidi").join("bundled");
+    std::fs::create_dir_all(workspace.join(".qidi").join("roles")).unwrap();
+    std::fs::create_dir_all(workspace.join(".qidi").join("personas")).unwrap();
+    std::fs::create_dir_all(home.join(".qidi").join("roles")).unwrap();
+    std::fs::create_dir_all(home.join(".qidi").join("personas")).unwrap();
     std::fs::create_dir_all(bundled.join("roles")).unwrap();
     std::fs::create_dir_all(bundled.join("personas")).unwrap();
     std::fs::write(
@@ -2575,7 +2578,7 @@ fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
             r#"
 [endpoints]
 cf_api_base_url = "https://inference.acme-corp.example/xai/v1"
-cli_chat_proxy_base_url = "https://api.qidiai.ltd/v1"
+cli_chat_proxy_base_url = "https://cli-chat-proxy.grok.com/v1"
 
 [model.cf-tools]
 base_url = "https://inference.acme-corp.example/xai/v1"
@@ -2616,7 +2619,7 @@ trace_upload_endpoint_url = "https://s3.acme-corp.example"
         .unwrap();
     assert_eq!(
         cfg.endpoints.resolve_managed_config_url(),
-        "https://api.qidiai.ltd/v1/deployment/config"
+        "https://cli-chat-proxy.grok.com/v1/deployment/config"
     );
     assert!(! cfg.endpoints.resolve_managed_config_url().contains("acme-corp"));
     assert_eq!(
@@ -2678,13 +2681,13 @@ fn config_layers_system_managed_lowest_priority() {
 #[test]
 fn apply_requirements_value_overrides_user_settings() {
     let raw_config: toml::Value = toml::from_str(
-            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\ntelemetry = true\nfeedback = true\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[telemetry]\ntrace_upload = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\nweb_search = \"user-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\nxai_api_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
+            "[cli]\nauto_update = true\nchannel = \"beta\"\n\n[features]\ntelemetry = true\nfeedback = true\nlsp_tools = true\nweb_fetch = true\nwrite_file = true\n\n[telemetry]\ntrace_upload = true\n\n[ui]\nyolo = true\n\n[models]\ndefault = \"user-model\"\nweb_search = \"user-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://user-proxy.example/v1\"\ncf_api_base_url = \"https://user-api.example/v1\"\nmodels_base_url = \"https://user-models.example/v1\"\nmodels_list_url = \"https://user-models.example/v1/models\"\n",
         )
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw_config).unwrap();
     cfg.default_yolo_mode = true;
     let requirements: toml::Value = toml::from_str(
-            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\ntelemetry = false\nfeedback = false\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\nmixpanel_token = \"enterprise-mp-token\"\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\nweb_search = \"managed-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\nxai_api_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\ntrace_upload_endpoint_url = \"https://s3.custom.example.com\"\ntrace_upload_credentials = '{\"aws_access_key_id\":\"AKTEST\",\"aws_secret_access_key\":\"secret\"}'\n",
+            "[cli]\nauto_update = false\nchannel = \"stable\"\n\n[features]\ntelemetry = false\nfeedback = false\nlsp_tools = false\nweb_fetch = false\nwrite_file = false\nremote_fetch = false\n\n[telemetry]\ntrace_upload = false\nmixpanel_enabled = false\nmixpanel_token = \"enterprise-mp-token\"\n\n[ui]\nyolo = false\n\n[models]\ndefault = \"managed-model\"\nweb_search = \"managed-ws-model\"\n\n[endpoints]\ncli_chat_proxy_base_url = \"https://managed-proxy.example/v1\"\ncf_api_base_url = \"https://managed-api.example/v1\"\nmodels_base_url = \"https://managed-models.example/v1\"\nmodels_list_url = \"https://managed-models.example/v1/models\"\ndeployment_key = \"enterprise-deploy-key-should-not-log\"\ntrace_upload_endpoint_url = \"https://s3.custom.example.com\"\ntrace_upload_credentials = '{\"aws_access_key_id\":\"AKTEST\",\"aws_secret_access_key\":\"secret\"}'\n",
         )
         .unwrap();
     let source = RequirementSource::Requirements {
@@ -2845,7 +2848,10 @@ fn validate_hooks_path_rejects_relative_path() {
 }
 #[test]
 fn validate_hooks_path_rejects_outside_grok_home() {
-    let result = validate_hooks_path("/tmp/evil-hooks");
+    // Must be a platform-absolute path: "/tmp/..." is relative on Windows
+    // (no drive letter) and trips the "must be absolute" gate first.
+    let outside = std::env::temp_dir().join("evil-hooks");
+    let result = validate_hooks_path(outside.to_str().unwrap());
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
@@ -2963,7 +2969,7 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
     git2::Repository::init(repo.path()).unwrap();
-    let grok = repo.path().join(".grok");
+    let grok = repo.path().join(".qidi");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(
             grok.join("config.toml"),
@@ -3029,7 +3035,7 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
     std::fs::create_dir_all(&plugin_dir).unwrap();
     std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"cfgpath-probe"}"#)
         .unwrap();
-    let grok = cwd.join(".grok");
+    let grok = cwd.join(".qidi");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(
             grok.join("config.toml"),
@@ -3092,7 +3098,7 @@ fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
     let _sim = simulate_release_build();
     let repo = tempfile::tempdir().unwrap();
     git2::Repository::init(repo.path()).unwrap();
-    let grok = repo.path().join(".grok");
+    let grok = repo.path().join(".qidi");
     std::fs::create_dir_all(&grok).unwrap();
     std::fs::write(grok.join("config.toml"), "[plugins]\npaths = [\"./proj-plugin\"]\n")
         .unwrap();

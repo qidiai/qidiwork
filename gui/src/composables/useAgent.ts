@@ -18,6 +18,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { initNotifyPermission, isWindowFocused, notify, notifyThrottled } from "../services/notify";
 import { parseUsageMeta, accumulateUsage, emptySessionUsage, type UsageInfo, type SessionUsage } from "../services/usage";
 import { currentWorkspaceName, switchTask } from "./useOffice";
+import { forgetDocuments } from "./useOfficeFiles";
 
 export interface ToolCallItem {
   toolCallId: string;
@@ -260,6 +261,8 @@ interface SessionBucket {
 
 const buckets = ref<Record<string, SessionBucket>>({});
 const activeId = ref<string>("");
+/** 最近一次成功新建的会话 id(仅 startSession 写入;恢复/切换不动)。 */
+const lastCreatedSessionId = ref<string>("");
 const connected = ref(false);
 const lastError = ref("");
 let messageId = 0;
@@ -267,6 +270,18 @@ let listenersBound = false;
 
 /** 权限请求 FIFO:多会话并发审批时排队展示,不互相覆盖。 */
 const permissionQueue = ref<PermissionState[]>([]);
+
+/** 删除在途 / 已删除的会话 id:界面据此中止准备、堵住新发送与迟到事件。 */
+const deletingSessionIds = ref<Set<string>>(new Set());
+const removedSessionIds = ref<Set<string>>(new Set());
+
+/** 同 id 删除去重:在途即复用同一 promise,绝不重复请求后端。 */
+const deleteInFlight = new Map<string, Promise<string>>();
+
+/** 会话是否正在删除或已删除(空 id 的兜底桶不参与生命周期)。 */
+function isSessionBlocked(id: string | undefined | null): boolean {
+  return !!id && (deletingSessionIds.value.has(id) || removedSessionIds.value.has(id));
+}
 
 /** 会话创建前的系统提示(如自动连接失败):暂存,首个桶创建时补挂。 */
 let pendingSystem: ChatMessage[] = [];
@@ -322,6 +337,14 @@ export function pushSystem(text: string): void {
   } else {
     pendingSystem.push(newSystemMessage(text));
   }
+}
+
+/** 权限相关提示只落请求所属会话:删除中/已删除不提示,也不串写到当前视图。 */
+function pushPermissionNotice(sessionId: string, text: string): void {
+  if (isSessionBlocked(sessionId)) return;
+  const bucket = bucketOf(sessionId);
+  if (bucket) pushBucketSystem(bucket, text);
+  else if (!sessionId || sessionId === activeId.value) pushSystem(text);
 }
 
 function pushAssistantChunk(bucket: SessionBucket, text: string) {
@@ -392,12 +415,15 @@ const sessionTask = new Map<string, string>();
 
 /** 登记某会话的 cwd(续接点击处已知,免去额外拉取)。 */
 export function rememberSessionCwd(id: string, cwd: string): void {
-  if (id && cwd) sessionCwd.set(id, cwd);
+  // 已删除会话不再接受登记:迟到快照不得重建缓存
+  if (!id || !cwd || removedSessionIds.value.has(id)) return;
+  sessionCwd.set(id, cwd);
 }
 
 /** 登记某会话的办公工作区绑定(新建/续接点击处已知,免去额外拉取)。 */
 export function rememberSessionBinding(id: string, task?: string | null): void {
-  if (id && task) sessionTask.set(id, task);
+  if (!id || !task || removedSessionIds.value.has(id)) return;
+  sessionTask.set(id, task);
 }
 
 /** 登记簿整表加载一次(并发去重:崩溃恢复会同时抛多个 session_restored)。 */
@@ -410,6 +436,8 @@ async function ensureRegistryLoaded(): Promise<void> {
           { session_id: string; cwd: string; task?: string | null }[]
         >("sessions_history");
         for (const h of list) {
+          // await 边界:已删除会话的迟到快照不得重建 cwd/绑定缓存
+          if (removedSessionIds.value.has(h.session_id)) continue;
           sessionCwd.set(h.session_id, h.cwd);
           if (h.task) sessionTask.set(h.session_id, h.task);
         }
@@ -425,27 +453,33 @@ async function ensureRegistryLoaded(): Promise<void> {
 
 /** 取会话 cwd:先查缓存,未命中则拉一次登记簿(失败静默,回退 null)。 */
 async function cwdFor(id: string): Promise<string | null> {
+  if (!id || removedSessionIds.value.has(id)) return null;
   const cached = sessionCwd.get(id);
   if (cached) return cached;
   await ensureRegistryLoaded();
+  if (removedSessionIds.value.has(id)) return null;
   return sessionCwd.get(id) ?? null;
 }
 
 /** 取会话绑定的办公工作区名:先查缓存,未命中则拉一次登记簿(失败静默)。 */
 async function taskFor(id: string): Promise<string | null> {
+  if (!id || removedSessionIds.value.has(id)) return null;
   const cached = sessionTask.get(id);
   if (cached) return cached;
   await ensureRegistryLoaded();
+  if (removedSessionIds.value.has(id)) return null;
   return sessionTask.get(id) ?? null;
 }
 
 /** 活动会话切换时:按登记簿绑定把产物面板切到该会话的工作区(会话 → 面板
  * 单向同步)。无绑定/读取失败保持现状,不打扰用户当前视图。 */
 async function syncWorkspaceForSession(id: string): Promise<void> {
-  if (!id) return;
+  if (!id || isSessionBlocked(id)) return;
   try {
     const task = await taskFor(id);
-    if (task) await switchTask(task);
+    // await 边界:已删/已切走时不得回调,避免旧任务的同步抢走新视图
+    if (!task || activeId.value !== id || isSessionBlocked(id)) return;
+    await switchTask(task);
   } catch {
     /* 面板同步失败:保持现状,不阻断会话切换 */
   }
@@ -503,6 +537,11 @@ function toReplayMessages(raws: RawTranscriptMessage[]): ChatMessage[] {
   return out;
 }
 
+/** 回放目标是否仍有效(桶仍在册且未被删除):await 边界用来丢弃迟到结果。 */
+function isReplayTargetValid(bucket: SessionBucket): boolean {
+  return bucketOf(bucket.id) === bucket && !isSessionBlocked(bucket.id);
+}
+
 /** 回放某会话最近若干条历史(续接/恢复成功后调用,失败静默降级)。 */
 async function injectReplay(bucket: SessionBucket, cwd: string): Promise<void> {
   let page: TranscriptPage;
@@ -513,9 +552,11 @@ async function injectReplay(bucket: SessionBucket, cwd: string): Promise<void> {
       limit: REPLAY_TAIL_LIMIT,
     });
   } catch (e) {
-    pushBucketSystem(bucket, `历史消息回放不可用:${String(e)}`);
+    if (isReplayTargetValid(bucket)) pushBucketSystem(bucket, `历史消息回放不可用:${String(e)}`);
     return;
   }
+  // await 边界:会话已被删/换桶则丢弃回放结果,不复活转录
+  if (!isReplayTargetValid(bucket)) return;
   const msgs = toReplayMessages(page.messages ?? []);
   if (page.missing || !msgs.length) {
     pushBucketSystem(
@@ -546,6 +587,7 @@ async function injectReplay(bucket: SessionBucket, cwd: string): Promise<void> {
 /** 续接/恢复成功后:解析 cwd 并回放(无 cwd 时降级为提示)。 */
 async function replayRestored(bucket: SessionBucket): Promise<void> {
   const cwd = await cwdFor(bucket.id);
+  if (!isReplayTargetValid(bucket)) return;
   if (!cwd) {
     pushBucketSystem(
       bucket,
@@ -574,13 +616,15 @@ export async function loadEarlierMessages(): Promise<void> {
       before: r.earliest,
       limit: r.earliest,
     });
+    // await 边界:会话已被删/换桶则丢弃结果(不与 activeBucket 的 r 混写)
+    if (!isReplayTargetValid(bucket)) return;
     const msgs = toReplayMessages(page.messages ?? []);
     bucket.messages = msgs.concat(bucket.messages);
     r.loaded += page.messages.length;
     r.earliest = page.loaded_upto;
     r.fullyLoaded = true;
   } catch (e) {
-    pushBucketSystem(bucket, `加载更早消息失败:${String(e)}`);
+    if (isReplayTargetValid(bucket)) pushBucketSystem(bucket, `加载更早消息失败:${String(e)}`);
   } finally {
     r.loading = false;
   }
@@ -593,6 +637,8 @@ export function replayNeedsConfirm(): boolean {
 }
 
 async function onAcpEvent(ev: AcpEvent) {
+  // 已删除会话的迟到事件(恢复/权限/模型/费用/错误/回放)一律丢弃,防止复活。
+  if (ev.session_id && removedSessionIds.value.has(ev.session_id)) return;
   switch (ev.type) {
     case "session_update": {
       // 事件按 session_id 入桶:后台会话的流式更新持续累积,切回可见
@@ -609,28 +655,24 @@ async function onAcpEvent(ev: AcpEvent) {
       // plan 等其余更新类型 M4 暂不渲染
       break;
     }
-    case "permission_request":
-      permissionQueue.value.push({
+    case "permission_request": {
+      const request: PermissionState = {
         requestId: ev.request_id ?? 0,
         sessionId: ev.session_id ?? "",
         title: ev.tool_call?.title ?? "agent 请求权限",
         options: ev.options ?? [],
-      });
-      // 失焦时系统提醒,办公用户切走窗口也不错过审批(P2);同 title 节流
-      if (!isWindowFocused()) {
-        notifyThrottled(
-          permissionQueue.value[permissionQueue.value.length - 1]?.title ?? "agent 请求权限",
-          "QIDI 办公工作台",
-          "等待权限审批,点击窗口处理。",
-        );
+      };
+      // 删除中的请求入队保留(删除失败后重新可见),但不可显示/应答,也不提醒。
+      permissionQueue.value.push(request);
+      if (isPermissionVisible(request) && !isWindowFocused()) {
+        // 失焦时系统提醒,办公用户切走窗口也不错过审批(P2);同 title 节流
+        notifyThrottled(request.title, "QIDI 办公工作台", "等待权限审批,点击窗口处理。");
       }
       break;
+    }
     case "permission_cancelled": {
-      // 权限失效上行:桥重启(bridge_restart)清空桥侧挂起表,或回合终止
-      // (turn_ended)后内核取消其挂起交互——两路径下前端队列里的旧条目都已
-      // 无法应答(点击必 Err 被静默吞掉 → 僵尸对话框)。此处同步移除该会话
-      // 条目;若该会话仍标记 busy 则一并解除(回合终止事件可能已被
-      // queue_lagged 丢弃,不解除则 UI 永挂)。
+      // 权限失效上行:桥重启或回合终止后旧条目已无法应答,本地必须清掉(否则僵尸对话框);
+      // 该会话仍 busy 时一并解除(回合终止事件可能已被 queue_lagged 丢弃)。
       const sid = ev.session_id ?? "";
       permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== sid);
       const bucket = bucketOf(sid);
@@ -638,7 +680,8 @@ async function onAcpEvent(ev: AcpEvent) {
         bucket.busy = false;
         bucket.flushing = false;
       }
-      pushSystem(`权限已失效：${ev.reason ?? "unknown"}`);
+      // 删除中/已删除不提示:失效是删除的预期结果,不能把错误写进当前视图
+      pushPermissionNotice(sid, `权限已失效：${ev.reason ?? "unknown"}`);
       break;
     }
     case "turn_usage": {
@@ -664,6 +707,8 @@ async function onAcpEvent(ev: AcpEvent) {
         accumulateUsage(bucket.usage, bucket.pendingUsage);
         bucket.pendingUsage = null;
       }
+      // 删除在途:只落完成态与费用(失败后不永挂 busy),不续跑、不提示、不改视图。
+      if (isSessionBlocked(bucket.id)) break;
       const reason = ev.stop_reason ?? "";
       if (reason.startsWith("error:")) {
         lastError.value = reason;
@@ -705,7 +750,7 @@ async function onAcpEvent(ev: AcpEvent) {
         const bucket = activeBucket();
         pushBucketSystem(
           bucket ?? ensurePlaceholder(),
-          "内核已断开。点击状态栏「恢复」或重新发送任务以重连(会话将自动续接)。",
+          "助手连接已断开，请点击底部「重新连接」；当前任务和未发送内容会保留。",
         );
       }
       break;
@@ -718,6 +763,8 @@ async function onAcpEvent(ev: AcpEvent) {
     case "session_restored": {
       const id = ev.session_id;
       if (!id) break;
+      // 删除中/已删除不复活:不建桶、不切视图、不回放
+      if (isSessionBlocked(id)) break;
       const existing = bucketOf(id);
       const bucket = ensureBucket(id);
       activeId.value = id;
@@ -739,7 +786,8 @@ async function onAcpEvent(ev: AcpEvent) {
       const bucket = bucketOf(ev.session_id);
       const text = `会话 ${ev.session_id} 恢复失败:${ev.error ?? "未知原因"}`;
       if (bucket) pushBucketSystem(bucket, text);
-      else pushSystem(text);
+      // 删除中/已删除目标不落当前视图(异步错误不能串到别的会话)
+      else if (!isSessionBlocked(ev.session_id)) pushSystem(text);
       break;
     }
     case "queue_lagged": {
@@ -749,7 +797,7 @@ async function onAcpEvent(ev: AcpEvent) {
       // 恢复(按钮在 busy 时即显示,无需额外接线)。
       const text = "⚠ 事件流拥堵，任务状态可能不同步";
       const busyBuckets = Object.values(buckets.value).filter(
-        (b) => b.busy && b.id !== "",
+        (b) => b.busy && b.id !== "" && !isSessionBlocked(b.id),
       );
       if (busyBuckets.length) {
         for (const b of busyBuckets) pushBucketSystem(b, text);
@@ -769,6 +817,8 @@ function ensurePlaceholder(): SessionBucket {
 /** 队列自动续跑:回合空闲且有排队消息时发出下一条(FIFO)。 */
 function drain(bucket: SessionBucket): void {
   if (bucket.busy) return;
+  // 删除中/已删除不自动续跑:排队消息留给用户手动决定
+  if (isSessionBlocked(bucket.id) || bucketOf(bucket.id) !== bucket) return;
   const next = bucket.queue.shift();
   if (!next) return;
   void doSend(bucket, next.text, next.images ?? []);
@@ -780,7 +830,8 @@ async function doSend(
   bucket: SessionBucket,
   text: string,
   images: PromptImage[] = [],
-): Promise<void> {
+): Promise<boolean> {
+  if (isSessionBlocked(bucket.id) || bucketOf(bucket.id) !== bucket) return false;
   // 无文本仅有图片时,转录区占位显示已发送图片数(避免空气泡)
   const display = text || (images.length ? `📎 已发送 ${images.length} 张图片` : "");
   bucket.messages.push({
@@ -793,6 +844,8 @@ async function doSend(
   bucket.busy = true;
   try {
     await invoke("session_prompt", { sessionId: bucket.id, text, images });
+    // IPC 已受理:即使期间被删也维持 true 返回;但不再写标题/提示、不复活桶
+    if (isSessionBlocked(bucket.id) || bucketOf(bucket.id) !== bucket) return true;
     // 首条 prompt 截断记为会话标题(失败不影响任务下发)
     if (!bucket.titleRecorded) {
       bucket.titleRecorded = true;
@@ -803,9 +856,14 @@ async function doSend(
         title: bucket.title,
       }).catch(() => {});
     }
+    return true;
   } catch (e) {
+    // 目标已删/删除中:只维护仍在册的桶,不写任何失败提示
+    if (bucketOf(bucket.id) !== bucket) return false;
     bucket.busy = false;
-    pushBucketSystem(bucket, `任务下发失败:${String(e)}`);
+    if (isSessionBlocked(bucket.id)) return false;
+    pushBucketSystem(bucket, `任务发送失败，请重试：${String(e)}`);
+    return false;
   }
 }
 
@@ -852,7 +910,7 @@ function resolveOfficeTask(cwd: string | undefined): string | undefined {
  * (v0.1.5.1 零摩擦:无需先选目录,直接开箱即用)。
  * 新建即绑定:会话创建成功后把 task=工作区名落进登记簿(后端 upsert),
  * 并让产物面板切到该工作区。 */
-export async function startSession(cwd?: string): Promise<void> {
+export async function startSession(cwd?: string): Promise<string> {
   const dir = cwd ?? localStorage.getItem(LAST_CWD_KEY) ?? undefined;
   const officeTask = resolveOfficeTask(dir);
   const info = await invoke<SessionStartInfo>("session_start", {
@@ -863,89 +921,105 @@ export async function startSession(cwd?: string): Promise<void> {
   if (dir) localStorage.setItem(LAST_CWD_KEY, dir);
   const bucket = ensureBucket(id);
   activeId.value = id;
+  lastCreatedSessionId.value = id;
   connected.value = true;
   if (officeTask) rememberSessionBinding(id, officeTask);
-  pushBucketSystem(bucket, `已开启任务会话(${id})，工作目录 ${info.cwd}。`);
-  // 走了默认工作区(用户未选目录):明确告知可直接对话,消除
-  // 「必须先选工作区才能对话」的误解(小白反馈的根因)。
-  if (info.default_workspace) {
-    pushSystem(
-      `已创建默认工作区 ${info.cwd}，直接开始对话；需要特定目录时用 📁 按钮。` +
-        (info.fallback_to_temp ? "(主目录不可用,已回退到临时目录)" : ""),
-    );
+  rememberSessionCwd(id, info.cwd);
+  if (info.fallback_to_temp) {
+    pushBucketSystem(bucket, `默认保存位置不可用，暂存到 ${info.cwd}，请及时另存成果。`);
   }
   void refreshModelState(id);
-  // 产物面板跟着新会话的绑定走(无绑定保持现状)
   if (officeTask) void syncWorkspaceForSession(id);
+  return id;
 }
 
 /** 拉取会话模型状态入桶(session/new|load 应答由桥缓存,事件与查询双通道
  * 以最后到达者为准)。失败静默:旧内核无此面时状态栏走降级显示。 */
 export async function refreshModelState(id: string): Promise<void> {
+  if (isSessionBlocked(id)) return;
   const bucket = bucketOf(id);
   if (!bucket) return;
   try {
     const st = parseModelState(await invoke("session_models", { sessionId: id }));
-    if (st) bucket.modelState = st;
+    // await 边界再校验:会话已被删/换桶时不得写回
+    if (!st || bucketOf(id) !== bucket || isSessionBlocked(id)) return;
+    bucket.modelState = st;
   } catch {
-    /* 桥未就绪/旧内核:保留现状 */
+    /* 桥未就绪/旧内核/目标已删:保留现状 */
   }
 }
 
 /** 会话内热切换模型(不重启内核,后续回合生效)。结果写回本桶并系统提示。 */
-export async function setModel(modelId: string): Promise<void> {
+export async function setModel(modelId: string): Promise<boolean> {
   const bucket = activeBucket();
-  if (!bucket) return;
+  if (!bucket || !connected.value || isSessionBlocked(bucket.id)) return false;
   try {
     const st = parseModelState(
       await invoke("session_set_model", { sessionId: bucket.id, modelId }),
     );
-    if (st) bucket.modelState = st;
-    const name = st?.availableModels.find((m) => m.modelId === modelId)?.name || modelId;
+    if (bucketOf(bucket.id) !== bucket || isSessionBlocked(bucket.id)) return false;
+    if (!st) return false;
+    bucket.modelState = st;
+    const name = st.availableModels.find((m) => m.modelId === modelId)?.name || modelId;
     pushBucketSystem(bucket, `模型已切换为「${name}」,本会话后续回合生效。`);
+    return true;
   } catch (e) {
+    if (bucketOf(bucket.id) !== bucket || isSessionBlocked(bucket.id)) return false;
     pushBucketSystem(bucket, `模型切换失败:${String(e)}`);
+    return false;
   }
 }
 
 /** 设置当前模型的思考强度档位(内核经 `_meta.reasoningEffort` 落库,后续回合生效)。
  * 与切换模型同一 RPC(session/set_model),仅多带 effort;结果写回本桶并系统提示。 */
-export async function setEffort(effort: string): Promise<void> {
+export async function setEffort(effort: string): Promise<boolean> {
   const bucket = activeBucket();
   const modelId = bucket?.modelState?.currentModelId;
-  if (!bucket || !modelId) return;
+  if (!bucket || !modelId || !connected.value || isSessionBlocked(bucket.id)) return false;
   try {
     const st = parseModelState(
       await invoke("session_set_model", { sessionId: bucket.id, modelId, effort }),
     );
-    if (st) bucket.modelState = st;
-    pushBucketSystem(bucket, `思考强度已设为「${effort}」,本会话后续回合生效。`);
+    if (bucketOf(bucket.id) !== bucket || isSessionBlocked(bucket.id)) return false;
+    if (!st) return false;
+    bucket.modelState = st;
+    const label = st.availableModels.find((m) => m.modelId === modelId)?.reasoningEfforts.find((e) => e.value === effort)?.label ?? effort;
+    pushBucketSystem(bucket, `思考强度已设为「${label}」,本会话后续回合生效。`);
+    return true;
   } catch (e) {
+    if (bucketOf(bucket.id) !== bucket || isSessionBlocked(bucket.id)) return false;
     pushBucketSystem(bucket, `思考强度设置失败:${String(e)}`);
+    return false;
   }
 }
 
 /** 发送一条任务;无会话或已断线时自动开启(断线重发=重连,原契约);
  * 回合进行中进队列(qidicode 语义)。`images` 为随消息下发的图片附件
  * (无图传空数组);纯文本调用向后兼容(sendTask("…"))。 */
-export async function sendTask(text: string, images: PromptImage[] = []): Promise<void> {
+export async function sendTask(text: string, images: PromptImage[] = [], targetSessionId?: string): Promise<boolean> {
   const trimmed = text.trim();
-  if (!trimmed && !images.length) return;
-  if (!connected.value || !activeBucket()) {
+  if (!trimmed && !images.length) return false;
+  let id = targetSessionId ?? activeId.value;
+  // 指定目标已删/删除中:直接拒绝,既不发送也不自动建会话
+  if (targetSessionId && isSessionBlocked(targetSessionId)) return false;
+  if (targetSessionId && !connected.value) return false;
+  if (!connected.value || !bucketOf(id)) {
+    if (targetSessionId) return false;
     try {
-      await startSession();
+      id = await startSession();
     } catch (e) {
-      pushSystem(`连接内核失败:${String(e)}`);
-      return;
+      pushSystem(`暂时无法连接助手，请重试：${String(e)}`);
+      return false;
     }
   }
-  const bucket = activeBucket();
-  if (!bucket) return;
+  if (isSessionBlocked(id)) return false;
+  const bucket = bucketOf(id);
+  if (!bucket) return false;
   if (bucket.busy) {
     bucket.queue.push({ id: ++messageId, text: trimmed, images });
-    return;
+    return true;
   }
-  await doSend(bucket, trimmed, images);
+  return doSend(bucket, trimmed, images);
 }
 
 /** 逐个注销某会话的待批权限(主动通知内核/桥层清挂起表)。失败静默:注销是
@@ -976,7 +1050,7 @@ export async function cancelTurn(): Promise<void> {
  * 当前空闲时等价于直接发出队首。 */
 export function flushQueueNow(): void {
   const bucket = activeBucket();
-  if (!bucket || !bucket.queue.length) return;
+  if (!bucket || !bucket.queue.length || isSessionBlocked(bucket.id)) return;
   if (bucket.busy) {
     bucket.flushing = true;
     void invoke("session_cancel", { sessionId: bucket.id }).catch(() => {
@@ -998,6 +1072,8 @@ export function removeQueued(id: number): void {
  * 产物面板同步跟着切(按登记簿绑定;无绑定保持现状)。
  * 返回是否完成切换:无活桶时不改任何状态并返回 false,调用方可据此给兜底反馈。 */
 export function switchSession(id: string): boolean {
+  // 删除中/已删除的会话不可切入(桶可能还在,但不该成为活动视图)
+  if (isSessionBlocked(id)) return false;
   if (buckets.value[id]) {
     activeId.value = id;
     void syncWorkspaceForSession(id);
@@ -1006,11 +1082,46 @@ export function switchSession(id: string): boolean {
   return false;
 }
 
-/** 删除单条历史会话(侧栏历史条目的「删除」)。
- * archive=true(默认)由后端先把该条追加进归档文件再删登记,误删可找回;
- * 返回后端提示文案,调用方原样交给 pushSystem。 */
+/** 清掉某会话的全部前端痕迹(删除成功后):只动本地状态,磁盘资料副本由后端保留。 */
+function forgetSessionLocal(id: string): void {
+  delete buckets.value[id];
+  if (activeId.value === id) {
+    const fallback = Object.values(buckets.value).find(
+      (b) => b.id !== "" && !isSessionBlocked(b.id),
+    );
+    activeId.value = fallback?.id ?? "";
+    // 回落到有效会话时同步产物面板;删非活动会话不动当前视图
+    if (fallback) void syncWorkspaceForSession(fallback.id);
+  }
+  permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== id);
+  sessionCwd.delete(id);
+  sessionTask.delete(id);
+  forgetDocuments(id);
+}
+
+/** 删除单条历史会话:同 id 在途复用同一 promise,后端成功才清本地痕迹,失败保留并交回错误。 */
 export function deleteSession(sessionId: string, archive = true): Promise<string> {
-  return invoke<string>("session_delete", { sessionId, archive });
+  const running = deleteInFlight.get(sessionId);
+  if (running) return running;
+  if (removedSessionIds.value.has(sessionId)) {
+    return Promise.resolve(`会话「${sessionId}」已删除`);
+  }
+  deletingSessionIds.value.add(sessionId);
+  const task = (async (): Promise<string> => {
+    try {
+      const message = await invoke<string>("session_delete", { sessionId, archive });
+      // 先立 removed 水位再收 deleting:中间不留可被迟到事件复活的窗口
+      removedSessionIds.value.add(sessionId);
+      forgetSessionLocal(sessionId);
+      return message;
+    } finally {
+      // 成功/失败都收起「删除中」:失败后会话须恢复可用
+      deletingSessionIds.value.delete(sessionId);
+      deleteInFlight.delete(sessionId);
+    }
+  })();
+  deleteInFlight.set(sessionId, task);
+  return task;
 }
 
 /** 权限应答在途标志:invoke 期间为 true。两个作用:
@@ -1030,10 +1141,17 @@ function isPermissionGone(err: unknown): boolean {
   return PERMISSION_GONE_MARKERS.some((m) => text.includes(m));
 }
 
-/** 权限应答提交(两个入口共用):await 结果并按错误分类处置。
- * - 请求已失效(不可重试):丢弃该条目并系统提示;
- * - 其他错误(桥未就绪/发送失败,请求仍在桥侧挂起表):unshift 重插回队列
- *   头部(保持原 FIFO 顺序)并系统提示可重试。 */
+/** 该权限请求是否可见:所属会话删除中/已删除时入队保留但不展示、不应答。 */
+function isPermissionVisible(p: PermissionState): boolean {
+  return !isSessionBlocked(p.sessionId);
+}
+
+/** 首个可见权限请求的下标(展示、应答、计数一律以它为准)。 */
+function firstVisiblePermissionIndex(): number {
+  return permissionQueue.value.findIndex(isPermissionVisible);
+}
+
+/** 权限应答提交(两个入口共用):已删丢弃;PERMISSION_GONE 不重试;其余可重试失败回插队首保住请求。 */
 async function submitPermission(
   p: PermissionState,
   send: () => Promise<unknown>,
@@ -1043,12 +1161,14 @@ async function submitPermission(
   try {
     await send();
   } catch (e) {
+    // 已删除会话的请求不再回插(否则会以隐藏条目永久占用队列)
+    if (removedSessionIds.value.has(p.sessionId)) return;
     if (isPermissionGone(e)) {
-      pushSystem("该权限请求已失效");
-    } else {
-      permissionQueue.value.unshift(p);
-      pushSystem("权限响应发送失败，已恢复对话框，请重试");
+      pushPermissionNotice(p.sessionId, "该权限请求已失效");
+      return;
     }
+    permissionQueue.value.unshift(p);
+    pushPermissionNotice(p.sessionId, "权限响应发送失败，已恢复对话框，请重试");
   } finally {
     permissionSubmitting.value = false;
   }
@@ -1056,7 +1176,9 @@ async function submitPermission(
 
 export function resolvePermission(optionId: string): void {
   if (permissionSubmitting.value) return;
-  const p = permissionQueue.value.shift();
+  const index = firstVisiblePermissionIndex();
+  if (index < 0) return;
+  const p = permissionQueue.value.splice(index, 1)[0];
   if (!p) return;
   void submitPermission(p, () =>
     invoke("permission_respond", { requestId: p.requestId, optionId }),
@@ -1065,14 +1187,17 @@ export function resolvePermission(optionId: string): void {
 
 export function cancelPermission(): void {
   if (permissionSubmitting.value) return;
-  const p = permissionQueue.value.shift();
+  const index = firstVisiblePermissionIndex();
+  if (index < 0) return;
+  const p = permissionQueue.value.splice(index, 1)[0];
   if (!p) return;
   void submitPermission(p, () => invoke("permission_cancel", { requestId: p.requestId }));
 }
 
-/** 待确认的权限请求条数(对话框只显示队首;>1 时提示还剩几项)。 */
+/** 待确认的权限请求条数(对话框只显示队首;>1 时提示还剩几项)。
+ * 只数可见请求:删除中/已删除会话的挂起请求不参与。 */
 export function pendingPermissionCount(): number {
-  return permissionQueue.value.length;
+  return permissionQueue.value.filter(isPermissionVisible).length;
 }
 
 /** 崩溃恢复(状态栏按钮)。返回恢复的会话数;-1 表示已在恢复中
@@ -1105,8 +1230,15 @@ export function useAgentState() {
     messages: computed(() => activeBucket()?.messages ?? []),
     connected: computed(() => connected.value),
     sessionId: computed(() => activeId.value),
+    /** 最近一次成功新建的会话 id(恢复/切换不更新)。 */
+    lastCreatedSessionId: computed(() => lastCreatedSessionId.value),
     turnInProgress: computed(() => activeBucket()?.busy ?? false),
-    permission: computed(() => permissionQueue.value[0] ?? null),
+    /** 队首可见请求(删除中/已删除会话的挂起请求不展示)。 */
+    permission: computed(() => permissionQueue.value.find(isPermissionVisible) ?? null),
+    /** 删除在途的会话 id 快照(界面据此中止该目标的媒体/文件准备)。 */
+    deletingSessions: computed<string[]>(() => [...deletingSessionIds.value]),
+    /** 已删除的会话 id 快照(界面据此丢弃迟到写回、清理草稿与预览 URL)。 */
+    removedSessions: computed<string[]>(() => [...removedSessionIds.value]),
     /** 权限应答在途(对话框可据此禁用确认按钮,防双击竞态)。 */
     permissionSubmitting: computed(() => permissionSubmitting.value),
     lastError,

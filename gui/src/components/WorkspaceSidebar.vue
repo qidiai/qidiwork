@@ -8,6 +8,7 @@ import { initSkills, installSkillsPackage, isOfficeSkill, useSkills, type SkillI
 import { closeAllPreviews } from "../composables/usePreview";
 import { open as pickDirectory } from "@tauri-apps/plugin-dialog";
 import { sidebarCollapsed } from "../composables/useUiLayout";
+import qidiLogo from "../assets/qidi-logo.svg";
 
 /** 新建任务。withDir=true 先弹系统目录选择器(取消则不动作)。
  * 内核未连接也可点:session_start 自己会拉起内核(旧版 !connected
@@ -316,9 +317,10 @@ function pick(name: string): void {
   </aside>
 
   <aside v-else class="sidebar">
+    <div class="sidebar-brand"><img class="brand-logo" :src="qidiLogo" width="34" height="34" alt="启迪 Q 标识"><div><strong>启迪办公</strong><small>让工作有条不紊</small></div></div>
     <div class="section">
       <div class="section-row">
-        <span class="section-title">任务工作区</span>
+        <span class="section-title">我的工作</span>
         <button class="rail-btn" title="折叠侧栏" @click="sidebarCollapsed = true">⇆</button>
       </div>
       <div class="new-task-row">
@@ -329,6 +331,8 @@ function pick(name: string): void {
           📁
         </button>
       </div>
+      <details v-if="workspaces.length" class="workspace-groups">
+      <summary>已保存的文件分组</summary>
       <ul class="ws-list">
         <li
           v-for="ws in workspaces"
@@ -353,10 +357,11 @@ function pick(name: string): void {
           >✕</button>
         </li>
       </ul>
+      </details>
     </div>
 
-    <div class="section">
-      <span class="section-title">常用技能</span>
+    <details class="section skill-section">
+      <summary class="section-title">更多办公工具</summary>
       <div v-if="officeSkills.length" class="skill-grid">
         <button
           v-for="skill in officeSkills"
@@ -369,7 +374,7 @@ function pick(name: string): void {
         </button>
       </div>
       <div v-else class="skill-empty">
-        <p class="skill-empty-hint">未发现技能(读取 ~/.qidi/skills)</p>
+        <p class="skill-empty-hint">安装办公工具，扩展文档处理能力</p>
         <button
           class="skill-install"
           :disabled="installing"
@@ -380,11 +385,11 @@ function pick(name: string): void {
         </button>
         <p v-if="installError" class="skill-install-error">{{ installError }}</p>
       </div>
-    </div>
+    </details>
 
-    <div v-if="history.length || confirmingClear" class="section">
+    <div v-if="history.length || confirmingClear" class="section history-section">
       <div class="section-row">
-        <span class="section-title">历史会话</span>
+        <span class="section-title">最近任务</span>
         <button
           class="history-clear"
           :class="{ confirm: confirmingClear }"
@@ -447,6 +452,13 @@ function pick(name: string): void {
 </template>
 
 <style scoped>
+.sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 12px; }
+.brand-logo { display: block; flex-shrink: 0; width: 34px; height: 34px; object-fit: contain; }
+.sidebar-brand strong { display: block; font-size: 15px; font-weight: 600; }
+.sidebar-brand small { display: block; margin-top: 4px; color: var(--text-secondary); font-size: 11px; }
+.workspace-groups summary, .skill-section summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; padding: 8px 2px; }
+.skill-section { order: 2; border-top: 1px solid var(--border); padding-top: 10px; }
+.history-section { flex: 1; }
 .sidebar {
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
@@ -503,11 +515,11 @@ function pick(name: string): void {
 
 .new-task {
   flex: 1;
-  border: 1px dashed var(--border);
-  background: transparent;
+  border: 1px solid var(--accent);
+  background: var(--accent);
   border-radius: var(--radius);
-  padding: 8px;
-  color: var(--text-secondary);
+  padding: 10px 8px;
+  color: #fff;
   cursor: pointer;
 }
 

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>乐团 T2B 锁定验收：删除生命周期</title></head><body><div id="app"></div>
+<script type="module">
+import { mockIPC } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import { createApp, nextTick } from 'vue';
+import '../src/styles/global.css';
+localStorage.setItem('qidi.onboarded','true'); localStorage.setItem('qidi.sidebarCollapsed','0'); localStorage.setItem('qidi.panelCollapsed','0'); localStorage.removeItem('qidi.lastCwd');
+document.documentElement.style.width='1280px';
+const state = {calls:[], sessions:[], holdDelete:false, failDelete:false, holdImport:false, holdList:false};
+const revoked=[]; const revoke=URL.revokeObjectURL.bind(URL); URL.revokeObjectURL=url=>{revoked.push(url);revoke(url);};
+mockIPC(async(cmd,args={})=>{
+  state.calls.push({cmd,args});
+  switch(cmd){
+    case 'onboarding_marker_read': case 'plugin:notification|is_permission_granted': return true;
+    case 'sessions_count': return 0;
+    case 'app_version': return '测试';
+    case 'auth_status': return {logged_in:false};
+    case 'office_scan': case 'skills_list': case 'office_artifacts': return [];
+    case 'office_watch_start': case 'session_set_title': return;
+    case 'settings_read': return {default_model:null,models:[]};
+    case 'session_models': return null;
+    case 'sessions_history': return [...state.sessions];
+    case 'session_summary': return {title:null};
+    case 'session_start': {const s={session_id:`t2-${state.sessions.length+1}`,cwd:'C:/OfficeTest',task:args.officeTask,title:null};state.sessions.push(s);return {...s,default_workspace:true,fallback_to_temp:false};}
+    case 'session_documents': if(state.holdList) await new Promise(r=>state.releaseList=r);return [{name:'已保存.docx',path:`C:/OfficeTest/${args.sessionId}/已保存.docx`,size:4}];
+    case 'session_import_document': if(state.holdImport) await new Promise(r=>state.releaseImport=r);return {name:args.name,path:`C:/OfficeTest/${args.sessionId}/${args.name}`,size:4};
+    case 'session_prompt': return;
+    case 'session_delete': if(state.holdDelete) await new Promise(r=>state.releaseDelete=r);if(state.failDelete)throw '测试：登记写入失败';state.sessions=state.sessions.filter(s=>s.session_id!==args.sessionId);return '已移除记录，文件保留';
+    case 'permission_cancel': case 'session_cancel': return;
+    default: throw Error(`未提供的模拟接口 ${cmd}`);
+  }
+},{shouldMockEvents:true});
+const {default:App}=await import('../src/App.vue');createApp(App).mount('#app');
+const agent=await import('../src/composables/useAgent');const files=await import('../src/composables/useOfficeFiles');const ui=agent.useAgentState();
+const tick=async()=>{await nextTick();await new Promise(r=>{const c=new MessageChannel();c.port1.onmessage=()=>{c.port1.close();c.port2.close();r();};c.port2.postMessage(null);});await nextTick();};
+const wait=async predicate=>{const end=Date.now()+6000;while(Date.now()<end){if(predicate())return;await tick();}throw Error('等待生命周期状态超时');};
+const assert=(ok,msg)=>{if(!ok)throw Error(msg);};
+const prompts=()=>state.calls.filter(c=>c.cmd==='session_prompt');
+function type(s){const input=document.querySelector('.composer-input');input.value=s;input.dispatchEvent(new Event('input',{bubbles:true}));}
+function add(file){const dt=new DataTransfer();dt.items.add(file);const input=document.querySelector('.file-input');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));}
+function image(){const canvas=document.createElement('canvas');canvas.width=canvas.height=16;canvas.getContext('2d').fillRect(0,0,16,16);return new File([Uint8Array.from(atob(canvas.toDataURL().split(',')[1]),c=>c.charCodeAt(0))],'保留图片.png',{type:'image/png'});}
+
+window.runT2Case=async mode=>{
+  const a=await agent.startSession();await tick();
+  if(mode==='queue'){
+    await agent.sendTask('甲执行中',[],a);await agent.sendTask('甲待处理',[],a);
+    const b=await agent.startSession();await tick();await agent.sendTask('乙执行中',[],b);
+    const total=prompts().length;
+    state.holdDelete=true;const deletion=agent.deleteSession(a);await wait(()=>!!state.releaseDelete);
+    const duplicate=agent.deleteSession(a);await tick();
+    assert(state.calls.filter(c=>c.cmd==='session_delete').length===1,'重复点击不能重复删除请求');
+    assert(await agent.sendTask('删除中不能发送',[],a)===false,'删除在途必须阻止新请求');
+    await emit('acp-event',{type:'turn_completed',session_id:a,stop_reason:'end_turn'});await tick();
+    assert(prompts().length===total,'删除在途不能自动续跑队列');
+    state.holdDelete=false;state.releaseDelete();await deletion;await duplicate;await tick();
+    assert(!ui.sessionList.value.some(s=>s.id===a),'删除成功后前端会话桶未清理');
+    assert(ui.sessionId.value===b&&ui.turnInProgress.value,'删除甲不能影响乙的运行态');
+    assert(agent.switchSession(a)===false,'已删会话不可通过活桶切换回来');
+    assert(await agent.sendTask('删除后不能发送',[],a)===false,'已删除目标不能发送或自动重建');
+    await emit('acp-event',{type:'session_restored',session_id:a});
+    await emit('acp-event',{type:'permission_request',session_id:a,request_id:901,tool_call:{title:'旧审批'},options:[{optionId:'ok',name:'允许',kind:'allow_once'}]});
+    await emit('acp-event',{type:'model_state',session_id:a,state:{currentModelId:'late',availableModels:[]}});
+    await emit('acp-event',{type:'turn_completed',session_id:a,stop_reason:'end_turn'});await tick();
+    assert(ui.sessionId.value===b&&!ui.permission.value&&!ui.sessionList.value.some(s=>s.id===a),'迟到事件不能复活已删除会话');
+    return {mode,result:'PASS',checks:['删除去重','在途阻止发送/续跑','清桶','迟到恢复/权限隔离','其他任务不受影响']};
+  }
+  if(mode==='prepare-success'||mode==='prepare-failure'){
+    type('这份草稿属于甲');add(image());add(new File(['正文'],'甲资料.docx'));await tick();
+    const src=document.querySelector('img.attachment-preview').src;
+    state.holdImport=true;document.querySelector('.composer-send').click();await wait(()=>!!state.releaseImport);
+    const b=await agent.startSession();await tick();
+    if(mode==='prepare-success'){
+      state.holdList=true;const listing=files.loadDocuments(a).catch(()=>{});await wait(()=>!!state.releaseList);
+      await agent.deleteSession(a);await tick();
+      state.holdImport=false;state.releaseImport();state.holdList=false;state.releaseList();await listing;
+      await wait(()=>!document.querySelector('.preparation-status'));await tick();
+      assert(prompts().length===0,'删除准备中的会话后仍然隐形发送');
+      assert(!ui.sessionList.value.some(s=>s.id===a),'删除后未移除前端桶');
+      assert(!files.documentsBySession.value[a],'迟到导入或列表回调复活已删除资料缓存');
+      assert(revoked.filter(url=>url===src).length===1,'删除成功应且仅应释放甲的预览URL');
+      assert(ui.sessionId.value===b&&!document.querySelector('.attach-error'),'不能把甲取消错误写入乙界面');
+      return {mode,result:'PASS',checks:['准备中删除不暗发','迟到资料缓存不复活','图片URL释放一次','另一任务不显示错误']};
+    }
+    state.failDelete=true;let failed=false;try{await agent.deleteSession(a);}catch{failed=true;}state.failDelete=false;
+    assert(failed,'模拟删除失败必须向调用方报告');state.holdImport=false;state.releaseImport();
+    await wait(()=>!document.querySelector('.preparation-status'));await tick();
+    assert(prompts().length===0,'删除失败也不能自动恢复已取消的附件准备');
+    assert(ui.sessionList.value.some(s=>s.id===a)&&agent.switchSession(a),'删除失败应保留可切回的会话');await tick();
+    assert(document.querySelector('.composer-input').value==='这份草稿属于甲','删除失败丢失文字草稿');
+    assert(document.querySelectorAll('.attachment-chip').length===2&&!revoked.includes(src),'删除失败不能清附件或释放还在使用的URL');
+    const imports=state.calls.filter(c=>c.cmd==='session_import_document').length;
+    document.querySelector('.composer-send').click();await wait(()=>prompts().length===1);await tick();
+    assert(prompts()[0].args.sessionId===a,'手动重试必须发到原会话');
+    assert(state.calls.filter(c=>c.cmd==='session_import_document').length===imports,'手动重试不得重复导入成功副本');
+    return {mode,result:'PASS',checks:['失败仍取消准备','失败保留草稿与File','用户手动重试','不重复导入']};
+  }
+  throw Error('未知案例');
+};
+</script></body></html>

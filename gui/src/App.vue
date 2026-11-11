@@ -8,6 +8,7 @@ import OnboardingView from "./components/OnboardingView.vue";
 import { computed, onMounted, ref } from "vue";
 import { autoConnect, initAgent } from "./composables/useAgent";
 import { shouldShowOnboarding } from "./composables/useOnboarding";
+import { usePreviewTabs } from "./composables/usePreview";
 import {
   PANEL_STRIP,
   panelCollapsed,
@@ -15,6 +16,11 @@ import {
   SIDEBAR_STRIP,
   sidebarCollapsed,
 } from "./composables/useUiLayout";
+
+const { activePreview } = usePreviewTabs();
+function preventFileNavigation(event: DragEvent): void {
+  if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+}
 
 // 首次启动引导门控(K3 修正 1):onboarding 未完成前不 initAgent/autoConnect,
 // 避免未登录态拉起无效内核进程。
@@ -50,17 +56,17 @@ function onOnboardingDone(): void {
 // 列宽由 useUiLayout 的折叠/拖拽状态驱动;折叠时收为窄竖条(组件自渲染把手)。
 const gridColumns = computed(() => {
   const left = sidebarCollapsed.value ? `${SIDEBAR_STRIP}px` : "232px";
-  const right = panelCollapsed.value ? `${PANEL_STRIP}px` : `${panelWidth.value}px`;
+  const right = activePreview.value ? "0px" : panelCollapsed.value ? `${PANEL_STRIP}px` : `${panelWidth.value}px`;
   return `${left} minmax(0, 1fr) ${right}`;
 });
 </script>
 
 <template>
-  <div class="app-shell">
+  <div class="app-shell" @dragover="preventFileNavigation" @drop="preventFileNavigation">
     <div class="app-main" :style="{ gridTemplateColumns: gridColumns }">
       <WorkspaceSidebar />
       <MainTabs />
-      <ArtifactPanel />
+      <ArtifactPanel v-show="!activePreview" />
     </div>
     <StatusBar />
     <PermissionDialog />

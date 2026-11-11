@@ -7,12 +7,12 @@
   --border: #e2e4e9;
   --text-primary: #1f2329;
   --text-secondary: #646a73;
-  --text-disabled: #a9aeb8;
-  --accent: #3370ff;
-  --accent-soft: #e3eaf9;
-  --success: #34c724;
-  --warning: #ff8800;
-  --danger: #f54a45;
+  --text-disabled: #7b8492;
+  --accent: #315fba;
+  --accent-soft: #eaf0fb;
+  --success: #26845b;
+  --warning: #b56b13;
+  --danger: #c23e3a;
   --radius: 8px;
   --font-size-base: 14px;
   --font-size-lg: 16px;
@@ -42,8 +42,16 @@ body {
   height: 100%;
 }
 
-button {
+button, select, input, textarea {
   font-family: inherit;
+}
+
+button:not(:disabled), select:not(:disabled) { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; }
 }
 
 /* 通用空状态 */

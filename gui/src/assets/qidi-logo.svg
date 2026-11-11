@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>QIDI 启迪</title>
+  <desc>以几何 Q 构成的开放空间，金色构件向外延伸，象征从想法到创造。</desc>
+  <rect x="1" y="1" width="62" height="62" rx="14" fill="#f4f2e9"/>
+  <path d="M30 8 51 20v24L30 56 9 44V20L30 8Zm0 12-11 6v12l11 6 11-6V26l-11-6Z" fill="#28533f" fill-rule="evenodd"/>
+  <path d="m30 8 21 12-10 6-11-6-11 6-10-6L30 8Z" fill="#4c795b"/>
+  <path d="m30 44 11-6 10 6-21 12V44Z" fill="#193f31"/>
+  <path d="m31 33 26 15-9 6-26-15 9-6Z" fill="#d2a15d"/>
+  <path d="m48 54 9-6v7l-9 6v-7Z" fill="#97663b"/>
+  <path d="m22 39 26 15v7L22 46v-7Z" fill="#b88347"/>
+</svg>

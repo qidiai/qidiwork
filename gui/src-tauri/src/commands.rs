@@ -13,6 +13,7 @@
 //! **禁止嵌套持有**——所有路径都是"短锁克隆/取出 Arc 后立即释放"或
 //! "跨 spawn 全程持锁但锁内不取另一把"。改动任何启动/恢复路径前先核对本约束。M2 的行级命令
 //! (`agent_send`/`agent-line`)已由 ACP 桥取代,移除。
+//! 例外:`BridgeState::lifecycle` 是最外层门,门内才取 inner,反向禁止。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,6 +45,8 @@ pub struct AgentState {
 pub struct BridgeState {
     inner: tokio::sync::Mutex<Option<Arc<AcpBridge>>>,
     generation: std::sync::atomic::AtomicU64,
+    /// 会话生命周期门:永远最外层,门内仍禁止同时持有 AgentState.inner 与 BridgeState.inner。
+    lifecycle: tokio::sync::Mutex<()>,
 }
 
 impl Default for BridgeState {
@@ -51,6 +54,7 @@ impl Default for BridgeState {
         Self {
             inner: tokio::sync::Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
+            lifecycle: tokio::sync::Mutex::new(()),
         }
     }
 }
@@ -215,6 +219,7 @@ pub async fn agent_stop(
     agent: State<'_, AgentState>,
     bridge: State<'_, BridgeState>,
 ) -> Result<AgentStatusInfo, String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     bridge.inner.lock().await.take();
     let proc = agent.inner.lock().await.take();
     match proc {
@@ -339,6 +344,7 @@ pub async fn session_start(
     cwd: Option<String>,
     office_task: Option<String>,
 ) -> Result<SessionStartInfo, String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     let process = ensure_agent(&app, &agent).await?;
     let bridge = ensure_bridge(&app, &process, &bridge).await?;
     bridge.ensure_initialized().await?;
@@ -373,6 +379,42 @@ pub async fn session_start(
         default_workspace: resolved.default_workspace,
         fallback_to_temp: resolved.fallback_to_temp,
     })
+}
+
+async fn registered_document_cwd(bridge: &BridgeState, session_id: &str) -> Result<PathBuf, String> {
+    let b = bridge.inner.lock().await.clone().ok_or("桥未就绪")?;
+    b.sessions()
+        .into_iter()
+        .find(|(id, _, _)| id == session_id)
+        .map(|(_, cwd, _)| cwd)
+        .ok_or_else(|| "会话未登记".to_string())
+}
+
+/// 导入资料:不接受前端 cwd 或原文件路径。
+#[tauri::command]
+pub async fn session_import_document(
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+    name: String,
+    data: String,
+) -> Result<office::ImportedDocument, String> {
+    let cwd = registered_document_cwd(&bridge, &session_id).await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        office::import_document(&cwd, &session_id, &name, &data)
+    })
+    .await
+    .map_err(|e| format!("导入资料任务失败: {e}"))?
+}
+
+#[tauri::command]
+pub async fn session_documents(
+    bridge: State<'_, BridgeState>,
+    session_id: String,
+) -> Result<Vec<office::ImportedDocument>, String> {
+    let cwd = registered_document_cwd(&bridge, &session_id).await?;
+    tauri::async_runtime::spawn_blocking(move || office::list_documents(&cwd, &session_id))
+        .await
+        .map_err(|e| format!("枚举资料任务失败: {e}"))?
 }
 
 /// 发起回合:立即返回;流式更新与回合结束经 `acp-event` 推送。
@@ -480,6 +522,7 @@ pub async fn agent_recover(
     agent: State<'_, AgentState>,
     bridge: State<'_, BridgeState>,
 ) -> Result<usize, String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     // 会话清单以磁盘为准(进程内旧桥可能已丢);两处合并去重。
     let data_dir = app.path().app_data_dir().ok();
     let mut sessions: Vec<(String, PathBuf, Option<String>)> = {
@@ -724,9 +767,11 @@ pub async fn sessions_history(app: AppHandle) -> Result<Vec<PersistedSession>, S
 #[tauri::command]
 pub async fn session_set_title(
     app: AppHandle,
+    bridge: State<'_, BridgeState>,
     session_id: String,
     title: String,
 ) -> Result<(), String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     let dir = app
         .path()
         .app_data_dir()
@@ -745,6 +790,7 @@ pub async fn session_resume(
     bridge: State<'_, BridgeState>,
     session_id: String,
 ) -> Result<(), String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     let dir = app
         .path()
         .app_data_dir()
@@ -776,8 +822,8 @@ pub async fn session_resume(
 /// 删除单条历史会话登记。archive=true 时把该条追加进
 /// `<data_dir>/sessions-archive-<时间戳>.json`(读现有数组→push→写回,
 /// 不存在则新建;时间戳照 clear_sessions 的毫秒格式);随后从登记簿移除。
-/// 该会话若在桥上有活桶,先 best-effort 取消其进行中的回合再删登记;
-/// 内核磁盘转录不删——与「清空历史」语义一致。
+/// 只删登记:原文件与内核转录都保留;删除成功后从桥上遗忘该会话(先尽力
+/// `cancel` 进行中的回合,`cancel` 仅尽力通知,不代表内核已完全停止)。
 #[tauri::command]
 pub async fn session_delete(
     app: AppHandle,
@@ -785,6 +831,7 @@ pub async fn session_delete(
     session_id: String,
     archive: bool,
 ) -> Result<String, String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     let dir = app.path().app_data_dir().ok().ok_or("无法解析数据目录")?;
     let entry = persist::load_sessions(&dir)
         .into_iter()
@@ -805,16 +852,15 @@ pub async fn session_delete(
             .map_err(|e| format!("归档序列化失败: {e}"))?;
         std::fs::write(&path, json).map_err(|e| format!("归档写入失败: {e}"))?;
     }
-    // 桥上有活桶:先 best-effort 取消进行中的回合(失败不阻断删除);
-    // 内核磁盘转录保留——与「清空历史」语义一致。
+    // 持久化成功后才遗忘:删除失败须桥内原样;不以 is_running 阻挡,进程已退出也要清登记。
+    persist::remove_session(&dir, &session_id).map_err(|e| format!("删除失败: {e}"))?;
     let b = bridge.inner.lock().await.clone();
     if let Some(b) = b {
-        if b.is_running() && b.sessions().iter().any(|(id, _, _)| id == &session_id) {
-            let _ = b.cancel(&session_id);
-        }
+        let _ = b.cancel(&session_id);
+        b.forget_session(&session_id);
     }
-    persist::remove_session(&dir, &session_id).map_err(|e| format!("删除失败: {e}"))?;
-    Ok(format!("已删除会话「{}」", &session_id[..8.min(session_id.len())]))
+    let short: String = session_id.chars().take(8).collect();
+    Ok(format!("已删除会话记录「{short}」(原文件与内核转录保留)"))
 }
 
 /// 历史会话数量(启动自动连接的判断依据)。
@@ -825,11 +871,28 @@ pub async fn sessions_count(app: AppHandle) -> Result<usize, String> {
 }
 
 /// 清空历史会话登记;archive=true 时先改名留档。仅清 GUI 登记簿,
-/// agent 侧对话内容不动。
+/// agent 侧对话内容不动;登记清空成功后把这些会话从桥内一并遗忘。
 #[tauri::command]
-pub async fn sessions_clear(app: AppHandle, archive: bool) -> Result<String, String> {
+pub async fn sessions_clear(
+    app: AppHandle,
+    bridge: State<'_, BridgeState>,
+    archive: bool,
+) -> Result<String, String> {
+    let _lifecycle = bridge.lifecycle.lock().await;
     let dir = app.path().app_data_dir().ok().ok_or("无法解析数据目录")?;
-    persist::clear_sessions(&dir, archive).map_err(|e| format!("清空失败: {e}"))
+    let registered: Vec<String> = persist::load_sessions(&dir)
+        .into_iter()
+        .map(|s| s.session_id)
+        .collect();
+    let report = persist::clear_sessions(&dir, archive).map_err(|e| format!("清空失败: {e}"))?;
+    let b = bridge.inner.lock().await.clone();
+    if let Some(b) = b {
+        for id in &registered {
+            let _ = b.cancel(id);
+            b.forget_session(id);
+        }
+    }
+    Ok(report)
 }
 
 /// 删除任务工作区(含目录内全部产物文件,不可恢复)。校验链:

@@ -45,6 +45,20 @@ gui/src-tauri/src/     Rust 后端
 gui/src-tauri/capabilities/  能力集:逐条授权,禁止批量放开(方案 D4)
 ```
 
+## 办公界面回归测试(gui/tests/)
+
+- `office-workbench.html`:模拟桌面接口的全链路回归。`npm run dev` 后访问
+  `http://localhost:5173/tests/office-workbench.html`,控制台依次调用
+  `runOfficeChecks()`、`runControlChecks()`、`makeVideoFixture()`、`runMediaChecks()`。
+- `orchestra-t1.html` / `orchestra-t2-frontend.html` / `orchestra-t2-permissions.mjs`:
+  乐团派工的锁定验收(草稿归属、删除生命周期、权限竞态),调用页内
+  `runT1Case(mode)` / `runT2Case(mode)` 或 import 后跑权限导出。**这些文件哈希被
+  指挥官锁定,改实现不改测试。**
+- `check-document-import.mjs` / `check-acp-lifecycle.mjs`:`node gui/tests/<脚本>`
+  离线隔离编译真实代码(文档导入函数 / ACP 桥)并跑行为测试。
+- 以上均为浏览器模拟 IPC 或隔离编译,不覆盖完整 Tauri 编译、真实内核/模型与
+  原生拖拽;真机验收走《操作手册》与桌面出包流程。
+
 ## 安全基线(方案 v2 D4,M1 已落地部分)
 
 - 生产 CSP:`script-src 'self'` + `object-src 'none'` + `base-uri 'self'`;

@@ -45,6 +45,8 @@ pub fn run() -> i32 {
             commands::agent_stop,
             commands::agent_status,
             commands::session_start,
+            commands::session_import_document,
+            commands::session_documents,
             commands::session_prompt,
             commands::session_cancel,
             commands::session_models,

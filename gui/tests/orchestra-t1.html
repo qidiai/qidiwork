@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>乐团 T1 锁定验收：草稿归属</title></head><body><div id="app"></div>
+<script type="module">
+import { mockIPC } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import { createApp, nextTick } from 'vue';
+import { version } from '../package.json';
+import '../src/styles/global.css';
+
+localStorage.setItem('qidi.onboarded', 'true');
+localStorage.setItem('qidi.sidebarCollapsed', '0');
+localStorage.setItem('qidi.panelCollapsed', '0');
+localStorage.removeItem('qidi.lastCwd');
+document.documentElement.style.width = '1280px';
+const state = { calls: [], sessions: [], failStart: false, failPrompt: false };
+const revoked = [];
+const revoke = URL.revokeObjectURL.bind(URL);
+URL.revokeObjectURL = url => { revoked.push(url); revoke(url); };
+mockIPC(async (cmd, args = {}) => {
+  state.calls.push({ cmd, args });
+  switch (cmd) {
+    case 'onboarding_marker_read':
+    case 'plugin:notification|is_permission_granted': return true;
+    case 'sessions_count': return 0;
+    case 'app_version': return version;
+    case 'auth_status': return { logged_in: false };
+    case 'office_scan':
+    case 'skills_list':
+    case 'office_artifacts':
+    case 'session_documents': return [];
+    case 'office_watch_start': return;
+    case 'settings_read': return { default_model: null, models: [] };
+    case 'sessions_history': return [...state.sessions];
+    case 'session_summary': return { title: null };
+    case 'session_models': return null;
+    case 'plugin:dialog|open': return 'C:/ChosenOffice';
+    case 'session_start': {
+      if (state.failStart) throw '测试：创建失败';
+      const session = { session_id: `t1-${state.sessions.length + 1}`, cwd: args.cwd || 'C:/OfficeTest', task: args.officeTask, title: null };
+      state.sessions.push(session);
+      return { ...session, default_workspace: !args.cwd, fallback_to_temp: false };
+    }
+    case 'session_set_title': return;
+    case 'session_prompt': if (state.failPrompt) throw '测试：发送失败'; return;
+    case 'session_import_document': return { name: args.name, path: `C:/OfficeTest/${args.sessionId}/${args.name}`, size: atob(args.data).length };
+    case 'session_transcript_tail': return { messages: [{ type: 'user', content: '这是已存在的历史任务' }], total_messages: 1, loaded_upto: 0, size_bytes: 100, missing: false, truncated: false };
+    default: throw new Error(`测试未提供接口：${cmd}`);
+  }
+}, { shouldMockEvents: true });
+const { default: App } = await import('../src/App.vue');
+createApp(App).mount('#app');
+const agent = await import('../src/composables/useAgent');
+const ui = agent.useAgentState();
+const tick = async () => {
+  await nextTick();
+  await new Promise(resolve => { const channel = new MessageChannel(); channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); }; channel.port2.postMessage(null); });
+  await nextTick();
+};
+async function wait(condition) {
+  const until = Date.now() + 5000;
+  while (Date.now() < until) { if (condition()) return; await tick(); }
+  throw new Error('等待预期状态超时');
+}
+function assert(ok, message) { if (!ok) throw new Error(message); }
+function type(value) { const input = document.querySelector('.composer-input'); input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })); }
+function add(...files) { const dt = new DataTransfer(); files.forEach(file => dt.items.add(file)); const input = document.querySelector('.file-input'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); }
+function image() { const c = document.createElement('canvas'); c.width = c.height = 16; const ctx = c.getContext('2d'); ctx.fillStyle = '#28533f'; ctx.fillRect(0, 0, 16, 16); return new File([Uint8Array.from(atob(c.toDataURL('image/png').split(',')[1]), x => x.charCodeAt(0))], '首屏图片.png', { type: 'image/png' }); }
+const text = () => document.querySelector('.composer-input').value;
+const fileNames = () => [...document.querySelectorAll('.attachment-name')].map(n => n.textContent);
+const prompts = () => state.calls.filter(c => c.cmd === 'session_prompt');
+
+window.runT1Case = async mode => {
+  assert(!ui.sessionId.value, '每个案例须从全新页面开始');
+  await tick();
+  if (mode === 'manual') {
+    type('首屏草稿必须完整保留');
+    document.querySelector('.task-card').click(); await tick();
+    const format = document.querySelector('.task-options select'); format.value = 'PDF 文件'; format.dispatchEvent(new Event('change', { bubbles: true }));
+    add(new File(['正文'], '首屏文档.docx'), image(), new File(['禁止'], '非法.exe'));
+    await tick();
+    const src = document.querySelector('.attachment-preview').src;
+    const initialError = document.querySelector('.attach-error').textContent;
+    state.failStart = true;
+    document.querySelector('.new-task:not(.dir)').click();
+    await wait(() => state.calls.some(c => c.cmd === 'session_start'));
+    await tick();
+    assert(!ui.sessionId.value && text() === '首屏草稿必须完整保留' && fileNames().length === 2, '创建失败不得迁移或清空首屏草稿');
+    state.failStart = false;
+    document.querySelector('.new-task.dir').click();
+    await wait(() => !!ui.sessionId.value); await tick();
+    const first = ui.sessionId.value;
+    assert(state.calls.filter(c => c.cmd === 'session_start').at(-1).args.cwd === 'C:/ChosenOffice', '指定目录创建必须仍使用用户选中目录');
+    assert(text() === '首屏草稿必须完整保留', '手动新建后首屏文字草稿丢失');
+    assert(fileNames().join('|') === '首屏文档.docx|首屏图片.png', '手动新建后附件丢失');
+    assert(document.querySelector('.task-options select').value === 'PDF 文件', '任务类型和交付格式必须保留');
+    assert(document.querySelector('.attach-error').textContent === initialError, '附件错误提示应跟随草稿');
+    assert(document.querySelector('.attachment-preview').src === src && !revoked.includes(src), '新建时不能销毁仍使用的预览资源');
+    assert(prompts().length === 0, '新建任务不能暗中发送');
+    const second = await agent.startSession(); await tick();
+    assert(!text() && fileNames().length === 0 && !document.querySelector('.task-options'), '已有会话中新建不得复制上一份草稿');
+    type('第二个任务自己的要求'); await tick();
+    agent.switchSession(first); await tick();
+    assert(text() === '首屏草稿必须完整保留' && fileNames().length === 2, '切回原任务必须保留原稿与附件');
+    agent.switchSession(second); await tick(); assert(text() === '第二个任务自己的要求', '切换不得覆盖另一任务草稿');
+    agent.switchSession(first); await tick();
+    document.querySelector('[aria-label="移除 首屏图片.png"]').click(); await tick();
+    assert(revoked.filter(url => url === src).length === 1, '移除图片须且仅须释放本张预览');
+    return { mode, result: 'PASS', cases: ['创建失败保留', '选目录手动新建迁移整份草稿', '不暗发', '不同任务不串稿', '预览资源生命周期'] };
+  }
+  if (mode === 'direct') {
+    type('直接发送后失败仍能重试'); add(new File(['正文'], '直接发送.docx')); await tick();
+    state.failPrompt = true;
+    document.querySelector('.composer-send').click();
+    await wait(() => document.querySelector('.attach-error')?.textContent.includes('未能发送')); await tick();
+    assert(text() === '直接发送后失败仍能重试' && fileNames().includes('直接发送.docx'), '发送自动建会话失败后不能丢草稿');
+    const imports = state.calls.filter(c => c.cmd === 'session_import_document').length;
+    state.failPrompt = false; document.querySelector('.composer-send').click();
+    await wait(() => fileNames().length === 0); await tick();
+    assert(!text() && state.calls.filter(c => c.cmd === 'session_import_document').length === imports, '重试不能重复导入或残留首屏草稿');
+    await agent.startSession(); await tick(); assert(!text() && !fileNames().length, '成功发送后的孤立草稿不得复现');
+    return { mode, result: 'PASS', cases: ['直接发送迁移', '失败重试', '成功后无残留'] };
+  }
+  if (mode === 'restore') {
+    type('这份新草稿不属于历史任务'); add(new File(['正文'], '尚未归属.docx')); await tick();
+    agent.rememberSessionCwd('history-task', 'C:/OldTask');
+    agent.rememberSessionBinding('history-task', '旧分组');
+    await emit('acp-event', { type: 'session_restored', session_id: 'history-task' }); await tick();
+    assert(!text() && !fileNames().length, '恢复历史会话不能偷走首屏草稿');
+    await agent.startSession(); await tick();
+    assert(text() === '这份新草稿不属于历史任务' && fileNames().includes('尚未归属.docx'), '未归属草稿应在下一次显式新建任务时保留');
+    assert(prompts().length === 0, '恢复和新建都不能暗中发送草稿');
+    return { mode, result: 'PASS', cases: ['恢复历史不接管新草稿', '后续显式创建领取未归属草稿'] };
+  }
+  throw new Error('未知案例');
+};
+</script></body></html>

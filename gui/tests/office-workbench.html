@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><title>办公工作台交互测试（模拟桌面接口）</title></head>
+<body><div id="app"></div>
+<script type="module">
+import { mockIPC } from '@tauri-apps/api/mocks';
+import { emit } from '@tauri-apps/api/event';
+import { createApp, nextTick } from 'vue';
+import '../src/styles/global.css';
+
+localStorage.setItem('qidi.onboarded', 'true');
+localStorage.setItem('qidi.sidebarCollapsed', '0');
+localStorage.setItem('qidi.panelCollapsed', '0');
+localStorage.removeItem('qidi.lastCwd');
+document.documentElement.style.width = '1280px';
+const state = window.officeTest = { calls: [], sessions: [], docs: {}, artifacts: [], models: {}, failImport: false, failPrompt: false, holdImport: false, failModel: false };
+const modelList = [
+  { modelId: 'vision', name: '测试视觉模型', _meta: { supportsReasoningEffort: true, reasoningEfforts: [{ id: 'low', value: 'low', label: '低' }, { id: 'high', value: 'high', label: '高' }], reasoningEffort: 'low' } },
+  { modelId: 'basic', name: '测试普通模型' },
+];
+mockIPC(async (cmd, args = {}) => {
+  state.calls.push({ cmd, args });
+  switch (cmd) {
+    case 'plugin:notification|is_permission_granted':
+    case 'onboarding_marker_read': return true;
+    case 'sessions_count': return 0;
+    case 'app_version': return '0.1.7';
+    case 'auth_status': return { logged_in: false };
+    case 'office_scan':
+    case 'skills_list': return [];
+    case 'office_watch_start': return;
+    case 'sessions_history': return [...state.sessions];
+    case 'session_start': {
+      const session = { session_id: `test-session-${state.sessions.length + 1}`, cwd: 'C:/OfficeTest', task: args.officeTask, title: null };
+      state.sessions.push(session);
+      state.models[session.session_id] = { currentModelId: 'vision', availableModels: structuredClone(modelList) };
+      return { ...session, default_workspace: true, fallback_to_temp: false };
+    }
+    case 'session_set_title': state.sessions.find(s => s.session_id === args.sessionId).title = args.title; return;
+    case 'session_summary': return { title: state.sessions.find(s => s.session_id === args.sessionId)?.title };
+    case 'settings_read': return { default_model: 'vision', models: [{ id: 'vision', name: '测试视觉模型', base_url: null, has_api_key: true }] };
+    case 'check_gui_update': return null;
+    case 'session_models': return structuredClone(state.models[args.sessionId]);
+    case 'session_set_model': {
+      if (state.failModel) throw '测试：设置失败';
+      if (state.holdModel) await new Promise(resolve => { state.releaseModel = resolve; });
+      const m = state.models[args.sessionId];
+      m.currentModelId = args.modelId;
+      if (args.effort) m.availableModels.find(model => model.modelId === args.modelId)._meta.reasoningEffort = args.effort;
+      return structuredClone(m);
+    }
+    case 'session_documents': return [...(state.docs[args.sessionId] ?? [])];
+    case 'session_import_document': {
+      if (state.holdImport) await new Promise(resolve => { state.releaseImport = resolve; });
+      if (state.failImport) throw '测试：无法写入资料';
+      const doc = { name: args.name, path: `C:/OfficeTest/参考资料/${args.sessionId}/${args.name}`, size: atob(args.data).length };
+      (state.docs[args.sessionId] ??= []).push(doc);
+      return doc;
+    }
+    case 'session_prompt': if (state.failPrompt) throw '测试：发送失败'; return;
+    case 'session_cancel': await emit('acp-event', { type: 'turn_completed', session_id: args.sessionId, stop_reason: 'cancelled' }); return;
+    case 'office_artifacts': return state.artifacts;
+    case 'office_read_file': return btoa(unescape(encodeURIComponent('# 周报\n\n本周已完成资料整理。')));
+    case 'office_open':
+    case 'permission_respond': return;
+    default: throw new Error(`测试未模拟的桌面命令：${cmd}`);
+  }
+}, { shouldMockEvents: true });
+const { default: App } = await import('../src/App.vue');
+createApp(App).mount('#app');
+const agent = await import('../src/composables/useAgent');
+const office = await import('../src/composables/useOffice');
+const previews = await import('../src/composables/usePreview');
+const files = await import('../src/composables/useOfficeFiles');
+const ui = agent.useAgentState();
+const tick = async () => {
+  await nextTick();
+  await new Promise(resolve => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); };
+    channel.port2.postMessage(null);
+  });
+  await nextTick();
+};
+const wait = async (condition) => {
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) { if (condition()) return; await tick(); }
+  throw new Error('等待交互状态超时');
+};
+function assert(condition, message) { if (!condition) throw new Error(message); }
+function add(items, drop = false) {
+  const transfer = new DataTransfer();
+  items.forEach(f => transfer.items.add(f));
+  if (drop) document.querySelector('.chat-view').dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+  else {
+    const input = document.querySelector('.file-input');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+function imageFile(name = '截图.png') {
+  const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 32;
+  const ctx = canvas.getContext('2d'); ctx.fillStyle = '#28533f'; ctx.fillRect(0, 0, 32, 32);
+  const data = atob(canvas.toDataURL('image/png').split(',')[1]);
+  return new File([Uint8Array.from(data, c => c.charCodeAt(0))], name, { type: 'image/png' });
+}
+function type(text) {
+  const input = document.querySelector('.composer-input');
+  input.value = text;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+const send = () => document.querySelector('.composer-send').click();
+const complete = async (id) => { await emit('acp-event', { type: 'turn_completed', session_id: id, stop_reason: 'end_turn' }); await tick(); };
+window.runOfficeChecks = async () => {
+  const passed = [];
+  await tick();
+  const logo = document.querySelector('.brand-logo');
+  await wait(() => logo?.complete && logo.naturalWidth > 0);
+  assert(logo.alt === '启迪 Q 标识' && logo.getBoundingClientRect().width === 34, '左上角应正确加载官网 Q 标识');
+  assert(!document.querySelector('.sidebar-brand > span'), '不能残留原启字标记');
+  passed.push('官网 Q 标识正常加载，旧启字标记已替换');
+  assert(document.querySelectorAll('.task-card').length === 4, '首页应有四类任务入口');
+  for (const card of document.querySelectorAll('.task-card')) {
+    card.click(); await tick();
+    assert(document.querySelector('.task-options select'), '任务入口应展示交付格式');
+    assert(!state.calls.some(c => c.cmd === 'session_prompt'), '点击入口不能直接执行任务');
+  }
+  passed.push('四类任务入口仅引导，交付格式可选');
+  document.querySelector('.task-options button').click();
+  add([new File(['x'], '工具.exe'), new File([new Uint8Array(32 * 1024 * 1024 + 1)], '超限.pdf')]);
+  await tick();
+  assert(document.querySelector('[role=alert]').textContent.includes('暂不支持'), '不支持格式须显示错误');
+  assert(document.querySelector('[role=alert]').textContent.includes('32MB'), '超大文档须显示错误');
+  assert(!document.querySelector('.attachment-chip'), '错误文件不能添加');
+  passed.push('非法格式、超大文档明确拒绝');
+  add(Array.from({ length: 11 }, (_, i) => new File(['资料'], `文件${i}.txt`)));
+  await tick();
+  assert(document.querySelectorAll('.attachment-chip').length === 10, '每次最多添加十个文件');
+  assert(document.querySelector('[role=alert]').textContent.includes('最多添加 10'), '超过数量限制必须提示');
+  for (const button of document.querySelectorAll('.attachment-chip button')) button.click();
+  await tick();
+  const duplicate = new File(['重复'], '同一份.pdf');
+  add([duplicate, duplicate]); await tick();
+  assert(document.querySelectorAll('.attachment-chip').length === 1, '重复选择同一文件不应重复添加');
+  document.querySelector('.attachment-chip button').click(); await tick();
+  passed.push('文件数量限制、重复选择与移除');
+  add([new File(['会议资料'], '会议纪要.docx')], true);
+  type('把会议纪要整理成周报'); await tick();
+  assert(document.querySelector('.attachment-name').textContent === '会议纪要.docx', '拖入文档须展示文件名');
+  send(); await wait(() => state.calls.some(c => c.cmd === 'session_prompt'));
+  await tick();
+  const first = ui.sessionId.value;
+  const prompt = state.calls.find(c => c.cmd === 'session_prompt');
+  assert(prompt.args.sessionId === first && prompt.args.text.includes('参考资料/') && prompt.args.text.includes('会议纪要.docx'), '文件路径应随原任务下发');
+  assert(document.querySelector('.reference-card'), '发送后应显示参考资料');
+  assert(!document.querySelector('.attachment-chip') && !document.querySelector('.composer-input').value, '成功发送后清理输入');
+  passed.push('拖入文档、导入副本、发送路径、展示资料闭环');
+  type('再补充一个结论'); await tick(); send(); await tick();
+  assert(ui.queued.value.length === 1, '运行中的要求应排队');
+  const cancels = state.calls.filter(c => c.cmd === 'session_cancel').length;
+  document.querySelector('.composer-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  assert(state.calls.filter(c => c.cmd === 'session_cancel').length === cancels, '空回车不能中断任务');
+  agent.removeQueued(ui.queued.value[0].id); await complete(first);
+  passed.push('追加要求排队，空回车不误中止');
+  add([new File(['a'], '待重试.pdf')]); type('检查资料'); state.failImport = true; await tick(); send();
+  await wait(() => document.querySelector('[role=alert]')?.textContent.includes('无法写入'));
+  assert(document.querySelector('.attachment-chip') && document.querySelector('.composer-input').value === '检查资料', '失败时必须保留输入和文件');
+  state.failImport = false; state.failPrompt = true; send();
+  await wait(() => document.querySelector('[role=alert]')?.textContent.includes('任务未能发送'));
+  const importedCount = state.calls.filter(c => c.cmd === 'session_import_document').length;
+  state.failPrompt = false; send(); await wait(() => !document.querySelector('.attachment-chip'));
+  assert(state.calls.filter(c => c.cmd === 'session_import_document').length === importedCount, '重试发送不应重复导入');
+  await complete(first); passed.push('导入/发送失败保留草稿，重试不重复复制');
+  type('任务一的草稿'); add([new File(['a'], '任务一.pdf')]); await tick();
+  const second = await agent.startSession(); await tick();
+  assert(!document.querySelector('.attachment-chip') && !document.querySelector('.composer-input').value, '新任务不能继承旧任务草稿');
+  assert(!document.querySelector('.reference-card'), '新任务不能显示旧任务资料');
+  agent.switchSession(first); await tick();
+  assert(document.querySelector('.attachment-name').textContent === '任务一.pdf', '切回应恢复待发附件');
+  assert(document.querySelector('.composer-input').value === '任务一的草稿', '切回应恢复草稿');
+  document.querySelector('.attachment-chip button').click();
+  passed.push('任务间草稿与参考资料隔离');
+  state.artifacts = [{ name: '周报.md', path: 'C:/OfficeTest/周报.md', size: 42, note: '测试成果', registered_at: 1, mtime: 1, skill: '' }];
+  await office.switchTask('QidiWork'); await tick();
+  document.querySelector('.card-actions .act').click(); await tick();
+  assert(document.querySelector('.document-view') && document.querySelector('.composer-input').value === '任务一的草稿', '预览应并排显示并保留草稿');
+  assert(document.querySelector('.artifact-panel').style.display === 'none', '预览应腾出文件栏空间');
+  for (const width of [1280, 960]) {
+    document.documentElement.style.width = `${width}px`; await tick();
+    const rect = document.querySelector('.composer-input').getBoundingClientRect();
+    assert(rect.width > 200 && document.querySelector('.document-view').getBoundingClientRect().width > 300, `宽度${width}预览与输入框不能被挤没`);
+  }
+  document.documentElement.style.width = '1280px';
+  type('把第二段写得更简洁'); await tick(); send(); await wait(() => ui.turnInProgress.value);
+  const last = state.calls.filter(c => c.cmd === 'session_prompt').at(-1);
+  assert(last.args.text.includes('C:/OfficeTest/周报.md'), '预览修改应附上当前成果路径');
+  await complete(first);
+  previews.closeAllPreviews(); await tick();
+  passed.push('并排预览保留草稿、修改指向文件、960/1280布局');
+  add([new File(['a'], '跨任务.pdf')]); type('处理原任务资料'); state.holdImport = true; await tick(); send();
+  await wait(() => !!state.releaseImport);
+  agent.switchSession(second); await tick(); state.holdImport = false; state.releaseImport();
+  await wait(() => state.calls.filter(c => c.cmd === 'session_prompt').at(-1)?.args.text.includes('跨任务.pdf'));
+  assert(state.calls.filter(c => c.cmd === 'session_prompt').at(-1).args.sessionId === first, '导入途中切换任务也不能串发');
+  assert(!document.querySelector('.reference-card'), '导入结束不能污染当前其他任务');
+  await complete(first); passed.push('导入期间切换任务，发送仍锁定原任务');
+  add([imageFile()]); type('说明图片内容'); await tick(); send();
+  await wait(() => state.calls.filter(c => c.cmd === 'session_prompt').at(-1)?.args.images.length === 1);
+  await complete(second); passed.push('图片仍按原有多模态接口下发');
+  type('确认后再发送'); await tick();
+  await emit('acp-event', { type: 'permission_request', session_id: second, request_id: 7, tool_call: { title: '是否允许保存成果？' }, options: [{ optionId: 'once', name: 'Allow once', kind: 'allow_once' }] });
+  await tick();
+  const promptsBefore = state.calls.filter(c => c.cmd === 'session_prompt').length;
+  assert(document.querySelector('.composer-input').disabled && document.querySelector('.composer-send').disabled, '待确认时禁止发送');
+  document.querySelector('.composer-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  assert(state.calls.filter(c => c.cmd === 'session_prompt').length === promptsBefore, '键盘不能绕过待确认状态');
+  document.querySelector('.option-btn').click(); await tick();
+  assert(state.calls.some(c => c.cmd === 'permission_respond' && c.args.optionId === 'once'), '权限选项仍按真实字段发送');
+  assert(document.querySelector('.composer-input').value === '确认后再发送', '确认操作应保留草稿');
+  const transfer = new DataTransfer(); transfer.items.add(new File(['资料'], '意外拖入.pdf'));
+  const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer });
+  document.querySelector('.sidebar').dispatchEvent(drop);
+  assert(drop.defaultPrevented, '拖到侧栏不能导致页面导航');
+  passed.push('权限确认不被快捷键绕过，拖到侧栏不误导航');
+  await files.loadDocuments(first);
+  window.officeResults = passed;
+  return passed;
+};
+
+window.runControlChecks = async () => {
+  const passed = [];
+  const id = await agent.startSession(); await tick();
+  const model = () => document.querySelector('.model-controls select[aria-label="当前模型"]');
+  const effort = () => document.querySelector('.model-controls select[aria-label="思考强度"]');
+  const pick = async (select, value) => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })); await tick(); };
+  assert(model() && effort(), '模型和思考强度必须常驻输入区');
+  assert(document.querySelector('.usage-summary').textContent.includes('尚无统计'), '顶部无用量时明确显示尚无统计');
+  assert(!document.querySelector('.status-bar select'), '底部不能残留旧模型选择');
+  await pick(model(), 'basic');
+  assert(state.calls.some(c => c.cmd === 'session_set_model' && c.args.modelId === 'basic'), '模型选择必须真实调用接口');
+  assert(effort().disabled && effort().textContent.includes('未提供强度设置'), '不支持强度时显示明确原因');
+  await pick(model(), 'vision'); await pick(effort(), 'high');
+  assert(state.calls.some(c => c.cmd === 'session_set_model' && c.args.effort === 'high'), '思考强度必须按真实字段下发');
+  state.failModel = true; await pick(model(), 'basic'); state.failModel = false;
+  assert(model().value === 'vision' && document.querySelector('.control-error'), '失败后恢复真实选中项');
+  passed.push('模型与思考强度常驻，真实下发，失败回退');
+  type('等待设置完成'); state.holdModel = true;
+  await pick(effort(), 'low'); await wait(() => !!state.releaseModel);
+  assert(document.querySelector('.composer-send').disabled, '设置在途不能发送任务');
+  state.holdModel = false; state.releaseModel(); await wait(() => !document.querySelector('.composer-send').disabled);
+  document.querySelector('.model-settings').click(); await tick();
+  await wait(() => document.querySelector('.modal-mask'));
+  assert(document.querySelector('.modal-mask').textContent.includes('默认模型'), '输入区模型设置必须能打开默认模型配置');
+  document.querySelector('.modal-mask .modal-close').click(); await tick();
+  passed.push('切换模型时禁止抢跑，默认模型设置可打开');
+  await emit('acp-event', { type: 'turn_usage', session_id: id, meta: { modelId: 'vision', usage: { inputTokens: 1200, outputTokens: 300, costUsdTicks: 250000000, numTurns: 1 } } });
+  await complete(id);
+  const summary = document.querySelector('.usage-summary');
+  assert(summary.textContent.includes('1.5k tokens') && summary.textContent.includes('$0.0250'), '顶部必须显示实际用量和美元费用');
+  summary.querySelector('summary').click(); await tick();
+  assert(summary.open && summary.textContent.includes('历史回放不计入'), '明细应注明统计范围');
+  await emit('acp-event', { type: 'turn_usage', session_id: id, meta: { usage: { inputTokens: 100, outputTokens: 100 } } });
+  await complete(id);
+  assert(document.querySelector('.usage-summary summary').textContent.includes('≈'), '缺失部分费用不能伪装为完整账单');
+  await agent.startSession(); await tick();
+  assert(document.querySelector('.usage-summary summary').textContent.includes('尚无统计'), '用量必须跟随任务切换');
+  passed.push('实际用量、美元费用、部分计费与任务隔离');
+  window.controlResults = passed;
+  return passed;
+};
+
+window.makeVideoFixture = async () => {
+  assert(typeof MediaRecorder !== 'undefined', '浏览器不支持生成本地测试视频');
+  const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 90;
+  const context = canvas.getContext('2d');
+  const stream = canvas.captureStream(0);
+  const track = stream.getVideoTracks()[0];
+  const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+  const chunks = [];
+  recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  const done = new Promise((resolve, reject) => { recorder.onstop = resolve; recorder.onerror = reject; });
+  try {
+    recorder.start();
+    for (const color of ['#ff0000', '#00ff00', '#0000ff', '#ffff00']) {
+      context.fillStyle = color; context.fillRect(0, 0, 160, 90); track.requestFrame();
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+    recorder.stop(); await done;
+    window.videoFixture = new File(chunks, '画面测试.webm', { type: 'video/webm' });
+    return { size: window.videoFixture.size, type: window.videoFixture.type };
+  } finally { stream.getTracks().forEach(t => t.stop()); }
+};
+
+window.runMediaChecks = async () => {
+  const passed = [];
+  const media = await import('../src/services/media');
+  assert(window.videoFixture, '请先生成测试视频');
+  const video = window.videoFixture;
+  const analysis = await media.extractVideoFrames(video);
+  assert(analysis.frames.length > 0 && analysis.frames.length <= 6 && Number.isFinite(analysis.duration), '抽帧数量及时长必须真实有效');
+  const colors = [];
+  for (const frame of analysis.frames) {
+    const image = new Image(); image.src = `data:${frame.mimeType};base64,${frame.data}`; await image.decode();
+    assert(image.naturalWidth > 0 && image.naturalWidth <= 1280 && image.naturalHeight <= 1280, '每帧须是可解码且限尺寸的图片');
+    const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0); colors.push([...ctx.getImageData(5, 5, 1, 1).data].slice(0, 3));
+    assert(frame.timestamp > 0 && frame.timestamp < analysis.duration, '采样时间必须落在真实时长内');
+  }
+  assert(colors.some(c => c.some(v => v > 150)), '不能把黑帧当成成功');
+  if (colors.length > 1) assert(new Set(colors.map(c => c.join(','))).size > 1, '不同时间必须取得不同画面而非重复首帧');
+  passed.push(`真实视频解码并抽取 ${analysis.frames.length} 张可读画面`);
+  const id = await agent.startSession(); await tick();
+  add([video], true); type('分析这段视频的画面'); await tick();
+  assert(document.querySelector('video.attachment-preview') && document.querySelector('.media-notice').textContent.includes('不含声音'), '发送前必须可预览并说明视频限制');
+  for (const width of [1280, 960]) {
+    document.documentElement.style.width = `${width}px`; await tick();
+    const bottom = document.querySelector('.status-bar').getBoundingClientRect().top;
+    assert(document.querySelector('.composer-send').getBoundingClientRect().bottom <= bottom, `宽度${width}视频附件不能把发送按钮挤出窗口`);
+    assert(document.querySelector('.model-controls').getBoundingClientRect().bottom <= bottom, `宽度${width}模型控件不能被裁切`);
+  }
+  document.documentElement.style.width = '1280px';
+  const before = state.calls.filter(c => c.cmd === 'session_prompt').length;
+  send(); await wait(() => state.calls.filter(c => c.cmd === 'session_prompt').length > before);
+  const prompt = state.calls.filter(c => c.cmd === 'session_prompt').at(-1).args;
+  assert(prompt.images.length === analysis.frames.length && prompt.images.every(i => i.mimeType === 'image/jpeg'), '视频必须走真实图片块发送');
+  assert(prompt.text.includes('时间点') && prompt.text.includes('不含声音') && prompt.text.includes('未发送原视频'), '提示词不能把抽帧伪装成完整视频');
+  assert(!state.calls.some(c => c.cmd === 'session_import_document' && c.args.name === video.name), '不能把视频原片偷偷导入并声称已经分析');
+  await complete(id); passed.push('拖入、预览、限制提示、真实图片块下发闭环');
+  add([new File(['not video'], '损坏.mp4', { type: 'video/mp4' })]); type('检查视频'); await tick();
+  const beforeInvalid = state.calls.filter(c => c.cmd === 'session_prompt').length;
+  send(); await wait(() => document.querySelector('.attach-error')?.textContent.includes('视频'));
+  assert(state.calls.filter(c => c.cmd === 'session_prompt').length === beforeInvalid && document.querySelector('.attachment-chip'), '坏视频必须保留附件且不能静默发送');
+  document.querySelector('.attachment-chip button').click(); await tick();
+  const controller = new AbortController(); controller.abort();
+  let aborted = false; try { await media.extractVideoFrames(video, controller.signal); } catch (e) { aborted = e.name === 'AbortError'; }
+  assert(aborted, '取消必须终止抽帧');
+  add([video]); await tick(); send(); await tick();
+  document.querySelector('.preparation-status button')?.click();
+  await wait(() => document.querySelector('.attach-error')?.textContent.includes('已取消准备'));
+  assert(document.querySelector('.attachment-chip'), '取消后保留原附件');
+  document.querySelector('.attachment-chip button').click(); await tick();
+  passed.push('损坏视频和取消准备不丢附件、不发送部分画面');
+  add([new File([new Uint8Array(media.MAX_VIDEO_BYTES + 1)], '过大.mp4')]); await tick();
+  assert(document.querySelector('.attach-error').textContent.includes('100MB') && !document.querySelector('.attachment-chip'), '超大视频必须提前拒绝');
+  add([new File([video], '一.webm'), new File([video], '二.webm'), new File([video], '三.webm')]); await tick();
+  assert(document.querySelectorAll('.attachment-chip').length === 2 && document.querySelector('.attach-error').textContent.includes('画面过多'), '不能越过内核16张图片处理上限');
+  for (const button of document.querySelectorAll('.attachment-chip button')) button.click(); await tick();
+  const img = imageFile('粘贴图片.png'); const transfer = new DataTransfer(); transfer.items.add(img);
+  document.querySelector('.composer-input').dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer })); await tick();
+  await wait(() => document.querySelector('img.attachment-preview')?.naturalWidth > 0);
+  assert(document.querySelector('.attachment-name').textContent === img.name, '粘贴图片必须提供真实预览');
+  document.querySelector('.attachment-chip button').click(); await tick();
+  passed.push('视频大小与画面预算限制，图片粘贴和预览');
+  window.mediaResults = { passed, duration: analysis.duration, colors };
+  return window.mediaResults;
+};
+</script></body></html>

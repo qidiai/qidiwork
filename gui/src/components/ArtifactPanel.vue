@@ -1,302 +1,141 @@
 <script setup lang="ts">
-// 右区:产物面板。数据来自 office-artifact 技能登记的 manifest
-// (~/.qidi/office-workspaces/<task>/manifest.json),office-event 实时刷新。
-// 「打开」= 系统默认程序(WPS 等);「预览」= 中区 docx 预览 Tab
-// (DocxPreview.vue,矢量图形文档自动降级为系统打开)。
+import { computed, ref, watch } from "vue";
 import { initOffice, openArtifact, useOfficeState, type ArtifactCard } from "../composables/useOffice";
 import { openPreview, previewKey } from "../composables/usePreview";
-import { pushSystem } from "../composables/useAgent";
-import { ref, watch } from "vue";
+import { pushSystem, useAgentState } from "../composables/useAgent";
+import { documentsBySession, loadDocuments } from "../composables/useOfficeFiles";
 import { panelCollapsed, panelWidth, PANEL_MIN, PANEL_MAX } from "../composables/useUiLayout";
 
-async function open(card: ArtifactCard): Promise<void> {
+const { currentTask, artifacts } = useOfficeState();
+const { sessionId, connected } = useAgentState();
+const documents = computed(() => documentsBySession.value[sessionId.value] ?? []);
+const documentError = ref("");
+const loading = ref(false);
+const opening = ref("");
+const unseen = ref(false);
+
+async function refreshDocuments(): Promise<void> {
+  const id = sessionId.value;
+  documentError.value = "";
+  if (!id || !connected.value) return;
+  loading.value = true;
   try {
-    await openArtifact(card);
+    await loadDocuments(id);
   } catch (e) {
-    pushSystem(`打开失败:${String(e)}`);
+    if (sessionId.value === id) documentError.value = `资料列表读取失败：${String(e)}`;
+  } finally {
+    if (sessionId.value === id) loading.value = false;
   }
 }
-
-/** 产物卡片 → 中区预览 Tab(重复点同一产物=激活已有 Tab) */
-function preview(card: ArtifactCard): void {
-  openPreview({
-    key: previewKey(currentTask.value, card.name),
-    task: currentTask.value,
-    name: card.name,
-  });
-}
-
-const { currentTask, artifacts } = useOfficeState();
-
+watch([sessionId, connected], () => { loading.value = false; void refreshDocuments(); }, { immediate: true });
+watch(() => artifacts.value.length, (count, previous) => {
+  if (count > previous && panelCollapsed.value) unseen.value = true;
+});
+watch(panelCollapsed, (collapsed) => { if (!collapsed) unseen.value = false; });
 void initOffice();
 
+async function open(card: ArtifactCard): Promise<void> {
+  opening.value = card.path;
+  try { await openArtifact(card); }
+  catch (e) { pushSystem(`打开文件失败：${String(e)}`); }
+  finally { opening.value = ""; }
+}
+function preview(card: ArtifactCard): void {
+  openPreview({ key: previewKey(currentTask.value, card.name), task: currentTask.value, name: card.name });
+}
 function sizeText(n: number): string {
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
-
-function timeText(epoch: number): string {
-  if (!epoch) return "";
-  const d = new Date(epoch * 1000);
-  const pad = (v: number) => String(v).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-// 折叠期间有新产物登记 → 竖条上亮红点,展开即消。
-const unseen = ref(false);
-let lastCount = artifacts.value.length;
-watch(artifacts, (a) => {
-  if (a.length > lastCount && panelCollapsed.value) unseen.value = true;
-  lastCount = a.length;
-});
-watch(panelCollapsed, (v) => {
-  if (!v) unseen.value = false;
-});
-
-/** 拖拽左缘调宽:mousemove 全程挂 window,松手即卸。 */
+function fileKind(name: string): string { return name.split(".").pop()?.toUpperCase() ?? "文件"; }
 function startResize(e: MouseEvent): void {
   const startX = e.clientX;
   const startW = panelWidth.value;
-  const onMove = (ev: MouseEvent): void => {
-    panelWidth.value = Math.min(
-      PANEL_MAX,
-      Math.max(PANEL_MIN, startW - (ev.clientX - startX))
-    );
-  };
-  const onUp = (): void => {
-    window.removeEventListener("mousemove", onMove);
-    window.removeEventListener("mouseup", onUp);
-  };
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("mouseup", onUp);
+  const move = (ev: MouseEvent) => { panelWidth.value = Math.min(PANEL_MAX, Math.max(PANEL_MIN, startW - (ev.clientX - startX))); };
+  const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
   e.preventDefault();
-}
-
-function iconFor(name: string): string {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (["docx", "doc"].includes(ext)) return "📄";
-  if (["xlsx", "xls"].includes(ext)) return "📊";
-  if (["pptx", "ppt"].includes(ext)) return "📽";
-  if (ext === "pdf") return "📕";
-  if (["png", "jpg", "jpeg"].includes(ext)) return "🖼";
-  if (["html", "md", "txt"].includes(ext)) return "📝";
-  return "📎";
 }
 </script>
 
 <template>
-  <aside v-if="panelCollapsed" class="artifact-rail" title="展开产物面板" @click="panelCollapsed = false">
-    <button class="rail-expand">»</button>
-    <span class="rail-text">产物</span>
-    <span v-if="unseen" class="rail-dot"></span>
+  <aside v-if="panelCollapsed" class="artifact-rail">
+    <button class="rail-expand" title="展开资料与成果" @click="panelCollapsed = false">«</button>
+    <button class="rail-text" @click="panelCollapsed = false">资料与成果</button>
+    <span v-if="unseen" class="rail-dot" aria-label="有新成果"></span>
   </aside>
-  <aside v-else class="artifact-panel">
+  <aside v-else class="artifact-panel" aria-label="资料与成果">
     <div class="resize-handle" @mousedown="startResize"></div>
-    <div class="panel-title">
-      产物面板
-      <button class="collapse-btn" title="折叠产物面板" @click="panelCollapsed = true">⇆</button>
-    </div>
+    <div class="panel-title">资料与成果<button class="collapse-btn" title="折叠资料与成果" @click="panelCollapsed = true">»</button></div>
     <div class="panel-body">
-      <p v-if="!currentTask" class="empty-hint">
-        任务产出的交付文件会出现在这里。
-      </p>
-      <template v-else>
-        <p class="task-line">任务:{{ currentTask }} · {{ artifacts.length }} 项</p>
-        <ul class="card-list">
-          <li v-for="card in artifacts" :key="card.path" class="card">
-            <div class="card-head">
-              <span class="card-icon">{{ iconFor(card.name) }}</span>
-              <span class="card-name" :title="card.path">{{ card.name }}</span>
-            </div>
-            <div class="card-meta">
-              {{ sizeText(card.size) }} · {{ timeText(card.registered_at) }}
-              <span v-if="card.skill" class="skill-tag">{{ card.skill }}</span>
-            </div>
-            <div class="card-actions">
-              <button class="act" @click="preview(card)">预览</button>
-              <button class="act primary" @click="open(card)">打开</button>
-            </div>
+      <section class="file-section">
+        <div class="section-heading"><h2>参考资料 <span>{{ documents.length }}</span></h2><button v-if="sessionId && connected" class="text-btn" :disabled="loading" @click="refreshDocuments">{{ loading ? '读取中…' : '刷新' }}</button></div>
+        <p class="section-description">当前任务导入的文档副本</p>
+        <div v-if="documentError" class="file-error" role="alert">{{ documentError }}</div>
+        <ul v-if="documents.length" class="card-list">
+          <li v-for="doc in documents" :key="doc.path" class="reference-card">
+            <div class="card-head"><span class="file-type">{{ fileKind(doc.name) }}</span><span class="card-name" :title="doc.name">{{ doc.name }}</span></div>
+            <div class="card-meta">{{ sizeText(doc.size) }} · 本地副本</div>
+            <details class="file-location"><summary>查看保存位置</summary><p>{{ doc.path }}</p></details>
           </li>
         </ul>
-        <p v-if="artifacts.length === 0" class="empty-hint">
-          本任务暂无产物。产出的文件由办公技能自动登记至此。
-        </p>
-      </template>
+        <div v-else-if="!loading && !documentError" class="empty-state"><span class="empty-symbol">＋</span><p>把资料带进来</p><small>在输入框添加文档并发送后，<br>参考资料会保存在这里。</small></div>
+      </section>
+      <section class="file-section results-section">
+        <div class="section-heading"><h2>成果文件 <span>{{ artifacts.length }}</span></h2></div>
+        <p class="section-description">{{ currentTask ? `文件分组：${currentTask}` : '完成后的文件，随时查看和编辑' }}</p>
+        <ul v-if="artifacts.length" class="card-list">
+          <li v-for="card in artifacts" :key="card.path" class="card">
+            <div class="card-head"><span class="file-type">{{ fileKind(card.name) }}</span><span class="card-name" :title="card.name">{{ card.name }}</span></div>
+            <div class="card-meta">{{ sizeText(card.size) }}</div>
+            <p v-if="card.note" class="card-note">{{ card.note }}</p>
+            <div class="card-actions"><button class="act" @click="preview(card)">查看预览</button><button class="act primary" :disabled="!!opening" title="使用电脑上的默认程序打开，例如 WPS 或 Office" @click="open(card)">{{ opening === card.path ? '打开中…' : '打开文件' }}</button></div>
+            <details class="file-location"><summary>查看保存位置</summary><p>{{ card.path }}</p></details>
+          </li>
+        </ul>
+        <div v-else class="empty-state"><span class="empty-symbol">▤</span><p>成果会出现在这里</p><small>预览后可以继续提修改意见，<br>也可以用 WPS / Office 编辑。</small></div>
+      </section>
     </div>
   </aside>
 </template>
 
 <style scoped>
-.artifact-panel {
-  background: var(--bg-panel);
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  position: relative;
-}
-
-/* 折叠竖条:窄条 + 竖排文字,有新产物时亮红点 */
-.artifact-rail {
-  background: var(--bg-panel);
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 10px;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.artifact-rail:hover {
-  background: var(--bg-hover);
-}
-
-.rail-expand {
-  border: none;
-  background: none;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px;
-}
-
-.rail-text {
-  writing-mode: vertical-rl;
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-  letter-spacing: 0.2em;
-}
-
-.rail-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--danger, #c0392b);
-}
-
-/* 左缘拖拽调宽的热区 */
-.resize-handle {
-  position: absolute;
-  left: -3px;
-  top: 0;
-  bottom: 0;
-  width: 7px;
-  cursor: col-resize;
-  z-index: 5;
-}
-
-.resize-handle:hover {
-  background: var(--accent-soft);
-}
-
-.collapse-btn {
-  float: right;
-  border: none;
-  background: none;
-  color: var(--text-disabled);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 0 2px;
-}
-
-.collapse-btn:hover {
-  color: var(--text-primary);
-}
-
-.panel-title {
-  padding: 12px 14px;
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--border);
-}
-
-.panel-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px;
-}
-
-.task-line {
-  margin: 0 0 10px;
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.card-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px;
-  background: var(--bg-base);
-}
-
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.card-icon {
-  font-size: 18px;
-}
-
-.card-name {
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.card-meta {
-  margin-top: 4px;
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.skill-tag {
-  margin-left: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-size: var(--font-size-sm);
-}
-
-.card-actions {
-  margin-top: 8px;
-  display: flex;
-  gap: 8px;
-}
-
-.act {
-  flex: 1;
-  border: 1px solid var(--border);
-  background: var(--bg-panel);
-  border-radius: 6px;
-  padding: 5px 0;
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.act.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-}
-
-.act:disabled {
-  color: var(--text-disabled);
-  border-color: var(--border);
-}
+.artifact-panel { background: var(--bg-panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; min-width: 0; position: relative; }
+.artifact-rail { background: var(--bg-panel); border-left: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 12px; gap: 12px; }
+.rail-expand, .rail-text { border: 0; background: none; color: var(--text-secondary); padding: 2px; }
+.rail-text { writing-mode: vertical-rl; font-size: 12px; letter-spacing: .15em; }
+.rail-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.resize-handle { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 5; }
+.resize-handle:hover { background: var(--accent-soft); }
+.panel-title { display: flex; justify-content: space-between; align-items: center; height: 48px; flex-shrink: 0; padding: 12px 18px; font-size: 13px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.collapse-btn { border: 0; background: none; color: var(--text-secondary); font-size: 16px; }
+.panel-body { flex: 1; overflow-y: auto; padding: 18px 16px; }
+.section-heading { display: flex; align-items: center; justify-content: space-between; }
+h2 { font-size: 13px; font-weight: 600; margin: 0; }
+h2 span { color: var(--text-secondary); margin-left: 6px; font-size: 12px; font-weight: 400; }
+.text-btn { border: 0; background: none; color: var(--accent); font-size: 12px; }
+.section-description { font-size: 12px; color: var(--text-secondary); margin: 8px 0 16px; overflow-wrap: anywhere; }
+.results-section { border-top: 1px solid var(--border); margin-top: 24px; padding-top: 24px; }
+.card-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.card, .reference-card { border: 1px solid var(--border); border-radius: 9px; padding: 12px; background: var(--bg-panel); }
+.reference-card { background: var(--bg-base); border-color: transparent; }
+.card-head { display: flex; align-items: center; gap: 8px; }
+.file-type { flex-shrink: 0; font-size: 10px; font-weight: 600; color: var(--accent); padding: 5px; border: 1px solid var(--accent-soft); border-radius: 4px; }
+.card-name { font-weight: 500; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-meta { margin-top: 8px; font-size: 11px; color: var(--text-secondary); }
+.card-note { font-size: 12px; line-height: 1.6; color: var(--text-secondary); overflow-wrap: anywhere; }
+.card-actions { display: flex; gap: 8px; margin-top: 12px; }
+.act { flex: 1; border: 1px solid var(--border); background: var(--bg-panel); border-radius: 6px; padding: 6px 4px; font-size: 12px; color: var(--text-secondary); }
+.act.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.act:disabled { opacity: .6; }
+.file-location { margin-top: 10px; font-size: 11px; color: var(--text-secondary); }
+.file-location summary { cursor: pointer; }
+.file-location p { user-select: text; overflow-wrap: anywhere; line-height: 1.6; }
+.empty-state { text-align: center; padding: 20px 10px; background: var(--bg-base); border-radius: 8px; color: var(--text-secondary); }
+.empty-symbol { font-size: 23px; color: #9caac0; }
+.empty-state p { font-size: 13px; margin: 10px 0 6px; }
+.empty-state small { font-size: 12px; line-height: 1.8; }
+.file-error { font-size: 12px; color: var(--danger); overflow-wrap: anywhere; }
 </style>

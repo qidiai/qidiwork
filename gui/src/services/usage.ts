@@ -111,7 +111,7 @@ export function accumulateUsage(acc: SessionUsage, u: UsageInfo | null): void {
     acc.costUsdTicks += u.costUsdTicks;
     acc.costSeen = true;
   }
-  if (u.costPartial || u.incomplete) acc.costPartial = true;
+  if (u.costPartial || u.incomplete || u.costUsdTicks == null) acc.costPartial = true;
   for (const model of u.models) {
     if (!acc.models.includes(model)) acc.models.push(model);
   }

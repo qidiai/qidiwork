@@ -299,6 +299,69 @@ impl AcpBridge {
             .unwrap_or(false)
     }
 
+    /// 遗忘单个会话(未知/已删 → false):移除登记、模型缓存与待批权限,出锁后 best-effort 回 cancelled。
+    pub fn forget_session(&self, session_id: &str) -> bool {
+        let dropped = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !sessions.iter().any(|r| r.id == session_id) {
+                None
+            } else {
+                sessions.retain(|r| r.id != session_id);
+                let _ = self
+                    .model_states
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session_id);
+                let mut permissions = self
+                    .permission_pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let ids: Vec<u64> = permissions
+                    .iter()
+                    .filter(|(_, entry)| entry.session_id == session_id)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in &ids {
+                    let _ = permissions.remove(id);
+                }
+                Some(ids)
+            }
+        };
+        let Some(ids) = dropped else {
+            return false;
+        };
+        for id in ids {
+            let resp = jsonrpc::success_response(
+                id,
+                serde_json::json!({"outcome": {"outcome": "cancelled"}}),
+            );
+            if let Err(e) = self.transport.send(resp.to_string()) {
+                tracing::warn!(request_id = id, "已移除会话的权限取消应答发送失败(忽略): {e}");
+            }
+            let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
+                session_id: session_id.to_string(),
+                reason: "session_removed".to_string(),
+            });
+        }
+        true
+    }
+
+    /// known 检查与发射同处一把 sessions 锁:forget 之后迟到的事件不再上屏。
+    fn send_event_if_known(&self, session_id: &str, event: BridgeEvent) -> bool {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !sessions.iter().any(|r| r.id == session_id) {
+            return false;
+        }
+        let _ = self.event_tx.send(event);
+        true
+    }
+
     /// 协议级断连收尾。顺序即契约:先收尾在途 RPC,再对挂起权限回
     /// `cancelled`,最后广播 Disconnected(k3 M3 审计 §2,防前端双结局)。
     /// 全同步(收尾只做 best-effort 发送),监控任务直接调用。
@@ -374,17 +437,19 @@ impl AcpBridge {
                     // 未知会话的更新不入前端(防串话,k3 M3 审计 §3)。
                     // 注:session/load 的历史重放发生在登记前,同样被丢弃——
                     // 恢复场景前端以 SessionRestored 为准重拉状态。
-                    if !self.session_known(&session_id) {
-                        tracing::warn!(%session_id, "未知会话的 update,丢弃");
-                        continue;
-                    }
                     let update = params
                         .get("update")
                         .cloned()
                         .unwrap_or(serde_json::Value::Null);
-                    let _ = self
-                        .event_tx
-                        .send(BridgeEvent::SessionUpdate { session_id, update });
+                    if !self.send_event_if_known(
+                        &session_id,
+                        BridgeEvent::SessionUpdate {
+                            session_id: session_id.clone(),
+                            update,
+                        },
+                    ) {
+                        tracing::warn!(%session_id, "未知会话的 update,丢弃");
+                    }
                 }
                 Incoming::Notification { method, params }
                     if method == "x.ai/session_notification" =>
@@ -400,13 +465,18 @@ impl AcpBridge {
                         .and_then(|u| u.get("sessionUpdate"))
                         .and_then(|t| t.as_str())
                         == Some("model_changed");
-                    if is_model_changed && self.session_known(session_id) {
+                    if is_model_changed {
                         if let Some(mid) =
                             update.and_then(|u| u.get("model_id")).and_then(|m| m.as_str())
                         {
                             // 回显通知不携带档位变更的权威值(发起方自身被内核门控),
                             // 档位由本端 set_model 就地 patch,故此处 effort 传 None。
-                            self.patch_current_model(session_id, mid, None);
+                            if self
+                                .patch_current_model_if_known(session_id, mid, None)
+                                .is_none()
+                            {
+                                tracing::warn!(%session_id, "已移除会话的模型回显,忽略");
+                            }
                         }
                     }
                 }
@@ -430,34 +500,46 @@ impl AcpBridge {
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
-            if !self.session_known(&session_id) {
+            let option_ids = option_ids_of(&params);
+            // known 检查、在途登记与发射同处一锁:删除后不得再弹过期审批。
+            let accepted = {
+                let sessions = self
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !sessions.iter().any(|r| r.id == session_id) {
+                    false
+                } else {
+                    let _ = self
+                        .permission_pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(
+                            id,
+                            PermissionEntry {
+                                session_id: session_id.clone(),
+                                option_ids,
+                            },
+                        );
+                    let _ = self.event_tx.send(BridgeEvent::PermissionRequest {
+                        request_id: id,
+                        session_id: session_id.clone(),
+                        tool_call: params
+                            .get("toolCall")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                        options: params
+                            .get("options")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null),
+                    });
+                    true
+                }
+            };
+            if !accepted {
                 tracing::warn!(%session_id, "未知会话的权限请求,拒绝");
                 self.send_best_effort(jsonrpc::error_response(id, -32602, "未知会话"));
-                return;
             }
-            let option_ids = option_ids_of(&params);
-            self.permission_pending
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(
-                    id,
-                    PermissionEntry {
-                        session_id: session_id.clone(),
-                        option_ids,
-                    },
-                );
-            let _ = self.event_tx.send(BridgeEvent::PermissionRequest {
-                request_id: id,
-                session_id,
-                tool_call: params
-                    .get("toolCall")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-                options: params
-                    .get("options")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            });
             return;
         }
         tracing::warn!(method = %method, "agent 请求了未声明的能力,拒绝");
@@ -580,7 +662,38 @@ impl AcpBridge {
             .insert(id, tx);
 
         let msg = jsonrpc::request(id, method, params);
-        if let Err(e) = self.transport.send(msg.to_string()) {
+        // known 检查与发送同处一锁(出锁后才 await 应答):通过检查后不得再被删除。
+        let gate_session = if method == "session/set_model" {
+            msg.get("params")
+                .and_then(|p| p.get("sessionId"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        } else {
+            None
+        };
+        let send_result = match gate_session {
+            Some(session_id) => {
+                let sessions = self
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let known = sessions.iter().any(|r| r.id == session_id);
+                if known {
+                    let result = self.transport.send(msg.to_string());
+                    drop(sessions);
+                    result
+                } else {
+                    drop(sessions);
+                    self.pending
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&id);
+                    return Err(format!("会话 {session_id} 未登记或已删除"));
+                }
+            }
+            None => self.transport.send(msg.to_string()),
+        };
+        if let Err(e) = send_result {
             // 发送失败必须清掉在途项:transport 半死时 on_exit 不会来,
             // 残留即泄漏(k3 M3 审计 §1)。
             self.pending
@@ -692,10 +805,14 @@ impl AcpBridge {
 
     /// 单会话恢复完成通知(session_resume 用):事件经 ensure_bridge 的
     /// 转发链到前端,前端切 active sessionId。
+    /// 会话已删除时不发射(否则前端会把刚删掉的会话切回来)。
     pub fn notify_session_restored(&self, session_id: &str) {
-        let _ = self.event_tx.send(BridgeEvent::SessionRestored {
-            session_id: session_id.to_string(),
-        });
+        self.send_event_if_known(
+            session_id,
+            BridgeEvent::SessionRestored {
+                session_id: session_id.to_string(),
+            },
+        );
     }
 
     /// 补发会话恢复失败事件(恢复链订阅建立后使用,见 commands.rs agent_recover;
@@ -757,6 +874,7 @@ impl AcpBridge {
         text: &str,
         images: &[ImagePayload],
     ) -> Result<(), String> {
+        // decorate_prompt 内部取 sessions 锁,须在下面的临界区之前完成。
         let text = self.decorate_prompt(session_id, text);
         let blocks = build_prompt_blocks(&text, images)?;
         let params = serde_json::json!({
@@ -765,18 +883,28 @@ impl AcpBridge {
         });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(id, tx);
-
-        let msg = jsonrpc::request(id, "session/prompt", params);
-        if let Err(e) = self.transport.send(msg.to_string()) {
+        {
+            // known 检查、在途登记与发送同处一锁:否则通过检查后被 forget,请求仍会下发。
+            let sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !sessions.iter().any(|r| r.id == session_id) {
+                return Err(format!("会话 {session_id} 未登记或已删除"));
+            }
             self.pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&id);
-            return Err(format!("发送 session/prompt 失败: {e}"));
+                .insert(id, tx);
+
+            let msg = jsonrpc::request(id, "session/prompt", params);
+            if let Err(e) = self.transport.send(msg.to_string()) {
+                self.pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&id);
+                return Err(format!("发送 session/prompt 失败: {e}"));
+            }
         }
 
         let this = Arc::clone(self);
@@ -799,32 +927,44 @@ impl AcpBridge {
                         .unwrap_or(serde_json::Value::Null);
                     if !meta.is_null() {
                         if serde_json::to_string(&meta).map_or(false, |s| s.len() <= 64 * 1024) {
-                            let _ = this.event_tx.send(BridgeEvent::TurnUsage {
-                                session_id: session.clone(),
-                                meta,
-                            });
+                            this.send_event_if_known(
+                                &session,
+                                BridgeEvent::TurnUsage {
+                                    session_id: session.clone(),
+                                    meta,
+                                },
+                            );
                         } else {
                             tracing::warn!(%session, "session/prompt _meta 超过 64KB,丢弃用量透传");
                         }
                     }
-                    let _ = this.event_tx.send(BridgeEvent::TurnCompleted {
-                        session_id: session,
-                        stop_reason: stop,
-                    });
+                    this.send_event_if_known(
+                        &session,
+                        BridgeEvent::TurnCompleted {
+                            session_id: session.clone(),
+                            stop_reason: stop,
+                        },
+                    );
                 }
                 Ok(Ok(Err((code, message)))) => {
                     tracing::error!(%session, code, %message, "session/prompt 失败");
-                    let _ = this.event_tx.send(BridgeEvent::TurnCompleted {
-                        session_id: session,
-                        stop_reason: format!("error: {code} {message}"),
-                    });
+                    this.send_event_if_known(
+                        &session,
+                        BridgeEvent::TurnCompleted {
+                            session_id: session.clone(),
+                            stop_reason: format!("error: {code} {message}"),
+                        },
+                    );
                 }
                 Ok(Err(_)) | Err(_) => {
                     tracing::error!(%session, "session/prompt 超时或断开");
-                    let _ = this.event_tx.send(BridgeEvent::TurnCompleted {
-                        session_id: session,
-                        stop_reason: "error: timeout/disconnected".into(),
-                    });
+                    this.send_event_if_known(
+                        &session,
+                        BridgeEvent::TurnCompleted {
+                            session_id: session.clone(),
+                            stop_reason: "error: timeout/disconnected".into(),
+                        },
+                    );
                 }
             }
         });
@@ -859,13 +999,20 @@ impl AcpBridge {
     /// 把 currentModelId 更新为 model_id 并广播;无缓存时以最小状态建一条
     /// (availableModels 为空,前端仅展示 id)。`effort` 为 Some 时一并把档位
     /// 写进该模型 meta(内核 set_model 应答只回 model id、不回档位,强度下拉
-    /// 据缓存刷新)。返回更新后的快照。
-    fn patch_current_model(
+    /// 据缓存刷新)。返回更新后的快照;已删除(未登记)→ None,不写缓存不发射。
+    fn patch_current_model_if_known(
         &self,
         session_id: &str,
         model_id: &str,
         effort: Option<&str>,
-    ) -> serde_json::Value {
+    ) -> Option<serde_json::Value> {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !sessions.iter().any(|r| r.id == session_id) {
+            return None;
+        }
         let state = {
             let mut guard = self
                 .model_states
@@ -889,7 +1036,7 @@ impl AcpBridge {
             session_id: session_id.to_string(),
             state: state.clone(),
         });
-        state
+        Some(state)
     }
 
     /// 最近一次缓存的会话模型状态(无则 None;由 session_models 命令查询)。
@@ -910,12 +1057,17 @@ impl AcpBridge {
         model_id: &str,
         effort: Option<&str>,
     ) -> Result<serde_json::Value, String> {
+        if !self.session_known(session_id) {
+            return Err(format!("会话 {session_id} 未登记或已删除"));
+        }
         let mut params = serde_json::json!({"sessionId": session_id, "modelId": model_id});
         if let Some(effort) = effort {
             params["_meta"] = serde_json::json!({ "reasoningEffort": effort });
         }
         self.rpc("session/set_model", params, RPC_TIMEOUT).await?;
-        Ok(self.patch_current_model(session_id, model_id, effort))
+        // 应答后复查登记:等待期间被 forget 的会话不得因迟到应答重建缓存。
+        self.patch_current_model_if_known(session_id, model_id, effort)
+            .ok_or_else(|| format!("会话 {session_id} 已删除,丢弃迟到的模型应答"))
     }
 }
 

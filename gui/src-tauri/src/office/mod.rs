@@ -27,6 +27,297 @@ pub const PREVIEW_READ_EXTENSIONS: &[&str] = &[
     "docx", "doc", "xlsx", "xls", "pptx", "ppt", "pdf", "png", "jpg", "jpeg", "md", "txt",
 ];
 
+pub const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_DOCUMENT_BASE64_BYTES: usize = MAX_DOCUMENT_BYTES.div_ceil(3) * 4;
+const MAX_DOCUMENT_SESSION_BYTES: usize = 64;
+const DOCUMENT_EXTENSIONS: &[&str] = &[
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "md", "csv",
+];
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ImportedDocument {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+}
+
+fn validate_document_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty()
+        || name.len() > 255
+        || name.ends_with(['.', ' '])
+        || name
+            .chars()
+            .any(|c| c.is_control() || "/\\:<>\"|?*".contains(c))
+    {
+        return Err("资料名必须是合法的单文件名".into());
+    }
+    let device = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_uppercase();
+    let numbered_device = device
+        .strip_prefix("COM")
+        .or_else(|| device.strip_prefix("LPT"));
+    if ["CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$"].contains(&device.as_str())
+        || numbered_device.is_some_and(|n| {
+            matches!(
+                n,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    {
+        return Err("资料名不能是保留设备名".into());
+    }
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !DOCUMENT_EXTENSIONS.contains(&ext.as_str()) {
+        return Err("不支持的资料格式".into());
+    }
+    Ok(())
+}
+
+fn document_session_component(session_id: &str) -> Result<String, String> {
+    if session_id.is_empty() || session_id.len() > MAX_DOCUMENT_SESSION_BYTES {
+        return Err("会话 ID 长度必须为 1–64 字节".into());
+    }
+    // 小写十六进制在 Windows 大小写不敏感目录上也不会混淆会话。
+    let mut encoded = String::with_capacity(session_id.len() * 2);
+    for byte in session_id.bytes() {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 15) as usize] as char);
+    }
+    Ok(encoded)
+}
+
+fn reject_document_link(meta: &std::fs::Metadata) -> Result<(), String> {
+    let linked = meta.file_type().is_symlink();
+    #[cfg(windows)]
+    let linked = {
+        use std::os::windows::fs::MetadataExt;
+        linked || meta.file_attributes() & 0x400 != 0 // 包括 junction/reparse point。
+    };
+    if linked {
+        return Err("资料路径不能包含符号链接或重解析点".into());
+    }
+    Ok(())
+}
+
+fn document_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    if !cwd.is_absolute() || !is_local_absolute(cwd) {
+        return Err("会话工作目录必须是本地绝对路径".into());
+    }
+    let mut part = PathBuf::new();
+    for component in cwd.components() {
+        match component {
+            Component::ParentDir => return Err("会话工作目录不能包含 ..".into()),
+            Component::Prefix(_) => {
+                part.push(component.as_os_str());
+                continue;
+            }
+            _ => part.push(component.as_os_str()),
+        }
+        let meta =
+            std::fs::symlink_metadata(&part).map_err(|e| format!("检查工作目录失败: {e}"))?;
+        reject_document_link(&meta)?;
+        if !meta.is_dir() {
+            return Err("会话工作目录路径不是目录".into());
+        }
+    }
+    let canonical = std::fs::canonicalize(cwd).map_err(|e| format!("解析工作目录失败: {e}"))?;
+    if !canonical.is_absolute() || !is_local_absolute(&canonical) {
+        return Err("会话工作目录必须解析为本地绝对路径".into());
+    }
+    Ok(canonical)
+}
+
+fn checked_document_entry(
+    path: &Path,
+    root: &Path,
+) -> Result<(PathBuf, std::fs::Metadata), String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("检查资料路径失败: {e}"))?;
+    reject_document_link(&meta)?;
+    // Windows 长短路径都保留扩展前缀，避免同一目录因表示不同而误判越界。
+    let canonical = std::fs::canonicalize(path).map_err(|e| format!("解析资料路径失败: {e}"))?;
+    if !is_local_absolute(&canonical) || !canonical.starts_with(root) {
+        return Err("资料路径超出会话目录".into());
+    }
+    Ok((canonical, meta))
+}
+
+fn document_directory(
+    cwd: &Path,
+    session_id: &str,
+    create: bool,
+) -> Result<Option<PathBuf>, String> {
+    let session = document_session_component(session_id)?;
+    let root = document_cwd(cwd)?;
+    let mut dir = root.clone();
+    for component in ["参考资料", session.as_str()] {
+        dir.push(component);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if !create {
+                    return Ok(None);
+                }
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("创建资料目录失败: {e}")),
+                }
+            }
+            Err(e) => return Err(format!("检查资料目录失败: {e}")),
+        }
+        let (canonical, meta) = checked_document_entry(&dir, &root)?;
+        if !meta.is_dir() {
+            return Err("资料目录被普通文件占用".into());
+        }
+        dir = canonical;
+    }
+    Ok(Some(dir))
+}
+
+fn decode_document(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    if data.len() > MAX_DOCUMENT_BASE64_BYTES {
+        return Err("资料 base64 超过 32 MiB 编码上限".into());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| "资料不是有效的原始 base64".to_string())?;
+    if bytes.len() > MAX_DOCUMENT_BYTES {
+        return Err("单份资料不能超过 32 MiB".into());
+    }
+    Ok(bytes)
+}
+
+/// cwd 只能来自桥登记;调用方须在阻塞线程执行。
+pub fn import_document(
+    cwd: &Path,
+    session_id: &str,
+    name: &str,
+    data: &str,
+) -> Result<ImportedDocument, String> {
+    use std::io::Write as _;
+    validate_document_name(name)?;
+    if name.len() > 240 {
+        return Err("导入资料名不能超过 240 字节(须为重名编号留空)".into());
+    }
+    document_session_component(session_id)?;
+    let bytes = decode_document(data)?;
+    let dir = document_directory(cwd, session_id, true)?.ok_or("资料目录不存在")?;
+    let original = Path::new(name);
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("非法资料名")?;
+    let ext = original
+        .extension()
+        .and_then(|s| s.to_str())
+        .ok_or("非法资料扩展名")?;
+    for index in 1..=10_000 {
+        let name = if index == 1 {
+            name.to_string()
+        } else {
+            format!("{stem} ({index}).{ext}")
+        };
+        let path = dir.join(&name);
+        // 每次尝试都复查父目录;create_new 原子拒绝覆盖和最终文件链接。
+        document_cwd(&dir)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                reject_document_link(&meta)?;
+                if !meta.is_file() {
+                    return Err("同名资料路径不是普通文件".into());
+                }
+                checked_document_entry(&path, &dir)?;
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("检查同名资料失败: {e}")),
+        }
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                checked_document_entry(&path, &dir)?;
+                continue;
+            }
+            Err(e) => return Err(format!("创建资料文件失败: {e}")),
+        };
+        let result = (|| {
+            file.write_all(&bytes)
+                .map_err(|e| format!("写入资料失败: {e}"))?;
+            file.sync_all().map_err(|e| format!("保存资料失败: {e}"))?;
+            document_cwd(&dir)?;
+            let (canonical, meta) = checked_document_entry(&path, &dir)?;
+            if !meta.is_file() || meta.len() != bytes.len() as u64 {
+                return Err("资料文件在写入期间发生变化".into());
+            }
+            Ok(ImportedDocument {
+                name,
+                path: dunce::simplified(&canonical)
+                    .to_str()
+                    .ok_or("资料路径不是 UTF-8")?
+                    .to_string(),
+                size: meta.len(),
+            })
+        })();
+        drop(file);
+        if result.is_err() && document_cwd(&dir).is_ok() {
+            // 仅清理本次 create_new 成功的文件,不沿被替换的目录链接删除。
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(path = %path.display(), error = %e, "清理未完成资料失败");
+            }
+        }
+        return result;
+    }
+    Err("同名资料数量过多".into())
+}
+
+/// 只枚举当前会话资料,不读写成果 manifest。
+pub fn list_documents(cwd: &Path, session_id: &str) -> Result<Vec<ImportedDocument>, String> {
+    let Some(dir) = document_directory(cwd, session_id, false)? else {
+        return Ok(Vec::new());
+    };
+    let mut documents = Vec::new();
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("枚举资料失败: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取资料目录项失败: {e}"))?;
+        document_cwd(&dir)?;
+        let (canonical, meta) = checked_document_entry(&entry.path(), &dir)?;
+        if !meta.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if validate_document_name(&name).is_err() {
+            continue;
+        }
+        documents.push(ImportedDocument {
+            name,
+            path: dunce::simplified(&canonical)
+                .to_str()
+                .ok_or("资料路径不是 UTF-8")?
+                .to_string(),
+            size: meta.len(),
+        });
+    }
+    documents.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(documents)
+}
+
 /// 产物卡片(与 card.py / TUI ArtifactBlock 的 manifest schema 对齐)。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArtifactCard {
@@ -194,6 +485,257 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn documents_chinese_names_do_not_overwrite_and_reload_from_disk() {
+        let root = fresh_root("documents-chinese");
+        let first = import_document(&root, "session", "报告.docx", "5Lit5paH").unwrap();
+        let second = import_document(&root, "session", "报告.docx", "bmV3").unwrap();
+        assert_eq!(first.name, "报告.docx");
+        assert_eq!(first.size, 6);
+        assert_eq!(second.name, "报告 (2).docx");
+        assert_ne!(first.path, second.path);
+        assert_eq!(fs::read(&first.path).unwrap(), "中文".as_bytes());
+        assert_eq!(fs::read(&second.path).unwrap(), b"new");
+        assert!(Path::new(&first.path).is_absolute());
+        assert!(Path::new(&first.path).starts_with(dunce::canonicalize(&root).unwrap()));
+        let dir = Path::new(&first.path).parent().unwrap();
+        fs::write(dir.join("manifest.json"), "not a manifest").unwrap();
+        fs::write(dir.join("ignore.exe"), "x").unwrap();
+        fs::create_dir(dir.join("folder.txt")).unwrap();
+        fs::write(&second.path, b"updated").unwrap();
+        let listed = list_documents(&root, "session").unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&first));
+        assert_eq!(
+            listed.iter().find(|d| d.name == second.name).unwrap().size,
+            7
+        );
+        assert_eq!(
+            fs::read(dir.join("manifest.json")).unwrap(),
+            b"not a manifest"
+        );
+        assert!(!root.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn documents_reject_invalid_names_and_extensions() {
+        let root = fresh_root("documents-names");
+        for name in [
+            "",
+            " ",
+            ".",
+            "..",
+            "../a.txt",
+            "a/b.txt",
+            "a\\b.txt",
+            "C:\\a.txt",
+            "a:stream.txt",
+            "a\0.txt",
+            "a\n.txt",
+            "a\u{7f}.txt",
+            "a?.txt",
+            "a*.txt",
+            "a<.txt",
+            "a>.txt",
+            "a|.txt",
+            "a\".txt",
+            "a.txt.",
+            "a.txt ",
+            "CON.txt",
+            "con.docx",
+            "PRN.pdf",
+            "aux.csv",
+            "NUL.xlsx",
+            "CON .txt",
+            "COM1.txt",
+            "com9.doc",
+            "LPT1.ppt",
+            "lpt9.pptx",
+            "COM¹.txt",
+            "LPT².txt",
+            "CONIN$.txt",
+            "CONOUT$.txt",
+            "CLOCK$.txt",
+            "a.exe",
+            "a.html",
+            "a.png",
+            "a.zip",
+            "a",
+            "a.docx.exe",
+        ] {
+            assert!(
+                import_document(&root, "s", name, "eA==").is_err(),
+                "{name:?}"
+            );
+        }
+        assert!(import_document(&root, "s", &format!("{}.txt", "a".repeat(237)), "eA==").is_err());
+        assert!(!root.join("参考资料").exists());
+        for ext in DOCUMENT_EXTENSIONS {
+            assert!(validate_document_name(&format!("资料.{}", ext.to_uppercase())).is_ok());
+        }
+        let name = format!("{}.txt", "a".repeat(236));
+        import_document(&root, "s", &name, "eA==").unwrap();
+        import_document(&root, "s", &name, "eA==").unwrap();
+        assert_eq!(list_documents(&root, "s").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn documents_validate_base64_before_creating_files() {
+        let root = fresh_root("documents-base64");
+        for data in [
+            "???",
+            "data:text/plain;base64,eA==",
+            "eA=",
+            "eA==\n",
+            "____",
+        ] {
+            assert!(import_document(&root, "s", "a.txt", data).is_err());
+        }
+        assert!(!root.join("参考资料").exists());
+        assert!(decode_document("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn documents_enforce_encoded_and_decoded_size_limits() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        {
+            let oversized = "A".repeat(MAX_DOCUMENT_BASE64_BYTES + 1);
+            assert!(
+                decode_document(&oversized)
+                    .unwrap_err()
+                    .contains("编码上限")
+            );
+        }
+        {
+            let encoded = STANDARD.encode(vec![0; MAX_DOCUMENT_BYTES]);
+            assert_eq!(decode_document(&encoded).unwrap().len(), MAX_DOCUMENT_BYTES);
+        }
+        {
+            // 32 MiB + 1 与边界值的编码长度相同,必须有解码后校验。
+            let encoded = STANDARD.encode(vec![0; MAX_DOCUMENT_BYTES + 1]);
+            assert_eq!(encoded.len(), MAX_DOCUMENT_BASE64_BYTES);
+            assert!(decode_document(&encoded).unwrap_err().contains("单份资料"));
+        }
+    }
+
+    #[test]
+    fn documents_are_isolated_by_session_and_cwd() {
+        let root = fresh_root("documents-isolation");
+        let other = fresh_root("documents-other-cwd");
+        assert!(list_documents(&root, "missing").unwrap().is_empty());
+        assert!(!root.join("参考资料").exists());
+        let a = import_document(&root, "A/../会话", "资料.csv", "YQ==").unwrap();
+        let b = import_document(&root, "a/../会话", "资料.csv", "Yg==").unwrap();
+        assert_ne!(a.path.to_lowercase(), b.path.to_lowercase());
+        assert_eq!(list_documents(&root, "A/../会话").unwrap(), vec![a]);
+        assert_eq!(list_documents(&root, "a/../会话").unwrap(), vec![b]);
+        assert!(list_documents(&other, "A/../会话").unwrap().is_empty());
+        for id in ["".to_string(), "x".repeat(MAX_DOCUMENT_SESSION_BYTES + 1)] {
+            assert!(import_document(&root, &id, "a.txt", "eA==").is_err());
+            assert!(list_documents(&root, &id).is_err());
+        }
+    }
+
+    #[test]
+    fn documents_reject_invalid_cwd_and_directory_file_collisions() {
+        let root = fresh_root("documents-cwd");
+        for cwd in [
+            Path::new("."),
+            Path::new("relative"),
+            Path::new("C:relative"),
+        ] {
+            assert!(import_document(cwd, "s", "a.txt", "eA==").is_err());
+            assert!(list_documents(cwd, "s").is_err());
+        }
+        #[cfg(windows)]
+        for cwd in [r"\\server\share", r"\\?\UNC\server\share", r"\\.\C:\"] {
+            assert!(list_documents(Path::new(cwd), "s").is_err());
+        }
+        fs::write(root.join("参考资料"), "keep").unwrap();
+        assert!(import_document(&root, "s", "a.txt", "eA==").is_err());
+        assert!(list_documents(&root, "s").is_err());
+        assert_eq!(fs::read(root.join("参考资料")).unwrap(), b"keep");
+    }
+
+    #[cfg(any(unix, windows))]
+    fn document_test_symlink(target: &Path, link: &Path, directory: bool) -> bool {
+        #[cfg(unix)]
+        let result = {
+            let _ = directory;
+            std::os::unix::fs::symlink(target, link)
+        };
+        #[cfg(windows)]
+        let result = if directory {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        };
+        #[cfg(windows)]
+        if result
+            .as_ref()
+            .is_err_and(|e| e.raw_os_error() == Some(1314))
+        {
+            eprintln!("跳过 symlink 测试: Windows 未授予创建符号链接权限");
+            return false;
+        }
+        result.unwrap();
+        true
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn documents_reject_symlink_directories_at_every_level() {
+        let outside = fresh_root("documents-link-outside");
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        fs::create_dir(outside.join("nested")).unwrap();
+        for level in ["cwd", "ancestor", "references", "session"] {
+            let root = fresh_root(&format!("documents-link-{level}"));
+            let (cwd, link) = match level {
+                "cwd" => (root.join("alias"), root.join("alias")),
+                "ancestor" => (root.join("alias/nested"), root.join("alias")),
+                "references" => (root.clone(), root.join("参考资料")),
+                _ => {
+                    fs::create_dir(root.join("参考资料")).unwrap();
+                    (
+                        root.clone(),
+                        root.join("参考资料")
+                            .join(document_session_component("s").unwrap()),
+                    )
+                }
+            };
+            if !document_test_symlink(&outside, &link, true) {
+                return;
+            }
+            assert!(
+                import_document(&cwd, "s", "a.txt", "eA==").is_err(),
+                "{level}"
+            );
+            assert!(list_documents(&cwd, "s").is_err(), "{level}");
+            assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+            assert!(!outside.join("a.txt").exists());
+            assert!(!outside.join("参考资料").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn documents_reject_symlink_files_including_dangling_links() {
+        let outside = fresh_root("documents-file-link-outside");
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        for target in ["keep.txt", "missing.txt"] {
+            let root = fresh_root(&format!("documents-file-link-{target}"));
+            let dir = document_directory(&root, "s", true).unwrap().unwrap();
+            if !document_test_symlink(&outside.join(target), &dir.join("a.txt"), false) {
+                return;
+            }
+            assert!(import_document(&root, "s", "a.txt", "eA==").is_err());
+            assert!(list_documents(&root, "s").is_err());
+            assert!(!dir.join("a (2).txt").exists());
+        }
+        assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"keep");
+        assert!(!outside.join("missing.txt").exists());
     }
 
     fn write_manifest(root: &Path, task: &str, artifacts: serde_json::Value) {

@@ -1,162 +1,51 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, watch } from "vue";
 import ChatView from "./ChatView.vue";
 import PreviewPane from "./PreviewPane.vue";
-import { usePreviewTabs, closePreview } from "../composables/usePreview";
+import UsageSummary from "./UsageSummary.vue";
+import { usePreviewTabs, closePreview, closeAllPreviews } from "../composables/usePreview";
+import { useAgentState } from "../composables/useAgent";
 
-// 中区多 Tab:对话为常驻 Tab;产物预览 Tab 由点击产物卡片时打开。
-type TabKey = string;
-const tabs = ref<{ key: TabKey; label: string; closable: boolean }[]>([
-  { key: "chat", label: "对话", closable: false },
-]);
-const activeTab = ref<TabKey>("chat");
-
-const { openPreviews, activePreview, activationSeq } = usePreviewTabs();
-
-// 预览注册表 → Tab 列表(注册表 key 即 Tab key,由 previewKey 统一派生)
-watch(
-  openPreviews,
-  (list) => {
-    const keys = new Set(list.map((t) => t.key));
-    // 移除已关闭的预览 Tab
-    tabs.value = tabs.value.filter((t) => t.closable === false || keys.has(t.key));
-    // 追加新预览 Tab
-    for (const p of list) {
-      if (!tabs.value.some((t) => t.key === p.key)) {
-        tabs.value.push({ key: p.key, label: p.name, closable: true });
-      }
-    }
-    // 批量清理(任务切换 closeAllPreviews)可能移除正激活的 Tab,
-    // activeTab 残留会指向不存在的 key,回落到对话
-    if (activeTab.value.startsWith("preview:") && !keys.has(activeTab.value)) {
-      activeTab.value = "chat";
-      activePreview.value = "";
-    }
-  },
-  { deep: true },
-);
-
-// 重复打开同一产物 → 激活已有 Tab。watch 序号而非 key:同 key 重开时
-// activePreview 同值赋值不触发 Vue watch,激活会脱节(step 审计 W2)
-watch(activationSeq, () => {
-  if (activePreview.value) activeTab.value = activePreview.value;
-});
-
-// 手动点 Tab 时同步 activePreview:否则注册表激活状态与实际激活页
-// 脱节,之后重开同一产物会因 ref 同值不触发激活 watch(deepseek 审计 B1/C3)。
-function selectTab(key: TabKey) {
-  activeTab.value = key;
-  activePreview.value = key.startsWith("preview:") ? key : "";
-}
-
-function closeTab(key: TabKey) {
-  const idx = tabs.value.findIndex((t) => t.key === key);
-  if (idx < 0 || !tabs.value[idx].closable) return;
-  tabs.value.splice(idx, 1);
-  // Tab key 即注册表 key,直接同步清理,否则下次打开同一产物被去重跳过
-  if (key.startsWith("preview:")) closePreview(key);
-  if (activeTab.value === key) {
-    activeTab.value = tabs.value[Math.max(0, idx - 1)]!.key;
-  }
-}
-
-function previewOf(key: TabKey) {
-  const p = openPreviews.value.find((t) => t.key === key);
-  return { task: p?.task ?? "", name: p?.name ?? "" };
-}
+const { openPreviews, activePreview } = usePreviewTabs();
+const { sessionId } = useAgentState();
+const selected = computed(() => openPreviews.value.find((p) => p.key === activePreview.value));
+watch(sessionId, closeAllPreviews);
 </script>
 
 <template>
   <main class="main-tabs">
-    <div class="tab-bar">
-      <div
-        v-for="tab in tabs"
-        :key="tab.key"
-        class="tab"
-        :class="{ active: tab.key === activeTab }"
-        :title="tab.label"
-        @click="selectTab(tab.key)"
-      >
-        <span class="tab-label">{{ tab.label }}</span>
-        <span
-          v-if="tab.closable"
-          class="tab-close"
-          @click.stop="closeTab(tab.key)"
-          >×</span
-        >
+    <div class="workbench-toolbar"><span>办公工作台</span><UsageSummary /></div>
+    <div class="tab-bar" aria-label="工作视图">
+      <button class="tab" :class="{ active: !selected }" @click="activePreview = ''">任务工作台</button>
+      <div v-for="tab in openPreviews" :key="tab.key" class="preview-tab" :class="{ active: tab.key === activePreview }">
+        <button class="tab" :title="tab.name" @click="activePreview = tab.key">{{ tab.name }}</button>
+        <button class="tab-close" :aria-label="`关闭 ${tab.name} 预览`" @click="closePreview(tab.key)">×</button>
       </div>
     </div>
-    <div class="tab-body">
-      <ChatView v-if="activeTab === 'chat'" />
-      <PreviewPane
-        v-else-if="activeTab.startsWith('preview:')"
-        :key="activeTab"
-        v-bind="previewOf(activeTab)"
-      />
-      <div v-else class="empty-hint preview-placeholder">
-        文档预览将在产物卡片接入后可用(方案 P1)
-      </div>
+    <div class="tab-body" :class="{ reviewing: selected }">
+      <ChatView />
+      <section v-if="selected" class="document-view" aria-label="成果文件预览">
+        <div class="document-head"><strong :title="selected.name">{{ selected.name }}</strong><button @click="activePreview = ''">收起预览</button></div>
+        <PreviewPane :key="selected.key" :task="selected.task" :name="selected.name" />
+      </section>
     </div>
   </main>
 </template>
 
 <style scoped>
-.main-tabs {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  background: var(--bg-base);
-}
-
-.tab-bar {
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-panel);
-}
-
-.tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  border-radius: 8px 8px 0 0;
-  cursor: pointer;
-  color: var(--text-secondary);
-  border: 1px solid transparent;
-  border-bottom: none;
-  user-select: none;
-}
-
-.tab.active {
-  background: var(--bg-base);
-  border-color: var(--border);
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.tab-close {
-  color: var(--text-disabled);
-  padding: 0 2px;
-}
-
-.tab-close:hover {
-  color: var(--danger);
-}
-
-.tab-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.preview-placeholder {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
+.workbench-toolbar { display: flex; flex-shrink: 0; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 16px; background: var(--bg-panel); border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
+.main-tabs { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg-base); }
+.tab-bar { display: flex; align-items: stretch; gap: 8px; min-height: 48px; padding: 8px 16px 0; border-bottom: 1px solid var(--border); background: var(--bg-panel); overflow-x: auto; }
+.tab { border: 0; background: transparent; color: var(--text-secondary); padding: 9px 12px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.tab.active, .preview-tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+.preview-tab { display: flex; min-width: 100px; align-items: center; }
+.preview-tab.active .tab { color: var(--accent); }
+.tab-close { border: 0; background: none; color: var(--text-secondary); padding: 6px; }
+.tab-close:hover { color: var(--danger); }
+.tab-body { flex: 1; min-height: 0; display: flex; }
+.tab-body.reviewing { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.5fr); }
+.document-view { display: flex; flex-direction: column; min-height: 0; min-width: 0; border-left: 1px solid var(--border); background: var(--bg-panel); overflow: hidden; }
+.document-head { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.document-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-head button { margin-left: auto; flex-shrink: 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; }
 </style>

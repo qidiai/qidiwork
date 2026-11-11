@@ -55,7 +55,7 @@ async function openInSystem(): Promise<void> {
     <button
       v-if="renderer !== 'unsupported'"
       class="reload-btn"
-      title="重新读取文件(agent 重写产物后点此刷新)"
+      title="修改完成后，点击重新读取成果文件"
       @click="reloadNonce++"
     >⟳ 刷新</button>
   </div>

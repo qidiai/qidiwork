@@ -187,7 +187,7 @@ fn option_ids_of(params: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 解析 `x.ai/usage_update` 扩展通知 params。线上键为 camelCase
+/// 解析 `_x.ai/usage_update` 扩展通知 params。线上键为 camelCase
 /// (内核 emit_usage_update 投影),桥层转 snake_case 强类型元组供
 /// [`BridgeEvent::UsageUpdate`] 使用;任一键缺失/类型不符 → `None`
 /// (畸形帧不进前端,记日志丢弃)。
@@ -512,7 +512,7 @@ impl AcpBridge {
                     }
                 }
                 Incoming::Notification { method, params }
-                    if method == "x.ai/usage_update" =>
+                    if method == "_x.ai/usage_update" =>
                 {
                     // 回合中运行态用量:纯转发(瞬态帧,不入库不回放)。
                     // 未知会话直接丢,与 session/update 同语义(防串话)。
@@ -1544,7 +1544,7 @@ mod tests {
         let mut events = bridge.subscribe();
         line_tx
             .send(
-                r#"{"jsonrpc":"2.0","method":"x.ai/usage_update","params":{"sessionId":"ghost","inputTokens":11,"outputTokens":7,"modelCalls":1,"numTurns":1}}"#
+                r#"{"jsonrpc":"2.0","method":"_x.ai/usage_update","params":{"sessionId":"ghost","inputTokens":11,"outputTokens":7,"modelCalls":1,"numTurns":1}}"#
                     .to_string(),
             )
             .await
@@ -1555,5 +1555,53 @@ mod tests {
             got.is_err(),
             "未知会话的 usage_update 必须被丢弃,不得上屏: {got:?}"
         );
+    }
+
+    /// 已知会话的 usage_update 必须转发上屏:直接登记会话后订阅事件流,
+    /// 发送线上真实格式帧(方法名带前导下划线 `_x.ai/usage_update`),
+    /// 断言窗口内收到完整 UsageUpdate(此测试用真实方法名,
+    /// 能抓住 arm 方法串漏写下划线的回归)。
+    #[tokio::test]
+    async fn usage_update_known_session_forwarded() {
+        use tokio::time::{timeout, Duration};
+        let (line_tx, line_rx) = mpsc::channel::<String>(16);
+        let transport = Arc::new(MockTransport {
+            lines: std::sync::Mutex::new(Some(line_rx)),
+        });
+        let bridge = AcpBridge::attach(transport).expect("attach");
+        bridge
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(SessionRecord {
+                id: "s1".to_string(),
+                cwd: PathBuf::from("."),
+                office_task: None,
+            });
+        let mut events = bridge.subscribe();
+        line_tx
+            .send(
+                r#"{"jsonrpc":"2.0","method":"_x.ai/usage_update","params":{"sessionId":"s1","inputTokens":11,"outputTokens":7,"modelCalls":1,"numTurns":1}}"#
+                    .to_string(),
+            )
+            .await
+            .expect("send line");
+        let got = timeout(Duration::from_millis(100), events.recv()).await;
+        match got {
+            Ok(Ok(BridgeEvent::UsageUpdate {
+                session_id,
+                input_tokens,
+                output_tokens,
+                model_calls,
+                num_turns,
+            })) => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(input_tokens, 11);
+                assert_eq!(output_tokens, 7);
+                assert_eq!(model_calls, 1);
+                assert_eq!(num_turns, 1);
+            }
+            other => panic!("已知会话的 usage_update 应转发上屏: {other:?}"),
+        }
     }
 }

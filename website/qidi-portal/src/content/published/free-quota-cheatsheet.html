@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>免费额度速查表：魔搭 / Gemini / API 中转实测 · 启迪技术分享</title>
+<meta name="description" content="魔搭每日 250 魔粒、Google AI Studio 免费档可用模型与付费门槛、APIGOTO 免费额度实测，附模型真假鉴别与避坑清单。">
+<meta name="theme-color" content="#0b1020">
+<link rel="canonical" href="https://www.qidiai.ltd/blog/free-quota-cheatsheet/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="QIDI AI">
+<meta property="og:title" content="Rust 终端 AI 编码助手的多模型 Provider 抽象实践 · 启迪技术分享">
+<meta property="og:description" content="QIDI Code 如何让同一条对话链路在多家模型服务商之间自由切换：Provider 抽象层的接口设计、流式协议差异抹平与故障降级的工程取舍。">
+<meta property="og:url" content="https://www.qidiai.ltd/blog/free-quota-cheatsheet/">
+<meta property="og:image" content="https://www.qidiai.ltd/og-cover.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rust 终端 AI 编码助手的多模型 Provider 抽象实践 · 启迪技术分享">
+<meta name="twitter:description" content="QIDI Code 如何让同一条对话链路在多家模型服务商之间自由切换：Provider 抽象层的接口设计、流式协议差异抹平与故障降级的工程取舍。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='32' y='43' font-size='30' font-family='Arial,sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/site.css">
+  <!-- 百度自动推送（2026-10-21）：真人访问页面时自动提交该 URL，不占 API 推送配额 -->
+  <script>
+  (function(){
+    var bp = document.createElement('script');
+    var curProtocol = window.location.protocol.split(':')[0];
+    if (curProtocol === 'https') {
+      bp.src = 'https://zz.bdstatic.com/linksubmit/push.js';
+    } else {
+      bp.src = 'http://push.zhanzhang.baidu.com/push.js';
+    }
+    var s = document.getElementsByTagName('script')[0];
+    s.parentNode.insertBefore(bp, s);
+  })();
+  </script>
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "免费额度速查表：魔搭 / Google AI Studio / 各家 API 中转（2026-10 实测）",
+  "description": "魔搭每日 250 魔粒、Google AI Studio 免费档可用模型与付费门槛、APIGOTO 免费额度实测，附模型真假鉴别与避坑清单。",
+  "datePublished": "2026-10-21",
+  "dateModified": "2026-10-21",
+  "inLanguage": "zh-CN",
+  "author": {
+    "@type": "Organization",
+    "name": "QIDI AI"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "QIDI AI",
+    "url": "https://www.qidiai.ltd/"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://www.qidiai.ltd/blog/free-quota-cheatsheet/"
+  },
+  "keywords": "免费额度,魔搭,ModelScope,MagicLad,Google AI Studio,Gemini,API中转,免费token",
+  "articleSection": "技术博客"
+}
+  </script>
+</head>
+<body>
+<div class="bg-fx"></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="/">
+      <span class="mark">Q</span>
+      <span>QIDI AI<br><small>启狄 · PRODUCTS &amp; CASES</small></span>
+    </a>
+    <nav class="links">
+      <a href="/#open-source">开源项目</a>
+      <a href="/#products">产品矩阵</a>
+      <a href="/tech/">技术方案</a>
+      <a href="/blog/" class="cur">技术博客</a>
+      <a href="/#news">AI 资讯</a>
+      <a href="/#cases">工程案例</a>
+      <a href="/#about">关于我们</a>
+    </nav>
+    <div class="cta">
+      <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">源码 GitHub ↗</a>
+      <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">下载中心</a>
+    </div>
+  </div>
+</header>
+<main id="top">
+
+  <article class="post">
+    <div class="crumb"><a href="/">首页</a> / <a href="/blog/">技术博客</a></div>
+    <h1>免费额度速查表：魔搭 / Google AI Studio / 各家 API 中转（2026-10 实测）</h1>
+    <div class="meta"><span>发布于 2026-10-21</span><span>实测 · 额度 · 备忘</span></div>
+    <div class="content">
+<blockquote>
+<p>全部数据由我们用真实 key 实测（<strong>2026-10-21</strong>），不是抄官方文案。平台政策随时会变，以你开通当天的实际页面为准。</p>
+</blockquote>
+
+<h2>一、魔搭 ModelScope（阿里）</h2>
+<ul>
+<li><strong>额度形态</strong>：按日发放「魔粒」，个人账号每天约 <strong>250 魔粒</strong>；每日 0 点刷新。</li>
+<li><strong>耗尽表现</strong>：API 返回 <code>429 insufficient balance</code>；此时网页端账户可能显示已到账，但调用仍失败——这是「额度按模型/按日结算」与「账户余额」两件事。</li>
+<li><strong>实用建议</strong>：多账号各持一把 key 轮换，配合自动降级；单账号的日额度扛不住长时间编码。</li>
+</ul>
+
+<h2>二、Google AI Studio（Gemini API）</h2>
+<ul>
+<li><strong>免费档可用</strong>：<code>gemini-3.5-flash</code>、<code>3.5-flash-lite</code>、<code>3.6-flash</code>、<code>3.7-flash</code>、<code>3.8-flash</code>、<code>gemma-4</code> 系列（实测 200）。</li>
+<li><strong>需要付费额度</strong>：<code>gemini-4-argon</code>、<code>gemini-3.1-pro-preview</code>——免费档直接 429，需在 AI Studio 开通计费。</li>
+<li><strong>网络前提</strong>：国内直连不通，需要海外出口；免费档额度按日重置，重度测试当天就会打光。</li>
+<li><strong>成本参考</strong>：Argon 官方价约 <strong>$2 / 百万输入 token</strong>。</li>
+</ul>
+
+<h2>三、API 中转平台</h2>
+<ul>
+<li><strong>APIGOTO</strong>：注册送 1 亿 token（30 天），实名认证再送 4 亿；平台价约为官方的 0.8 折，另有订阅制（详见<a href="/tech/free-token-resources/">这篇实测</a>）。</li>
+<li><strong>中转平台多如牛毛</strong>：额度、价格、稳定性差异极大，选之前先小额度试；本表只收录我们自己在用且实测过的。</li>
+<li><strong>判断真假</strong>：不要看名字，看行为——同一提示词下 <code>prompt_tokens</code> 是否恒定（tokenizer 恒差）、几道硬题（9.11 与 9.9、strawberry 的 r、24 点、日期推算）能否全对。</li>
+</ul>
+
+<h2>四、避坑清单</h2>
+<ol>
+<li><strong>额度≠余额</strong>：日额度、订阅额度、API 余额是三套账本，别用网页上的数字推断 API 能不能调。</li>
+<li><strong>中转有风险</strong>：模型注水、突然跑路、key 被封都发生过；重要任务留官方直连兜底。</li>
+<li><strong>别把免费额度当生产容量</strong>：免费档适合验证与小流量，生产要算清单位成本与限流。</li>
+</ol>
+
+<h2>小结</h2>
+<p>免费额度的正确用法是「低成本验证 + 高峰分流」，而不是「长期白嫖」。把额度当成可替换的临时资源，系统里永远留一条付费或备用通道，才不会被某一家卡住。</p>
+</div>
+    <a class="back" href="/blog/">← 返回技术博客</a>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 启迪 QIDI AI · qidiai.ltd · 开源代码基于 Apache License 2.0 分发</div>
+    <div class="beian">
+      <a href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee</a> ·
+      <a href="https://biaoshu.qidiai.ltd" target="_blank" rel="noopener">标书智能平台</a> ·
+      <a href="https://geo.qidiai.ltd" target="_blank" rel="noopener">qidigeo</a>
+    </div>
+    <div>启迪技术分享 · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">皖ICP备2026028669号</a><!-- 皖公网安备号下发后在此补挂 --></div>
+  </div>
+</footer>
+<script src="/assets/site.js" defer></script>
+</body>
+</html>

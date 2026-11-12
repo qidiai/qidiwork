@@ -1,0 +1,55 @@
+# QIDI AI portal — robots.txt
+# 2026-10-21: 站点此前无 robots.txt（404），sitemap 也没有入口宣告；
+# 这里显式放行主流搜索引擎与生成式引擎（GEO）爬虫，并声明 sitemap。
+
+User-agent: *
+Allow: /
+Disallow: /admin/
+
+# —— 生成式引擎 / AI 检索爬虫（GEO 目标）——
+User-agent: GPTBot
+Allow: /
+Disallow: /admin/
+User-agent: OAI-SearchBot
+Allow: /
+Disallow: /admin/
+User-agent: ChatGPT-User
+Allow: /
+Disallow: /admin/
+User-agent: ClaudeBot
+Allow: /
+Disallow: /admin/
+User-agent: anthropic-ai
+Allow: /
+Disallow: /admin/
+User-agent: PerplexityBot
+Allow: /
+Disallow: /admin/
+User-agent: Google-Extended
+Allow: /
+Disallow: /admin/
+User-agent: Bytespider
+Allow: /
+Disallow: /admin/
+User-agent: Amazonbot
+Allow: /
+Disallow: /admin/
+
+# —— 传统搜索引擎 ——
+User-agent: Baiduspider
+Allow: /
+Disallow: /admin/
+User-agent: Sogou web spider
+Allow: /
+Disallow: /admin/
+User-agent: 360Spider
+Allow: /
+Disallow: /admin/
+User-agent: YisouSpider
+Allow: /
+Disallow: /admin/
+User-agent: bingbot
+Allow: /
+Disallow: /admin/
+
+Sitemap: https://www.qidiai.ltd/sitemap.xml

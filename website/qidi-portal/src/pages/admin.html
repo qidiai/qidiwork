@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="description" content="启迪官网访问统计管理，仅限授权管理人员查看。">
+  <title>访问统计 · 启迪</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/qidi-logo.svg">
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/admin.js" defer></script>
+</head>
+<body>
+  <div class="ambient" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="启迪官网首页"><img class="brand-mark" src="/assets/qidi-logo.svg" width="44" height="44" alt=""><span>启迪 <small>访问统计</small></span></a>
+    <a class="back-link" href="/">返回官网 <span aria-hidden="true">↗</span></a>
+  </header>
+  <main class="shell">
+    <noscript><p class="notice">请启用 JavaScript 后登录。统计数据不会在静态页面中公开。</p></noscript>
+    <section id="login-panel" class="login-layout" aria-labelledby="login-title">
+      <div class="login-intro">
+        <p class="eyebrow">启迪 · 网站管理</p>
+        <h1 id="login-title">每一次访问，<br><span>让连接更清晰。</span></h1>
+        <p class="intro-copy">了解官网浏览趋势、内容热度与点击情况。<br>无需 Cookie，不做跨日访客追踪。</p>
+        <div class="privacy-tags"><span>北京时间统计</span><span>保留最近 90 天</span><span>数据受密码保护</span></div>
+      </div>
+      <div class="panel login-card">
+        <span class="section-index">管理入口</span>
+        <h2>登录访问统计</h2>
+        <p class="muted">请输入独立配置的管理密码。此页面外壳可公开访问，报表仅在验证后加载。</p>
+        <form id="login-form" method="post" action="/admin/" autocomplete="off">
+          <label for="admin-password">管理密码</label>
+          <input id="admin-password" type="password" minlength="24" maxlength="1024" autocomplete="off" required spellcheck="false" placeholder="输入管理密码" aria-describedby="password-note">
+          <p id="password-note" class="field-note">至少 24 位英文字母、数字或半角符号，不含空白。密码不写入浏览器存储，关闭、刷新页面或退出后需重新登录。</p>
+          <button id="login-button" type="submit" class="button primary">登录并查看报表 <span aria-hidden="true">→</span></button>
+        </form>
+      </div>
+    </section>
+
+    <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true"></p>
+
+    <section id="dashboard" hidden aria-labelledby="dashboard-title">
+      <div class="dashboard-heading">
+        <div><p class="eyebrow">启迪 · 数据概览</p><h1 id="dashboard-title" tabindex="-1">访问统计</h1><p id="report-range" class="muted">等待加载报表</p></div>
+        <div class="toolbar">
+          <label class="period-label" for="period">统计周期</label>
+          <select id="period" aria-label="统计周期">
+            <option value="1">今天</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option>
+          </select>
+          <button id="refresh-button" class="button secondary" type="button">刷新报表</button>
+          <button id="logout-button" class="button quiet" type="button">退出登录</button>
+        </div>
+      </div>
+      <div class="report-meta"><span><i class="live-dot" aria-hidden="true"></i>北京时间 · 每日统计</span><span id="updated-at">尚未加载</span></div>
+      <div id="summary" class="metrics">
+        <article class="metric"><p>今日浏览次数 <small>PV</small></p><strong id="today-pv">—</strong><span>页面浏览事件总次数</span></article>
+        <article class="metric accent"><p>今日估算访客 <small>UV</small></p><strong id="today-uv">—</strong><span>仅当日去重，不是精准人数</span></article>
+        <article class="metric"><p>今日点击次数</p><strong id="today-clicks">—</strong><span>四类点击事件合计</span></article>
+        <article class="metric"><p>期间浏览次数 <small>PV</small></p><strong id="period-pv">—</strong><span>所选周期内的浏览总次数</span></article>
+        <article class="metric violet"><p>期间访客日</p><strong id="period-visitor-days">—</strong><span>每日 UV 之和，非期间独立人数</span></article>
+        <article class="metric"><p>期间点击次数</p><strong id="period-clicks">—</strong><span>所选周期内的点击总次数</span></article>
+      </div>
+      <p id="empty-state" class="empty-state" hidden>所选期间暂无统计记录。真实访问发生后，可手动刷新查看；尊重隐私设置或被识别为机器人时不会计数。</p>
+
+      <section class="panel trend-panel" aria-labelledby="trend-title">
+        <div class="panel-heading"><div><p class="section-index">访问趋势</p><h2 id="trend-title">每天的访问与互动</h2></div>
+          <div class="view-switch" role="group" aria-label="趋势显示方式"><button id="chart-toggle" type="button" aria-pressed="true">条形图</button><button id="table-toggle" type="button" aria-pressed="false">明细表</button></div>
+        </div>
+        <div class="chart-legend"><span><i class="pv-dot" aria-hidden="true"></i>浏览次数 PV</span><span><i class="uv-dot" aria-hidden="true"></i>估算访客 UV（当日）</span></div>
+        <div id="trend-chart" class="trend-chart" aria-label="每日浏览次数与估算访客条形图"></div>
+        <div id="trend-table-wrap" class="table-wrap" hidden><table><caption class="sr-only">每日浏览次数、估算访客和各类点击次数</caption><thead><tr><th scope="col">日期</th><th scope="col">浏览 PV</th><th scope="col">估算 UV</th><th scope="col">点击合计</th><th scope="col">下载点击</th><th scope="col">源码点击</th><th scope="col">产品点击</th><th scope="col">联系点击</th></tr></thead><tbody id="trend-table"></tbody></table></div>
+      </section>
+
+      <section class="panel" aria-labelledby="clicks-title"><div class="panel-heading"><div><p class="section-index">互动表现</p><h2 id="clicks-title">期间点击分布</h2></div></div><div id="click-breakdown" class="click-breakdown"></div><p class="field-note">下载点击仅表示前往下载中心或点击安装包，不代表完成下载。产品、源码与联系点击同样仅表示点击行为，不代表后续转化。</p></section>
+
+      <div class="detail-grid">
+        <section class="panel" aria-labelledby="pages-title"><div class="panel-heading"><div><p class="section-index">内容热度</p><h2 id="pages-title">热门页面</h2></div><span class="panel-hint">最多 20 项</span></div><div class="table-wrap"><table><caption class="sr-only">期间热门页面</caption><thead><tr><th scope="col">页面路径</th><th scope="col">浏览 PV</th><th scope="col">点击</th></tr></thead><tbody id="pages-table"></tbody></table></div><p id="pages-empty" class="list-empty" hidden>暂无页面记录</p></section>
+        <section class="panel" aria-labelledby="referrers-title"><div class="panel-heading"><div><p class="section-index">访问来源</p><h2 id="referrers-title">热门来源</h2></div><span class="panel-hint">按浏览 PV · 最多 20 项</span></div><ul id="referrers-list" class="rank-list"></ul><p id="referrers-empty" class="list-empty" hidden>暂无来源记录</p><p class="field-note">仅保留来源域名；未提供来源或内部来源归为“直接/站内”。</p></section>
+        <section class="panel device-panel" aria-labelledby="devices-title"><div class="panel-heading"><div><p class="section-index">设备概览</p><h2 id="devices-title">浏览设备分布</h2></div><span class="panel-hint">按浏览 PV</span></div><ul id="devices-list" class="device-list"></ul><p id="devices-empty" class="list-empty" hidden>暂无设备记录</p><p class="field-note">仅由请求标识粗略分类，不保存原始 User-Agent。</p></section>
+      </div>
+      <aside class="measurement-note" aria-labelledby="measurement-title"><h2 id="measurement-title">关于数据口径</h2><p>每日 UV 使用北京时间日期与 IP、User-Agent 的当日 HMAC 进行去重，仅为估算访客，不是精准人数；共享网络、设备变化、隐私设置及自动化请求均可能影响结果。跨日不追踪同一访客，期间合计仅称“访客日”。仅浏览事件参与 UV 去重。</p><p>不使用 Cookie 或 localStorage 跟踪，不保存原始 IP、User-Agent 或带查询参数的来源；忽略常见机器人、DNT 与 Sec-GPC 请求。仅保留最近 90 天的数据，本管理页自身不发送统计事件。</p></aside>
+    </section>
+  </main>
+  <footer class="footer"><span>启迪技术分享 · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">皖ICP备2026028669号</a></span><span>隐私优先 / 真实记录 / 谨慎解读</span></footer>
+</body>
+</html>

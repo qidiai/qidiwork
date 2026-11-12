@@ -1,0 +1,32 @@
+[Unit]
+Description=QIDI private website analytics
+After=network.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=qidi-analytics
+StateDirectoryMode=0700
+WorkingDirectory=/opt/qidi-analytics
+EnvironmentFile=/etc/qidi-analytics.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/qidi-analytics/analytics.py --api-only --trust-proxy --port 4180
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+UMask=0077
+MemoryMax=192M
+TasksMax=96
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,56 @@
+[
+  {
+    "icon": "⌨️",
+    "name": "QIDI Code",
+    "en": "TERMINAL AI CODING AGENT",
+    "status": "os", "statusText": "已开源",
+    "desc": "基于 Rust 构建的终端 AI 编码助手：原生支持 Windows / macOS / Linux，多模型 Provider 可插拔切换，内置 20+ 工具、MCP 协议扩展、会话持久化与进程沙箱执行。",
+    "tags": ["Apache-2.0", "Rust", "多模型", "MCP协议", "沙箱执行"],
+    "link": "https://github.com/qidiai/qidiwork", "linkText": "阅读源码"
+  },
+  {
+    "icon": "🖥️",
+    "name": "QidiWork 办公工作台",
+    "en": "QIDIWORK WORKBENCH",
+    "status": "os", "statusText": "开源 · 可下载",
+    "desc": "面向企业日常办公的桌面 AI 工作台：可视化对话流、工具调用编排、文档预览（xlsx / pdf / docx）、技能扩展系统与工作区管理。安装包内置 AI 内核，安装即用。",
+    "tags": ["桌面端", "文档预览", "技能系统", "安装即用"],
+    "link": "https://qidiwork.qidiai.ltd", "linkText": "下载中心"
+  },
+  {
+    "icon": "📑",
+    "name": "标书智能平台",
+    "en": "TENDER AI SUITE",
+    "status": "on", "statusText": "在线服务",
+    "desc": "AI 投标全流程平台：全国 31 省招标信息采集、AI 标书解析、资质智能匹配、标书查重、符合性评审、方案编写器与企业知识库，覆盖「找标 → 析标 → 写标」完整闭环。",
+    "tags": ["31省采集", "AI解析", "智能匹配", "标书查重", "方案编写器", "订阅推送"],
+    "link": "https://biaoshu.qidiai.ltd", "linkText": "进入平台"
+  },
+  {
+    "icon": "🎯",
+    "name": "qidigeo · AI 可见度控制台",
+    "en": "GEO OPTIMIZATION SUITE",
+    "status": "on", "statusText": "在线服务",
+    "desc": "面向生成式引擎优化（GEO）的多租户平台：LLM 内容解析、可见度诊断与异步战役引擎，帮助品牌在 AI 搜索与大模型回答中获得更高曝光与引用。",
+    "tags": ["GEO优化", "多租户", "LLM解析", "异步战役", "开放API"],
+    "link": "https://geo.qidiai.ltd", "linkText": "进入控制台"
+  },
+  {
+    "icon": "📈",
+    "name": "启迪选股助手",
+    "en": "AI QUANT STOCK ASSISTANT",
+    "status": "on", "statusText": "在线服务",
+    "desc": "AI 量化选股与投资决策助手：覆盖 A 股行情数据（K 线 / 板块 / 资金流向）、个股分析与决策建议（流式输出）、Agent 对话交互与长期记忆沉淀，内置多用户账户体系。",
+    "tags": ["A股行情", "AI决策", "Agent对话", "资金流向", "长期记忆", "多用户"],
+    "link": "https://qidiai.ltd/quant/", "linkText": "进入助手"
+  },
+  {
+    "icon": "🛰️",
+    "name": "QiDi Relay 中转控制台",
+    "en": "LAN RELAY CONSOLE",
+    "status": "int", "statusText": "内部运行",
+    "desc": "局域网设备中转与组网控制台，为内部办公与远程接入提供稳定通道，是 QidiWork 远程方案的底层组件。",
+    "tags": ["局域网", "中转组网", "远程接入"],
+    "link": "", "linkText": ""
+  }
+]

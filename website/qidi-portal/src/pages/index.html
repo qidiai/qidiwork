@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>启迪技术分享 · QIDI AI 产品与开源工具</title>
+<meta name="description" content="QIDI AI 自研产品矩阵与工程案例：QIDI Code 终端 AI 编码助手与 QidiWork 办公工作台已基于 Apache-2.0 开源，另有标书智能平台、qidigeo AI 可见度控制台等在线服务，及 AI 资讯与技术方案分享。">
+<meta name="theme-color" content="#f4f2e9">
+<meta name="baidu-site-verification" content="codeva-78cNRhXqgO">
+<link rel="canonical" href="https://www.qidiai.ltd/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="QIDI AI">
+<meta property="og:title" content="启迪技术分享 · QIDI AI">
+<meta property="og:description" content="让 AI 真正进入生产与工程现场：QIDI Code 与 QidiWork 已开源（Apache-2.0），另有标书智能平台、qidigeo 等全线自研产品。">
+<meta property="og:url" content="https://www.qidiai.ltd/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="启迪技术分享 · QIDI AI">
+<meta name="twitter:description" content="让 AI 真正进入生产与工程现场：开源编码终端与办公工作台，全线自研产品矩阵。">
+<link rel="icon" type="image/svg+xml" href="/assets/qidi-logo.svg">
+<link rel="stylesheet" href="/assets/site.css">
+<script type="application/ld+json">
+{
+  "@context":"https://schema.org",
+  "@type":"Organization",
+  "name":"QIDI AI 启迪",
+  "url":"https://www.qidiai.ltd/",
+  "description":"QIDI AI 自研产品矩阵与工程案例：标书智能平台、qidigeo AI 可见度控制台、QIDI Code 终端 AI 编码助手、QidiWork 办公工作台等。",
+  "sameAs":["https://github.com/qidiai/qidiwork","https://gitee.com/xuchangming/qidiwork"]
+}
+</script>
+</head>
+<body>
+<div class="bg-fx"></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="/" aria-label="QIDI 启迪官网首页">
+      <img class="mark" src="/assets/qidi-logo.svg" width="46" height="46" alt="">
+      <span><span class="wordmark">QIDI<span class="brand-ai">AI</span></span><small>启迪 · 让想法发生</small></span>
+    </a>
+    <button class="menu-toggle" type="button" aria-expanded="false" aria-controls="siteNav">菜单</button>
+    <nav class="links" id="siteNav" aria-label="主导航">
+      <a href="/#open-source">开源项目</a>
+      <a href="/#products">产品矩阵</a>
+      <a href="/tech/">技术方案</a>
+      <a href="/blog/">博客</a>
+      <a href="/#news">AI 资讯</a>
+      <a href="/#cases">工程案例</a>
+      <a href="/#about">关于我们</a>
+    </nav>
+    <div class="cta">
+      <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">源码 GitHub ↗</a>
+      <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">下载中心</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero wrap" aria-labelledby="heroTitle">
+    <div class="hero-copy">
+      <span class="badge"><span class="dot"></span>启迪工作室 / 把工具用在实处</span>
+      <h1 id="heroTitle">从一个难题，<br>搭起<span class="grad">新的世界。</span></h1>
+      <p class="sub">卡住的代码，散落的表格，还没写完的报告。<br>QIDI Code 帮你拆解编程问题，QidiWork 协助整理工作资料。<br>你来决定方向，一起把事情往前推进。</p>
+      <div class="cta-row">
+        <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">开始使用 QidiWork <span aria-hidden="true">↗</span></a>
+        <a class="btn btn-ghost" href="#playground">看看它们如何协作 <span aria-hidden="true">↓</span></a>
+      </div>
+      <div class="hero-tools">
+        <a href="#open-source"><span class="tool-symbol">&lt;/&gt;</span><span><b>QIDI Code</b><small>把想法写成代码</small></span></a>
+        <a href="https://qidiwork.qidiai.ltd"><span class="tool-symbol work-symbol">W</span><span><b>QidiWork</b><small>把繁琐变成成果</small></span></a>
+      </div>
+      <p class="hero-note">开源的工具。具体的任务。由你掌握的成果。</p>
+      <div class="hero-signature" aria-hidden="true"><span>想法 → 动手 → 成果</span><span>Q / 01</span></div>
+    </div>
+    <div class="world" id="playground" data-stage="3" data-scene="together">
+      <div class="world-top"><span><i class="live-dot"></i> 代码造物 / 从 01 到无限</span><span class="scene-label">实时字符演算</span></div>
+      <div class="scene-switch" aria-label="选择演示场景">
+        <button type="button" data-scene="together" aria-pressed="true">一起创造</button>
+        <button type="button" data-scene="code" aria-pressed="false">解决编程难题</button>
+        <button type="button" data-scene="work" aria-pressed="false">搞定日常工作</button>
+      </div>
+      <div class="shape-switch" role="group" aria-label="选择字符模型">
+        <button type="button" data-shape="city" aria-pressed="true" disabled>城市</button>
+        <button type="button" data-shape="plane" aria-pressed="false" disabled>飞机</button>
+        <button type="button" data-shape="car" aria-pressed="false" disabled>汽车</button>
+        <button type="button" data-shape="sun" aria-pressed="false" disabled>太阳</button>
+        <button type="button" data-shape="moon" aria-pressed="false" disabled>月亮</button>
+        <button type="button" data-shape="earth" aria-pressed="false" disabled>地球</button>
+        <button type="button" data-shape="universe" aria-pressed="false" disabled>宇宙</button>
+      </div>
+      <div class="model-heading"><div><span class="model-eyebrow">0 / 1 · 万物由此展开</span><h2 id="modelTitle">城市</h2></div><span id="morphStatus">静态概念图</span></div>
+      <div class="world-visual">
+        <canvas id="particleCanvas" width="900" height="640" role="img" aria-label="由零、一与代码符号组成的数字城市">代码与二进制字符汇聚为城市、飞机、汽车、太阳、月亮、地球与宇宙。</canvas>
+        <svg id="worldFallback" class="world-svg" viewBox="0 0 620 410" role="img" aria-labelledby="worldTitle worldDesc">
+          <title id="worldTitle">QIDI Code 与 QidiWork 协作搭建数字城市</title>
+          <desc id="worldDesc">两位 AI 助手把需求连接成代码、文档、应用和成果，建筑逐步升起，最终形成一座数字城市。</desc>
+          <defs>
+            <linearGradient id="land" x2="0" y2="1"><stop stop-color="#182d48"/><stop offset="1" stop-color="#0b1524"/></linearGradient>
+            <linearGradient id="roof"><stop stop-color="#5bdbed"/><stop offset="1" stop-color="#3097b7"/></linearGradient>
+            <linearGradient id="scan" x2="0" y2="1"><stop stop-color="#b7f4cc" stop-opacity="0"/><stop offset=".85" stop-color="#b7f4cc" stop-opacity=".02"/><stop offset="1" stop-color="#b7f4cc" stop-opacity=".26"/></linearGradient>
+            <radialGradient id="aura"><stop stop-color="#37d9d3" stop-opacity=".2"/><stop offset="1" stop-color="#37d9d3" stop-opacity="0"/></radialGradient>
+            <g id="smallBuilding"><path d="M0 0 35 -20 70 0 35 20Z" fill="url(#roof)"/><path d="M0 0V55L35 75V20Z" fill="#1c687d"/><path d="M35 20 70 0V55L35 75Z" fill="#10394e"/><path d="M9 17 25 26M9 30 25 39M45 32 60 24M45 45 60 37M45 58 60 50" stroke="#7af5df" stroke-width="3"/></g>
+            <g id="tree"><path d="M0 0V20" stroke="#3b8584" stroke-width="3"/><path d="M-11 3 0 -28 11 3 0 10Z" fill="#68d6b0"/><path d="M0 -28 11 3 0 10Z" fill="#239890"/></g>
+          </defs>
+          <ellipse cx="310" cy="217" rx="282" ry="192" fill="url(#aura)"/>
+          <g class="world-orbits" fill="none" stroke="#294651"><ellipse cx="310" cy="255" rx="282" ry="122" stroke-dasharray="3 9"/><ellipse cx="310" cy="255" rx="252" ry="102" opacity=".5"/></g>
+          <path d="m62 230 245 -138 252 140v23L314 393 62 253Z" fill="#0c1a2b" stroke="#284154"/>
+          <path d="m62 230 245 -138 252 140L314 372Z" fill="url(#land)" stroke="#375a6e"/>
+          <g stroke="#244355" stroke-width="1" opacity=".8"><path d="m111 202 251 140m-202 -167 251 140m-202 -167 251 140m-202 -167 251 140M111 257 357 119M160 285 406 147M209 313 455 175M258 341 504 203"/></g>
+          <g class="blueprint" fill="none" stroke="#9bceb5" stroke-width="1" stroke-dasharray="3 5">
+            <path d="m155 213 35-20 35 20v55l-35 20-35-20Zm0 0 35 20 35-20m-35 20v55M237 150l70-40 71 40v95l-70 41-71-41Zm0 0 70 40 71-40m-71 40v96m70-62 35-20 35 20v55l-35 20-35-20Zm0 0 35 20 35-20m-35 20v55"/>
+          </g>
+          <path class="world-road" d="m135 225 170 98 179 -102M223 174l181 103M306 122v30" fill="none" stroke="#5ee6d2" stroke-width="2" stroke-linecap="round"/>
+          <g class="flow-lines" fill="none" stroke-width="4" stroke-linecap="round" aria-hidden="true">
+            <path class="flow-code" pathLength="100" d="M135 225 305 323 484 221" stroke="#b6ffdf"/>
+            <path class="flow-work" pathLength="100" d="M484 221 305 323 135 225" stroke="#efc592"/>
+            <path class="flow-link" pathLength="100" d="M223 174 404 277" stroke="#ecf9b9"/>
+          </g>
+          <g class="city-layer city-one">
+            <use href="#smallBuilding" x="155" y="213"/>
+            <use href="#smallBuilding" x="377" y="224"/>
+            <use href="#tree" x="147" y="265"/><use href="#tree" x="181" y="286"/>
+            <text x="160" y="310" class="map-label">代码街区</text><text x="407" y="305" class="map-label">办公街区</text>
+          </g>
+          <g class="city-layer city-two">
+            <path d="m237 150 70 -40 71 40v95l-70 41 -71 -41Z" fill="#114559" stroke="#3d9db0"/>
+            <path d="m307 190 71 -40v95l-70 41Z" fill="#132d44"/>
+            <path d="m237 150 70 -40 71 40 -71 40Z" fill="url(#roof)"/>
+            <path class="building-windows" d="m252 178 39 22m-39 -8 39 22m-39 -8 39 22m35 -45 35 -20m-35 34 35 -20m-35 34 35 -20" stroke="#79eddf" stroke-width="4"/>
+            <path d="m268 118 39 -22 39 22v20l-39 22 -39 -22Z" fill="#246d82" stroke="#8ef4e6"/>
+            <path d="m268 118 39 -22 39 22 -39 22Z" fill="#bcf4e3"/>
+            <image href="/assets/qidi-logo.svg" width="30" height="30" transform="matrix(1 .56 -1 .56 307 102)"/>
+            <use href="#tree" x="461" y="240"/><use href="#tree" x="479" y="229"/>
+          </g>
+          <g class="city-layer city-three">
+            <path d="m357 147 34 -20 35 20v39l-35 21 -34 -21Z" fill="#805840" stroke="#daa47c"/>
+            <path d="m357 147 34 -20 35 20 -35 20Z" fill="#edb180"/>
+            <path d="m374 164 0 17m16 -8v17m17 -21v14" stroke="#ffe5c7" stroke-width="4"/>
+            <use href="#smallBuilding" x="260" y="288" transform="translate(70 70) scale(.75)"/>
+            <use href="#tree" x="238" y="321"/><use href="#tree" x="254" y="331"/>
+            <path d="M307 95V61" stroke="#8ff6dd" stroke-width="2" stroke-dasharray="3 4"/>
+            <circle class="world-beacon" cx="307" cy="53" r="7" fill="#adffe7"/>
+            <text x="307" y="31" text-anchor="middle" class="map-label">想法，有了新的形状</text>
+          </g>
+          <g class="construction-scan" aria-hidden="true"><path d="m91 184 216-122 222 124-216 122Z" fill="url(#scan)"/><path d="m91 184 222 124 216-122" fill="none" stroke="#bbefbf" stroke-opacity=".5"/></g>
+          <g class="agent-code"><rect x="58" y="132" width="125" height="49" rx="4" fill="#0f2536" stroke="#5ddad4"/><text x="74" y="153" fill="#92f2e0" font-size="12" font-weight="700">&lt;/&gt; QIDI Code</text><text x="74" y="169" fill="#93aaba" font-size="10">理解 · 编写 · 验证</text><path class="agent-link" d="m125 181 28 31" stroke="#5ddad4" stroke-dasharray="4 5"/></g>
+          <g class="agent-work"><rect x="430" y="121" width="131" height="49" rx="4" fill="#30291f" stroke="#d9a576"/><text x="444" y="142" fill="#f3c89c" font-size="12" font-weight="700">W  QidiWork</text><text x="444" y="158" fill="#c5af94" font-size="10">整理 · 分析 · 交付</text><path d="m492 170 -45 43" stroke="#d9a576" stroke-dasharray="4 5"/></g>
+          <g class="city-layer city-one world-artifact"><path d="M79 91h98l12 12v23H79Z" fill="#ece9dc"/><path d="M177 91v12h12" fill="none" stroke="#839284"/><text id="artifactInput" x="90" y="114">需求与资料</text><path d="M126 126v7" stroke="#d8dfc6"/></g>
+          <g class="city-layer city-two world-artifact"><path d="M432 70h100l12 12v23H432Z" fill="#efd6b6"/><path d="M532 70v12h12" fill="none" stroke="#aa8965"/><text id="artifactOutput" x="443" y="93">代码 + 文档</text><path d="M485 105v16" stroke="#e4bd8e"/></g>
+          <g class="city-layer city-three"><rect x="241" y="362" width="142" height="26" rx="2" fill="#bde0b8"/><text id="artifactFinal" x="312" y="379" text-anchor="middle" fill="#203d34" font-size="11">一个项目，逐步成形</text></g>
+          <g class="completion-rings" fill="none" stroke="#d0efb2" stroke-width="1.5" aria-hidden="true"><ellipse cx="307" cy="53" rx="13" ry="7"/><ellipse cx="307" cy="53" rx="13" ry="7"/></g>
+          <g class="construction-sparks" fill="#d6ebbd" aria-hidden="true"><circle cx="230" cy="165" r="2"/><circle cx="382" cy="164" r="2"/><circle cx="165" cy="236" r="2"/><circle cx="451" cy="227" r="2"/><circle cx="307" cy="91" r="2"/></g>
+        </svg>
+      </div>
+      <div class="particle-sources" aria-label="协作工具"><span><b>&lt;/&gt; QIDI Code</b><small>将想法写成代码</small></span><span><b>W · QidiWork</b><small>让资料成为成果</small></span></div>
+      <p id="modelDescription" class="model-description">字符从地面网格向上生长，连接成错落有致的立体城市。</p>
+      <div class="world-caption"><span class="view-hint">移动鼠标，轻推字符 · 点击形态，自由造物</span><span id="sceneProgress">01 / 07</span></div>
+      <details class="scene-details" id="sceneDetails">
+        <summary>从数字造物，到解决真实问题<span>查看协作案例</span></summary>
+        <div class="scene-story">
+          <div class="scene-request"><span>你的难题</span><p id="sceneRequest">我想把零散的业务资料，变成一个能用的项目。</p></div>
+          <ol class="build-steps" aria-label="演示步骤"><li>理解需求</li><li>拆解任务</li><li>协作构建</li><li>成果落地</li></ol>
+          <div class="scene-result"><span class="result-dot"></span><p id="sceneResult">从资料到代码，再到文档，一个项目逐步成形。</p></div>
+        </div>
+      </details>
+      <div class="scene-controls"><small>代码生成的视觉概念，非实时 AI 执行或真实物理模拟。</small><button type="button" id="autoWorld" hidden aria-pressed="true">自动演化：开</button><button type="button" id="pauseWorld" hidden aria-pressed="false">暂停动画</button><button type="button" id="replayWorld" hidden>重播当前形态</button></div>
+    </div>
+  </section>
+
+  <section class="wrap outcome-strip" aria-label="从难题到成果">
+    <div><span>01 / 编程</span><h2>不再独自面对报错</h2><p>梳理代码、定位问题，把修改和验证接起来。</p></div>
+    <div><span>02 / 办公</span><h2>让资料真正变成答案</h2><p>读文档、理表格，把反复整理交给 AI 协助。</p></div>
+    <div><span>03 / 创造</span><h2>把时间还给新的可能</h2><p>少一点重复操作，多一点思考与创造。</p></div>
+  </section>
+
+  <!-- 开源项目 -->
+  <section id="open-source" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">开放 · 共建 · 创造</div>
+      <h2>两款 AI 生产力工具，完整开源</h2>
+      <p>QIDI Code 终端编码助手与 QidiWork 办公工作台以 Apache License 2.0 开放全部源码 —— 可审阅、可自改、可商用。终端与 GUI 内核同仓维护，一条 <code style="color:#8fdcff">cargo</code> 命令即可从源码构建。</p>
+    </div>
+    <div class="grid repos">
+      <article class="repo">
+        <span class="lic">Apache-2.0</span>
+        <h3>QIDI Code</h3>
+        <div class="en">TERMINAL AI CODING AGENT · RUST</div>
+        <p>终端 AI 编码助手：多模型 Provider 可插拔、内置 20+ 工具、MCP 协议扩展、会话持久化与进程沙箱执行。Windows / macOS / Linux 原生支持。</p>
+        <div class="acts">
+          <a class="btn btn-oss" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a>
+          <a class="btn btn-ghost" href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee 镜像</a>
+        </div>
+      </article>
+      <article class="repo">
+        <span class="lic">Apache-2.0</span>
+        <h3>QidiWork 办公工作台</h3>
+        <div class="en">DESKTOP AI WORKBENCH · TAURI</div>
+        <p>与 QIDI Code 同仓的桌面 GUI：可视化对话流、工具调用编排、xlsx / pdf / docx 文档预览、技能扩展系统。安装包内置内核，安装即用。</p>
+        <div class="acts">
+          <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">下载中心</a>
+          <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">源码</a>
+        </div>
+      </article>
+      <article class="repo">
+        <span class="lic">技能仓库</span>
+        <h3>Plugin Marketplace</h3>
+        <div class="en">OFFICIAL SKILL &amp; PLUGIN MARKET</div>
+        <p>QIDI 官方技能市场：办公与投标场景技能包随产品迭代持续更新，一条命令即可订阅安装，也欢迎提交你自己的技能。</p>
+        <div class="acts">
+          <a class="btn btn-oss" href="https://github.com/qidiai/plugin-marketplace" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- 产品矩阵 -->
+  <section id="products" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">工具各有所长，成果彼此连接</div>
+      <h2>产品矩阵</h2>
+      <p>覆盖「获客线索 → 投标生产 → AI 可见度 → 开发效率 → 企业办公」的完整链条，各产品既独立成线，也在数据与工程上互相咬合。</p>
+    </div>
+    <div class="grid products">
+@PRODUCT_CARDS
+    </div>
+  </section>
+
+  <!-- 技术方案 -->
+  <section id="tech" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">从实践中来，回到实践中去</div>
+      <h2>技术方案</h2>
+      <p>把真实项目里的架构选型与踩坑经验写成可复用的方案笔记。</p>
+      <a class="more" href="/tech/">全部技术方案 →</a>
+    </div>
+    <div class="grid tech">
+@TECH_CARDS
+    </div>
+  </section>
+
+  <section id="blog" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">做过的事，留下的笔记</div>
+      <h2>博客与实测</h2>
+      <p>从老电脑上的图像生成，到可用的模型额度，记录具体做法，也记录限制。</p>
+      <a class="more" href="/blog/">全部博客 →</a>
+    </div>
+    <div class="grid tech">
+      <article class="techcard"><div class="date">2026-10-21 / 本地实测</div><h3>6GB 显存老电脑，跑起 Qwen-Image-2.1</h3><p>1660 Ti 的部署配方、效果图和踩坑记录；采样约 6 分 33 秒，全流程约 9.9 分钟。</p><a class="go" href="/blog/qwen-image-6gb/">看实测过程 →</a></article>
+      <article class="techcard"><div class="date">2026-10-21 / 资源整理</div><h3>免费额度速查表</h3><p>魔搭、Google 与中转平台的额度和使用边界。活动会变化，使用前请核对平台现行规则。</p><a class="go" href="/blog/free-quota-cheatsheet/">查看资源与限制 →</a></article>
+      <article class="techcard"><div class="date">2026-10-20 / 体验分享</div><h3>免费 Token 资源与使用提醒</h3><p>APIGOTO 的额度活动、模型辨别和使用注意事项，附推广关系说明。</p><a class="go" href="/tech/free-token-resources/">阅读全文 →</a></article>
+    </div>
+  </section>
+
+  <!-- AI 资讯 -->
+  <section id="news" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">与新的可能保持连接</div>
+      <h2>AI 资讯</h2>
+      <p>左侧为启迪团队人工精选的本周要点；右侧资讯流自动聚合公开技术站点头条，仅作索引展示，点击标题跳转原文阅读。</p>
+    </div>
+    <div class="news-layout">
+      <aside class="card digest">
+        <h3>📌 本周要点</h3>
+        <div class="date">人工精选 · @DIGEST_DATE</div>
+        <div class="body">
+@DIGEST_BODY
+        </div>
+      </aside>
+      <div id="newsFeed" class="news-feed"><noscript><p class="hint">资讯流需要启用 JavaScript 加载。</p></noscript></div>
+    </div>
+  </section>
+
+  <!-- 工程案例 -->
+  <section id="cases" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">真实场景，具体成果</div>
+      <h2>工程案例</h2>
+      <p>从 0 到 1 的平台建设与真实业务环境中的交付实践。</p>
+    </div>
+    <div class="grid cases">
+@CASE_CARDS
+    </div>
+  </section>
+
+  <!-- 联系我们 -->
+  <section id="contact" class="wrap">
+    <div class="sec-head">
+      <div class="kicker">你的下一个想法，从这里开始</div>
+      <h2>联系我们</h2>
+      <p>商务合作、产品咨询与开源协作，都欢迎找我们。</p>
+    </div>
+    <div class="grid contact">
+      <article class="card">
+        <div class="top">
+          <div class="icon">📮</div>
+          <div><h3>邮件联系</h3><div class="en">EMAIL</div></div>
+        </div>
+        <p class="desc">工作日 24 小时内回复；产品技术问题也可直接在 GitHub 提 Issue，开源仓库见上方。</p>
+        <a class="go" href="mailto:289700172@qq.com">289700172@qq.com →</a>
+        <button id="copyEmail" class="btn btn-ghost copy-email" type="button" aria-live="polite">复制邮箱</button>
+      </article>
+      <article class="card qr">
+        <div class="top" style="justify-content:center">
+          <div><h3>微信交流群</h3><div class="en">WECHAT · QIDIWORK 沟通交流群</div></div>
+        </div>
+        <img src="/assets/wechat-group.png" alt="QIDIWORK 沟通交流群微信二维码" width="190" height="209" loading="lazy">
+        <p class="desc" style="margin-top:12px">微信群二维码仅 7 天有效，若扫码提示已过期，请走上方邮箱。</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- 关于 -->
+  <section id="about" class="wrap">
+    <div class="about">
+      <div>
+        <div class="kicker">造工具，也用工具解决问题</div>
+        <h2>关于 QIDI AI</h2>
+        <p>我们是一支专注 AI 工程落地的技术团队：自己造工具、自己用工具、再把被验证过的能力产品化对外服务。标书智能平台服务投标企业，qidigeo 帮助品牌进入 AI 时代的搜索视野，启迪选股助手辅助投资决策，QIDI Code 与 QidiWork 则是我们内部每天都在使用的生产力基座 —— 现在它们也开源了，欢迎审查、使用与共建。</p>
+      </div>
+      <div class="facts">
+        <div class="fact"><span class="ico">🧭</span><span><b>工程驱动</b>：所有产品均源自真实业务需求，不做纸面 AI。</span></div>
+        <div class="fact"><span class="ico">⚙️</span><span><b>全栈自研</b>：从 Rust 终端工具到多租户 SaaS 控制台。</span></div>
+        <div class="fact"><span class="ico">🔓</span><span><b>开源共建</b>：编码与办公工具 Apache-2.0 开放，欢迎 Issue 与 PR。</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 启迪 QIDI AI · qidiai.ltd · 开源代码基于 Apache License 2.0 分发</div>
+    <div class="beian">
+      <a href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee</a> ·
+      <a href="https://biaoshu.qidiai.ltd" target="_blank" rel="noopener">标书智能平台</a> ·
+      <a href="https://geo.qidiai.ltd" target="_blank" rel="noopener">qidigeo</a>
+    </div>
+    <div>启迪技术分享 · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">皖ICP备2026028669号</a><!-- 皖公网安备号下发后在此补挂 --></div>
+    <p class="privacy-note">本站使用自有服务统计页面访问和入口点击，不保存原始 IP 或完整浏览器标识，不设置跟踪 Cookie；当日匿名去重数据保留 90 天，访客数为估算。<button type="button" id="analyticsPreference">关闭访问统计</button> · <a href="/admin/">站长统计</a></p>
+  </div>
+</footer>
+
+<script src="/assets/site.js" defer></script>
+<script src="/assets/analytics.js" defer></script>
+</body>
+</html>

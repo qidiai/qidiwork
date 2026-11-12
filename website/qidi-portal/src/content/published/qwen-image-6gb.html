@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>6GB 显存老电脑跑 Qwen-Image-2.1：1660 Ti 实测部署配方 · 启迪技术分享</title>
+<meta name="description" content="GTX 1660 Ti 6GB + 16GB 内存实测跑通 Qwen-Image-2.1：四个模型文件、两个补丁节点、turbo 4 步 127s/张，int8 质量档 25 步 6 分 33 秒；含 8 个踩坑与许可红线。">
+<meta name="theme-color" content="#0b1020">
+<link rel="canonical" href="https://www.qidiai.ltd/blog/qwen-image-6gb/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="QIDI AI">
+<meta property="og:title" content="Rust 终端 AI 编码助手的多模型 Provider 抽象实践 · 启迪技术分享">
+<meta property="og:description" content="QIDI Code 如何让同一条对话链路在多家模型服务商之间自由切换：Provider 抽象层的接口设计、流式协议差异抹平与故障降级的工程取舍。">
+<meta property="og:url" content="https://www.qidiai.ltd/blog/qwen-image-6gb/">
+<meta property="og:image" content="https://www.qidiai.ltd/assets/img/qwen-image-1660ti-before-after.webp">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Rust 终端 AI 编码助手的多模型 Provider 抽象实践 · 启迪技术分享">
+<meta name="twitter:description" content="QIDI Code 如何让同一条对话链路在多家模型服务商之间自由切换：Provider 抽象层的接口设计、流式协议差异抹平与故障降级的工程取舍。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='32' y='43' font-size='30' font-family='Arial,sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/site.css">
+  <!-- 百度自动推送（2026-10-21）：真人访问页面时自动提交该 URL，不占 API 推送配额 -->
+  <script>
+  (function(){
+    var bp = document.createElement('script');
+    var curProtocol = window.location.protocol.split(':')[0];
+    if (curProtocol === 'https') {
+      bp.src = 'https://zz.bdstatic.com/linksubmit/push.js';
+    } else {
+      bp.src = 'http://push.zhanzhang.baidu.com/push.js';
+    }
+    var s = document.getElementsByTagName('script')[0];
+    s.parentNode.insertBefore(bp, s);
+  })();
+  </script>
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "6GB 显存老电脑跑 Qwen-Image-2.1：1660 Ti 实测部署配方",
+  "description": "GTX 1660 Ti 6GB + 16GB 内存实测跑通 Qwen-Image-2.1：四个模型文件、两个补丁节点、turbo 4 步 127s/张，int8 质量档 25 步 6 分 33 秒；含 8 个踩坑与许可红线。",
+  "datePublished": "2026-10-21",
+  "dateModified": "2026-10-21",
+  "inLanguage": "zh-CN",
+  "author": {
+    "@type": "Organization",
+    "name": "QIDI AI"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "QIDI AI",
+    "url": "https://www.qidiai.ltd/"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://www.qidiai.ltd/blog/qwen-image-6gb/"
+  },
+  "keywords": "Qwen-Image,ComfyUI,低显存,6GB,1660Ti,本地部署,AI绘图,GGUF,int8",
+  "articleSection": "技术博客"
+}
+  </script>
+</head>
+<body>
+<div class="bg-fx"></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="/">
+      <span class="mark">Q</span>
+      <span>QIDI AI<br><small>启狄 · PRODUCTS &amp; CASES</small></span>
+    </a>
+    <nav class="links">
+      <a href="/#open-source">开源项目</a>
+      <a href="/#products">产品矩阵</a>
+      <a href="/tech/">技术方案</a>
+      <a href="/blog/" class="cur">技术博客</a>
+      <a href="/#news">AI 资讯</a>
+      <a href="/#cases">工程案例</a>
+      <a href="/#about">关于我们</a>
+    </nav>
+    <div class="cta">
+      <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">源码 GitHub ↗</a>
+      <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">下载中心</a>
+    </div>
+  </div>
+</header>
+<main id="top">
+
+  <article class="post">
+    <div class="crumb"><a href="/">首页</a> / <a href="/blog/">技术博客</a></div>
+    <h1>6GB 显存的老电脑能跑 Qwen-Image-2.1 吗？1660 Ti 实测配方</h1>
+    <div class="meta"><span>发布于 2026-10-21</span><span>本地生图 · 低显存 · 实测</span></div>
+    <div class="content">
+
+<blockquote>
+<p>测试机：<strong>GTX 1660 Ti（6GB）＋ 16GB 内存 ＋ Windows</strong>，ComfyUI 0.37.0 portable（cu126）。
+本文所有数字都是这台机器上跑出来的，不是"理论上可以"。</p>
+</blockquote>
+
+<h2>结论先行</h2>
+<ul>
+<li><strong>能跑</strong>，1024×1024 完全可用；1328×1328 也能出，只是要等。</li>
+<li><strong>快稿档</strong>（turbo，4 步）：热跑 <strong>127 秒/张</strong>，冷启动约 6 分钟（含模型加载）。</li>
+<li><strong>质量档</strong>（int8 原生权重，25 步）：<strong>11.43 秒/步</strong>，采样 6 分 33 秒，全管线含冷加载约 9.9 分钟。</li>
+<li>显存峰值约 <strong>4.7GB / 6GB</strong>；文本编码器 7.9GB 常驻内存、流式上卡，所以内存别同时开重载程序。</li>
+</ul>
+
+
+<figure>
+  <img src="/assets/img/qwen-image-1660ti-before-after.webp" width="1440" height="803" loading="lazy"
+       alt="Qwen-Image-2.1 在 GTX 1660 Ti 6GB 上生成的乡村道路改造前后对比图">
+  <figcaption>实测输出：同一条村道的「改造前 / 改造后」对比（1664×928，int8 质量档 25 步 cfg=1）。画面里不放任何文字——AI 渲染中文标注必然乱码，文字一律后期叠。</figcaption>
+</figure>
+
+<h2>一、为什么不是"直接 pip 装 diffusers"</h2>
+<p>6GB 显存跑 20B 级 DiT，天真做法会在加载阶段就 OOM。可行的组合是三件事叠加：</p>
+<ol>
+<li><strong>量化</strong>：DiT 用 GGUF（Q4_K_M，约 4.2GB）或 int8（7.26GB，靠流式上卡）；文本编码器也必须量化（Q4_K_M，5.03GB）。</li>
+<li><strong>低显存模式</strong>：ComfyUI 的 <code>--lowvram</code>，把权重按需换入换出。</li>
+<li><strong>fp32 计算</strong>：<strong>不要</strong>开 <code>--force-fp16</code>。图灵（TU116）没有 fp16 加速单元，实测 fp16 GEMM 比 fp32 慢 <strong>6 倍</strong>（219ms vs 36.1ms），而且会把模型卡在初始化阶段空转。</li>
+</ol>
+
+<h2>二、四个模型文件 + 两个补丁节点</h2>
+<p>放进 ComfyUI 对应目录，文件名别改（GGUF 的 mmproj 是按文件名匹配的）：</p>
+<pre><code>models/diffusion_models/
+  qwen_image_2.1_int8_convrot.safetensors   7.26G   质量档（推荐默认）
+  qwen_image_2.1_turbo_Q4_K_M.gguf          4.19G   4 步快稿档
+models/text_encoders/
+  qwen3vl_8b_heretic-Q4_K_M.gguf            5.03G
+  mmproj-qwen3vl_8b_heretic-f16.gguf        1.16G   ← 必须同目录
+models/vae/
+  qwen_image_2.1_vae_bf16.safetensors       0.68G
+
+custom_nodes/
+  ComfyUI-GGUF-main                          GGUF 加载节点（city96）
+  ComfyUI-GGUF-Qwen3VL-TE-main               修 12288 维文本编码器报错的补丁
+</code></pre>
+<p>还要给 loader 打一行补丁——带 <code>general.architecture</code> 元数据的 GGUF 会被拒载：</p>
+<pre><code class="language-python"># custom_nodes/ComfyUI-GGUF-main/loader.py 第 12 行附近
+IMG_ARCH_LIST = {..., "qwen_image21"}</code></pre>
+<p>注意：这个文件在节点更新后会被覆盖，<strong>每次更新都要重打</strong>。</p>
+
+<h2>三、启动</h2>
+<pre><code class="language-bash">cd ComfyUI_windows_portable
+.\python_embeded\python.exe -s ComfyUI\main.py --lowvram --port 8188</code></pre>
+<p>日志出现 <code>[GGUF-Qwen3VL-TE] ... patched</code> 就说明补丁生效了。</p>
+
+<h2>四、实测性能（1660 Ti 6GB / fp32 / LOW_VRAM）</h2>
+<table>
+<tr><th>场景</th><th>耗时</th><th>备注</th></tr>
+<tr><td>turbo 4 步 @1024²</td><td>127 秒</td><td>热跑；冷启动约 6 分钟</td></tr>
+<tr><td>turbo 4 步 @1328²</td><td>约 9.5 分钟</td><td>含文本编码</td></tr>
+<tr><td>int8 质量档 25 步 @1024²</td><td>11.43 秒/步，采样 6:33</td><td>全管线约 9.9 分钟（含冷加载）</td></tr>
+<tr><td>int8 质量档 25 步 @1328²</td><td>步时约 19.2 秒，采样约 8 分钟</td><td>按面积外推，实测同量级</td></tr>
+<tr><td>显存峰值</td><td>约 4.7GB / 6GB</td><td>文本编码器走内存流式</td></tr>
+</table>
+<p>分辨率换算记住一条：<strong>步耗时与面积成正比</strong>——2048² 大约是 1024² 的 4 倍。另外分辨率必须是 <strong>16 的倍数</strong>（VAE 16× 压缩），1920×1080 无效，要用 1920×1088。</p>
+
+
+<figure>
+  <img src="/assets/img/qwen-image-1660ti-finished-road.webp" width="1440" height="803" loading="lazy"
+       alt="Qwen-Image-2.1 在 6GB 显存上生成的完工道路效果图">
+  <figcaption>同一台的产出：完工效果图（1664×928）。透视、光影与材质一致性是判断低显存方案"能不能用"的关键——不是能出图就行。</figcaption>
+</figure>
+
+<h2>五、为什么 int8 比 GGUF 快 2.28 倍</h2>
+<p>同一个 25 步配置：GGUF Q4_K_M 是 26.09 秒/步，int8 是 11.43 秒/步。原因不是"量化更狠"，而是<strong>每步的额外开销</strong>：</p>
+<ul>
+<li>GGUF Q4 在 eager 模式下每个算子都要先做 Q4→fp32 反量化，反量化开销约等于矩阵乘本身；</li>
+<li>int8 走的是 Hadamard 旋转 + 动态 W8A8 + DP4A 矩阵指令，整条链更便宜；</li>
+<li>精度上做过漂移校验（A/B/A 对照），差异 0.5%，肉眼等效于 fp32。</li>
+</ul>
+<p>代价是内存：加载期 commit 会多约 9GB，16GB 机器属于薄余量运行，跑的时候别再开浏览器几十个标签。</p>
+
+<h2>六、8 个必踩的坑</h2>
+<ol>
+<li><strong>PNG 元数据泄密</strong>：ComfyUI 默认把整段 workflow（含提示词与模型名）写进 PNG 的 tEXt 块，别人拖回 ComfyUI 就能还原。交付前必须用 PIL 重存清零。</li>
+<li><strong>文本编码器维度报错</strong>：<code>Given normalized_shape=[4096] ... got [1,512,12288]</code> → 装 Qwen3VL-TE 补丁节点，且 mmproj 必须与 GGUF 同目录、同名匹配。</li>
+<li><strong>Unexpected architecture type: 'qwen_image21'</strong> → 就是上面那行 IMG_ARCH_LIST 补丁没打。</li>
+<li><strong>--force-fp16 卡死</strong>：图灵上会卡在 Model Initializing、GPU 100% 空转。永久禁用。</li>
+<li><strong>fp16 的各种变体都是无效功</strong>：<code>--fp16-unet</code> 对 GGUF 模型输出与 fp32 逐字节相同（no-op），<code>dequant_dtype=fp16</code> 零提速。GGUF 路径上 fp32 就是地板。</li>
+<li><strong>PowerShell 5.1 的 UTF-8 带 BOM</strong>：用它生成的 JSON 会被 aiohttp 拒收，改用无 BOM 写入。</li>
+<li><strong>分辨率非 16 倍数</strong>：1920×1080 直接报错，用 1920×1088。</li>
+<li><strong>后台常驻服务被会话超时杀掉</strong>：长任务里的 ComfyUI 会被 10 小时上限掐死，久驻服务要用计划任务保活（幂等启动、活着就跳过）。</li>
+</ol>
+
+<h2>七、许可红线（很重要）</h2>
+<ul>
+<li>Qwen-Image-2.1 及其衍生（turbo / UC / GGUF）适用 <strong>Qwen RESEARCH LICENSE</strong>，<strong>仅限研究评估</strong>；商用交付（包括投标文件配图）需向官方购买授权。</li>
+<li>需要可商用替代时，上一代 <strong>Qwen-Image 1.0 是 Apache-2.0</strong>。</li>
+<li>另外：本地生成的图没有官方水印，但 AIGC 检测器仍能判"AI 生成"；如果用于对外发布，按《标识办法》要求应加显式/隐式标识。</li>
+</ul>
+
+
+<h2>八、完整部署仓库</h2>
+<p>脚本、基准记录与全部踩坑都整理在 GitCode：
+<a href="https://gitcode.com/fengzii/qwen-image-2.1-lowvram-deploy" target="_blank" rel="noopener">qwen-image-2.1-lowvram-deploy</a>
+（ComfyUI + GGUF Q4 / int8 双流水线，含 1660 Ti 实测数据）。</p>
+
+<h2>小结</h2>
+<p>6GB 显存不是"跑不动大模型"的判决书，但需要认清三件事：<strong>量化要选对（int8 &gt; GGUF Q4）</strong>、<strong>计算精度别乱降（fp32 是地板）</strong>、<strong>显存靠流式换，不靠显存本身</strong>。把这三条吃透，一张 2019 年的显卡也能稳定产出 1024² 的图。</p>
+</div>
+    <a class="back" href="/blog/">← 返回技术博客</a>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>© 2026 启迪 QIDI AI · qidiai.ltd · 开源代码基于 Apache License 2.0 分发</div>
+    <div class="beian">
+      <a href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee</a> ·
+      <a href="https://biaoshu.qidiai.ltd" target="_blank" rel="noopener">标书智能平台</a> ·
+      <a href="https://geo.qidiai.ltd" target="_blank" rel="noopener">qidigeo</a>
+    </div>
+    <div>启迪技术分享 · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">皖ICP备2026028669号</a><!-- 皖公网安备号下发后在此补挂 --></div>
+  </div>
+</footer>
+<script src="/assets/site.js" defer></script>
+</body>
+</html>

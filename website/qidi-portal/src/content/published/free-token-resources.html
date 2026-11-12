@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>免费 Token 资源分享：APIGOTO 注册送 1 亿、实名再送 4 亿（附 DeepSeek/Claude/Grok 真假实测）· 启迪技术分享 QIDI AI</title>
+<meta name="description" content="我们在生产环境实测 APIGOTO 网关数月：注册送 1 亿 token、实名认证再送 4 亿。附 DeepSeek V4、Claude Opus 5.5/Haiku 5.5、Grok 4.7、GLM-5.3 的真假判定（tokenizer 恒差铁证）与注水避雷名单。">
+<meta name="keywords" content="免费token,APIGOTO,免费API,DeepSeek,Claude,Grok,API中转,大模型免费额度">
+<meta name="theme-color" content="#0b1020">
+<link rel="canonical" href="https://www.qidiai.ltd/tech/free-token-resources/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="QIDI AI">
+<meta property="og:title" content="免费 Token 资源分享：APIGOTO 注册送 1 亿、实名再送 4 亿（附真假实测）">
+<meta property="og:description" content="生产环境实测数月：注册送 1 亿 token、实名再送 4 亿。DeepSeek V4 / Claude Opus 5.5 / Haiku 5.5 / Grok 4.7 真假判定全公开。">
+<meta property="og:url" content="https://www.qidiai.ltd/tech/free-token-resources/">
+<meta property="og:image" content="https://www.qidiai.ltd/og-cover.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="免费 Token 资源分享：APIGOTO 注册送 1 亿、实名再送 4 亿">
+<meta name="twitter:description" content="生产环境实测数月：注册送 1 亿 token、实名再送 4 亿。附 DeepSeek/Claude/Grok 真假判定。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0'1' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%2322d3ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='32' y='43' font-size='30' font-family='Arial,sans-serif' font-weight='bold' fill='white' text-anchor='middle'%3EQ%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/site.css">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "免费 Token 资源分享：APIGOTO 注册送 1 亿、实名再送 4 亿（附 DeepSeek/Claude/Grok 真假实测）",
+  "description": "生产环境实测 APIGOTO 网关数月：注册送 1 亿 token、实名再送 4 亿；附 DeepSeek V4、Claude Opus 5.5/Haiku 5.5、Grok 4.7、GLM-5.3 的真假判定方法（tokenizer 恒差与硬题自证）。",
+  "datePublished": "2026-10-20",
+  "dateModified": "2026-10-21",
+  "inLanguage": "zh-CN",
+  "author": {
+    "@type": "Organization",
+    "name": "QIDI AI"
+  },
+  "publisher": {
+    "@type": "Organization",
+    "name": "QIDI AI",
+    "url": "https://www.qidiai.ltd/"
+  },
+  "mainEntityOfPage": {
+    "@type": "WebPage",
+    "@id": "https://www.qidiai.ltd/tech/free-token-resources/"
+  },
+  "image": "https://www.qidiai.ltd/og-cover.png",
+  "about": [
+    "免费 Token",
+    "APIGOTO",
+    "API 中转",
+    "模型真假鉴别"
+  ],
+  "keywords": "免费token,APIGOTO,免费API,DeepSeek,Claude,Grok,API中转,大模型免费额度"
+}
+  </script>
+  <!-- 百度自动推送（2026-10-21）：真人访问页面时自动提交该 URL，不占 API 推送配额 -->
+  <script>
+  (function(){
+    var bp = document.createElement('script');
+    var curProtocol = window.location.protocol.split(':')[0];
+    if (curProtocol === 'https') {
+      bp.src = 'https://zz.bdstatic.com/linksubmit/push.js';
+    } else {
+      bp.src = 'http://push.zhanzhang.baidu.com/push.js';
+    }
+    var s = document.getElementsByTagName('script')[0];
+    s.parentNode.insertBefore(bp, s);
+  })();
+  </script>
+</head>
+<body>
+<div class="bg-fx"></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="/">
+      <span class="mark">Q</span>
+      <span>QIDI AI<br><small>启狄 · PRODUCTS &amp; CASES</small></span>
+    </a>
+    <nav class="links">
+      <a href="/#open-source">开源项目</a>
+      <a href="/#products">产品矩阵</a>
+      <a href="/tech/" class="cur">技术方案</a>
+      <a href="/#news">AI 资讯</a>
+      <a href="/#cases">工程案例</a>
+      <a href="/#about">关于我们</a>
+    </nav>
+    <div class="cta">
+      <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">源码 GitHub ↗</a>
+      <a class="btn btn-pri" href="https://qidiwork.qidiai.ltd">下载中心</a>
+    </div>
+  </div>
+</header>
+<main id="top">
+
+  <article class="post">
+    <div class="crumb"><a href="/">首页</a> / <a href="/tech/">技术方案</a>
+      <a href="/blog/">技术博客</a> / <span>免费 Token 资源分享</span></div>
+    <h1>免费 Token 资源分享：APIGOTO 注册送 1 亿、实名再送 4 亿</h1>
+    <div class="meta"><span>2026-10-20</span><span class="dot">·</span><span>QIDI AI 工程团队</span><span class="dot">·</span><span>资源实测</span></div>
+
+    <p><strong>编者按</strong>：这是「免费 Token 资源分享」栏目的第一篇。我们只发布<strong>生产环境真实跑过</strong>的资源——每篇文章附实测数据、价格口径和避雷名单，不做无脑广告。</p>
+
+    <h2>一、APIGOTO 是什么</h2>
+    <p>APIGOTO（聚元创新·深圳）是一个统一的 LLM API 网关：一个 API Key 调用 400+ 主流模型、70+ 供应商（Claude / GPT / Gemini / DeepSeek / Qwen / Grok / Kimi 等），OpenAI SDK 零改接接入，支持智能路由与自动故障转移。</p>
+
+    <h2>二、新用户福利（通过本文链接注册）</h2>
+    <ul>
+      <li><strong>注册即送 1 亿 token</strong>（有效期 30 天，注册后创建 API Key 即可调用全部模型）</li>
+      <li><strong>完成实名认证再送 4 亿 token</strong>（网易易盾认证系统，即用即毁、不留存任何认证资料）</li>
+      <li>免费版套餐每月 1 日自动刷新；关注公众号不定期领额度重置卡、现金优惠券</li>
+    </ul>
+
+    <h2>三、价格</h2>
+    <p>按实际使用量计费，平台价为官方直连的 <strong>0.8 折</strong>起；错峰低谷时段再半价——以 DeepSeek-Flash 为例，低谷期输入仅 ¥0.8/百万 token、输出 ¥3.21/百万 token，轻量调用成本极低。</p>
+
+    <h2>四、我们生产环境跑了数月的模型实测</h2>
+    <p>以下判定来自 QiDi Relay 中转集群数月真实调用数据（同一 prompt 的 tokenizer 恒差分析 + 难题组正确性测试）：</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:14px">
+      <thead>
+        <tr style="background:rgba(99,102,241,.15)">
+          <th style="border:1px solid rgba(255,255,255,.12);padding:8px;text-align:left">模型</th>
+          <th style="border:1px solid rgba(255,255,255,.12);padding:8px;text-align:left">实测判定</th>
+          <th style="border:1px solid rgba(255,255,255,.12);padding:8px;text-align:left">证据</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">DeepSeek V4 Pro / Flash / deepseek-flash（1017 最新版）</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">✅ 真身</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">同 prompt 下 prompt_tokens 恒差 53 的数学铁证（同一 DeepSeek tokenizer）；难题组 5/5</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">Claude Opus 5.5</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">✅ 真身</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">难题组 6/6；自报 Anthropic Claude；tokenizer 家族对照一致</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">Claude Haiku 5.5</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">✅ 真身</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">与 Sonnet 5.5 同渠道 prompt_tokens 恒差 0（同源同厂）；难题组 5/5</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">Grok 4.7</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">✅ 真身</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">难题组 6/6；自报 xAI Grok；分词体系与 Claude 家族差异巨大（非换皮）</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">GLM-5.3</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">✅ 真身</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">多轮生产调用响应正常</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">Claude Haiku 4.5 / Doubao-Seed</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">❌ 注水避雷</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">自报身份错乱（谎报 Claude 3.5 / App-gateway）</td></tr>
+        <tr><td style="border:1px solid rgba(255,255,255,.12);padding:8px">GPT-5.6 Sol / Gemini-4-Pro / Hy4</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">⚠️ 存疑</td><td style="border:1px solid rgba(255,255,255,.12);padding:8px">上游身份未能验证，请自行小额度试用</td></tr>
+      </tbody>
+    </table>
+
+    <h2>五、注册链接</h2>
+    <p style="font-size:17px"><strong>👉 <a href="https://www.apigoto.com/wechat_oX2xV2dt6vu8jpIdGvpvPHzk_qY8" target="_blank" rel="noopener">https://www.apigoto.com/wechat_oX2xV2dt6vu8jpIdGvpvPHzk_qY8</a></strong></p>
+    <p>通过本链接注册即完成推广归属：你获得上文全部新用户额度，我们获得平台推广返利——双赢，不影响你的任何权益。</p>
+
+    
+    <h2>六、同步发布</h2>
+    <p>本文已同步发布至知乎（搜索"免费 Token 资源"或点击下方链接）：</p>
+    <ul>
+      <li>知乎专栏：<a href="https://zhuanlan.zhihu.com/p/2095782971764691836" target="_blank" rel="noopener">https://zhuanlan.zhihu.com/p/2095782971764691836</a></li>
+      <li>知乎回答：<a href="https://www.zhihu.com/question/2095783192330516219/answer/2095783448334045766" target="_blank" rel="noopener">https://www.zhihu.com/question/2095783192330516219/answer/2095783448334045766</a></li>
+    </ul>
+
+    <p style="opacity:.6;font-size:13px"><em>注：以上判定基于 2026 年 9-10 月生产环境实测，平台模型供应可能随时间变化，请以注册后控制台实际可用模型为准。本栏目持续更新，敬请关注。</em></p>
+  </article>
+</main>
+<footer>
+  <div class="wrap">
+    <div>© 2026 启迪 QIDI AI · qidiai.ltd · 开源代码基于 Apache License 2.0 分发</div>
+    <div class="beian">
+      <a href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee</a> ·
+      <a href="https://biaoshu.qidiai.ltd" target="_blank" rel="noopener">标书智能平台</a> ·
+      <a href="https://geo.qidiai.ltd" target="_blank" rel="noopener">qidigeo</a>
+    </div>
+    <div>启迪技术分享 · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">皖ICP备2026028669号</a></div>
+  </div>
+</footer>
+<script src="/assets/site.js" defer></script>
+</body>
+</html>

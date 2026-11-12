@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QidiWork 下载中心 · QIDI AI</title>
+<meta name="description" content="QidiWork 办公工作台与 QIDI Code Windows 桌面版下载。开源（Apache License 2.0），安装即用，AI 内核随包内置。">
+<meta property="og:title" content="QidiWork 下载中心 · QIDI AI">
+<meta property="og:description" content="开源桌面 AI 工作台，Windows 版下载，安装即用。">
+<meta property="og:type" content="website">
+<link rel="canonical" href="https://qidiwork.qidiai.ltd/">
+<link rel="icon" type="image/svg+xml" href="qidi-logo.svg">
+<meta name="theme-color" content="#0b1020">
+<style>
+  :root{
+    --bg:#0b1020; --card:rgba(255,255,255,.04); --card-b:rgba(255,255,255,.09);
+    --tx:#e8ecf8; --tx2:#9aa5c4; --tx3:#6b7699;
+    --p1:#6366f1; --p2:#22d3ee; --os:#a78bfa; --ok:#34d399; --warn:#fbbf24;
+    --radius:16px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--tx); line-height:1.6; min-height:100vh;
+    display:flex; flex-direction:column; overflow-x:hidden;
+  }
+  a{color:inherit;text-decoration:none}
+  [hidden]{display:none!important}
+  button{font:inherit}
+  #dl[aria-disabled="true"]{opacity:.5;cursor:not-allowed;pointer-events:none}
+  #analyticsPreference{border:0;background:none;color:var(--tx2);text-decoration:underline;cursor:pointer;font-size:12px}
+  :focus-visible{outline:2px solid var(--p2);outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+  .bg-fx{position:fixed;inset:0;z-index:-1;pointer-events:none}
+  .bg-fx::before{content:"";position:absolute;inset:0;
+    background:
+      radial-gradient(600px 400px at 85% -10%, rgba(99,102,241,.22), transparent 60%),
+      radial-gradient(700px 500px at -10% 40%, rgba(34,211,238,.12), transparent 60%);
+  }
+  .wrap{max-width:860px;margin:0 auto;padding:0 24px;width:100%}
+
+  header{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);
+    background:rgba(11,16,32,.72);border-bottom:1px solid rgba(255,255,255,.06)}
+  .nav{display:flex;align-items:center;gap:12px;height:60px}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:17px;letter-spacing:.5px}
+  .logo .mark{width:40px;height:40px;border-radius:9px;flex:0 0 auto;
+    display:block;object-fit:contain;box-shadow:0 4px 14px rgba(0,0,0,.2)}
+  .nav .home{margin-left:auto;font-size:13.5px;color:var(--tx2)}
+  .nav .home:hover{color:var(--tx)}
+
+  main{flex:1;padding:56px 0 64px}
+
+  .hero{text-align:center;margin-bottom:36px}
+  .badge{display:inline-flex;align-items:center;gap:8px;padding:7px 16px;border-radius:999px;
+    border:1px solid var(--card-b);background:var(--card);font-size:12.5px;color:var(--tx2)}
+  .badge .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.45)}70%{box-shadow:0 0 0 8px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+  h1{font-size:40px;font-weight:900;margin:22px 0 10px;letter-spacing:1px}
+  h1 .grad{background:linear-gradient(120deg,#a5b4fc 0%,#67e8f9 60%);
+    -webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero .sub{font-size:16px;color:var(--tx2)}
+
+  /* 下载卡片 */
+  .dl-card{margin-top:34px;border-radius:20px;padding:32px;position:relative;overflow:hidden;
+    background:linear-gradient(135deg,rgba(99,102,241,.12),rgba(34,211,238,.07));
+    border:1px solid rgba(99,102,241,.3)}
+  .dl-card .vrow{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .dl-card .ver{font-size:26px;font-weight:800}
+  .dl-card .kver{font-size:12.5px;color:var(--tx3)}
+  .dl-card .notes{margin-top:14px;font-size:13.5px;color:var(--tx2);line-height:1.8}
+  .btns{margin-top:24px;display:flex;gap:12px;flex-wrap:wrap}
+  .btn{display:inline-flex;align-items:center;gap:9px;padding:13px 26px;border-radius:12px;
+    font-size:15.5px;font-weight:700;transition:.2s;border:1px solid transparent;cursor:pointer}
+  .btn-pri{background:linear-gradient(135deg,var(--p1),var(--p2));color:#fff;box-shadow:0 6px 20px rgba(99,102,241,.4)}
+  .btn-pri:hover{transform:translateY(-1px);filter:brightness(1.08)}
+  .btn-ghost{border-color:var(--card-b);color:var(--tx2);background:transparent}
+  .btn-ghost:hover{color:var(--tx);border-color:rgba(255,255,255,.25)}
+  .meta{margin-top:18px;font-size:12.5px;color:var(--tx3);line-height:2;word-break:break-all}
+  .meta code{font-family:ui-monospace,Consolas,monospace;background:rgba(255,255,255,.05);
+    border:1px solid var(--card-b);border-radius:6px;padding:2px 8px;color:var(--tx2)}
+  .copy{margin-left:8px;font-size:11.5px;padding:3px 10px;border-radius:7px;cursor:pointer;
+    border:1px solid var(--card-b);background:var(--card);color:var(--tx2);vertical-align:2px}
+  .copy:hover{color:var(--tx);border-color:rgba(255,255,255,.25)}
+  .dim{color:var(--tx3);font-size:12px}
+
+  /* 卖点 */
+  .sells{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:36px}
+  .sell{border-radius:var(--radius);padding:20px 22px;background:var(--card);border:1px solid var(--card-b)}
+  .sell .ico{font-size:22px}
+  .sell h3{font-size:15.5px;font-weight:700;margin:8px 0 6px}
+  .sell p{font-size:13px;color:var(--tx2)}
+
+  /* 开源 */
+  .oss{margin-top:36px;border-radius:20px;padding:28px;background:var(--card);border:1px solid var(--card-b)}
+  .oss .k{font-size:12px;font-weight:700;letter-spacing:3px;color:var(--os);text-transform:uppercase}
+  .oss h2{font-size:21px;font-weight:800;margin:8px 0 6px}
+  .oss p{font-size:13.5px;color:var(--tx2)}
+  .oss .btns{margin-top:18px}
+  .btn-os{background:linear-gradient(135deg,var(--os),#8b5cf6);color:#fff;box-shadow:0 4px 16px rgba(167,139,250,.3)}
+
+  /* 安装指引 */
+  .guide{margin-top:36px}
+  .guide h2{font-size:19px;font-weight:800;margin-bottom:14px}
+  .step{display:flex;gap:14px;padding:16px 18px;border-radius:14px;background:var(--card);
+    border:1px solid var(--card-b);margin-bottom:10px}
+  .step .n{flex:0 0 auto;width:28px;height:28px;border-radius:50%;font-size:14px;font-weight:800;
+    display:flex;align-items:center;justify-content:center;
+    background:rgba(99,102,241,.18);border:1px solid rgba(99,102,241,.4);color:#b9c2ff}
+  .step p{font-size:13.5px;color:var(--tx2)}
+  .step b{color:var(--tx)}
+
+  footer{border-top:1px solid rgba(255,255,255,.06);padding:22px 0 30px;color:var(--tx3);font-size:12.5px;text-align:center}
+  footer a{color:var(--tx2)}footer a:hover{color:var(--tx)}
+  footer .row{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
+
+  @media (max-width:640px){
+    h1{font-size:30px}
+    .sells{grid-template-columns:1fr}
+    .dl-card{padding:22px}
+  }
+</style>
+</head>
+<body>
+<div class="bg-fx"></div>
+
+<header>
+  <div class="wrap nav">
+    <a class="logo" href="https://www.qidiai.ltd" aria-label="返回门户">
+      <img class="mark" src="qidi-logo.svg" width="40" height="40" alt="">
+      <span>QIDI AI<br><small style="font-size:10px;color:var(--tx3);font-weight:500;letter-spacing:2px">启迪 · 下载中心</small></span>
+    </a>
+    <a class="home" href="https://www.qidiai.ltd">← 返回门户</a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div class="hero">
+      <span class="badge"><span class="dot"></span>开源发布 · Apache License 2.0 · Windows x64</span>
+      <h1>QidiWork <span class="grad">办公工作台</span></h1>
+      <p class="sub">桌面 AI 工作台 · 安装即用，AI 内核随包内置，无需单独配置</p>
+    </div>
+
+    <div class="dl-card">
+      <div class="vrow">
+        <span class="ver" id="version">正在读取最新版本…</span>
+        <span class="kver" id="kernel"></span>
+      </div>
+      <p class="notes" id="notes" role="status">加载中。若长时间未刷新，请<a href="/releases/latest.json" style="color:#8fdcff">直接查看版本清单</a>。</p>
+      <noscript><p class="notes">请启用 JavaScript 获取最新安装包，或通过页脚的联系支持寻求帮助。</p></noscript>
+      <div class="btns">
+        <a class="btn btn-pri" id="dl" aria-disabled="true" tabindex="-1" download>正在读取下载信息…</a>
+        <button class="btn btn-ghost" id="retryDownload" type="button" hidden>重新加载版本</button>
+        <a class="btn btn-ghost" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">从源码构建 ↗</a>
+      </div>
+      <div class="meta">
+        文件大小：<span id="size" class="dim">—</span> · 发布时间：<span id="pub" class="dim">—</span><br>
+        SHA-256：<code id="sha">—</code><button class="copy" id="shaCopy" type="button" title="复制完整 SHA-256">复制</button><br>
+        <span class="dim">安装前可用 <b>powershell -c "Get-FileHash 安装包路径 -Algorithm SHA256"</b> 校验完整性</span>
+        <p id="archiveHint" role="status"></p>
+      </div>
+    </div>
+
+    <div class="sells">
+      <div class="sell">
+        <span class="ico">🔒</span>
+        <h3>隐私模式</h3>
+        <p>代码碎片化分发，敏感信息不出本地——你的工程数据始终在自己手里。</p>
+      </div>
+      <div class="sell">
+        <span class="ico">⚡</span>
+        <h3>免费高质量</h3>
+        <p>多个免费云端模型协同编排，最终输出代码质量对标国际头部大模型。</p>
+      </div>
+    </div>
+
+    <div class="oss">
+      <div class="k">开源共建</div>
+      <h2>代码全部公开，欢迎审阅与共建</h2>
+      <p>QidiWork 与 QIDI Code 内核均以 Apache License 2.0 开源。安全研究者可直接审阅分发逻辑与网络行为；企业用户可基于源码自建、二次分发。</p>
+      <div class="btns">
+        <a class="btn btn-os" href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub 主仓库 ↗</a>
+        <a class="btn btn-ghost" href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee 国内镜像 ↗</a>
+      </div>
+    </div>
+
+    <div class="guide">
+      <h2>安装指引</h2>
+      <div class="step"><span class="n">1</span><p><b>SmartScreen 提示：</b>下载后若 Windows 弹出蓝色「Windows 已保护你的电脑」提示，点击「更多信息」→「仍要运行」即可——这是未购买代码签名证书的正常现象，可通过上方 SHA-256 校验安装包完整性。</p></div>
+      <div class="step"><span class="n">2</span><p><b>管理员授权：</b>安装过程会弹一次 UAC 窗口，点「是」即可；AI 内核已随安装包平铺分发，无需单独下载配置。</p></div>
+      <div class="step"><span class="n">3</span><p><b>首次启动：</b>安装完成后程序自动启动，在设置面板填入模型 API Key（或登录 QIDI 账号使用免费协同模型）即可开始工作。</p></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="row">
+      <span>© 2026 启迪 QIDI AI · qidiai.ltd · 开源代码基于 Apache License 2.0 分发</span>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <a href="https://github.com/qidiai/qidiwork" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://gitee.com/xuchangming/qidiwork" target="_blank" rel="noopener">Gitee</a> ·
+      <a href="https://www.qidiai.ltd">门户</a> ·
+      <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">启迪技术分享 · 皖ICP备2026028669号</a>
+      <a href="mailto:289700172@qq.com">联系支持</a>
+    </div>
+    <p style="margin-top:14px;font-size:11px">本站使用自有访问统计，不设置跟踪 Cookie，不保存原始 IP；当日匿名去重数据保留 90 天，访客数为估算。<button type="button" id="analyticsPreference">关闭访问统计</button></p>
+  </div>
+</footer>
+
+<script>
+const download = document.getElementById('dl');
+const retry = document.getElementById('retryDownload');
+const copy = document.getElementById('shaCopy');
+
+function render(g, k) {
+  if (!g || typeof g.version !== 'string' || !/^\d+\.\d+\.\d+(?:[-.][a-zA-Z0-9.-]+)?$/.test(g.version)
+    || typeof g.file !== 'string' || !/^qidiwork-setup-[a-zA-Z0-9.-]+\.(zip|exe|msi)$/.test(g.file)
+    || typeof g.sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(g.sha256)
+    || !Number.isSafeInteger(g.size_bytes) || g.size_bytes <= 0) throw new Error('版本清单不完整');
+  document.getElementById('version').textContent = 'v' + g.version;
+  document.getElementById('kernel').textContent = k.version ? '内置内核 ' + k.version : '';
+  document.getElementById('notes').textContent = typeof g.notes === 'string' ? g.notes : '暂无更新说明。';
+  download.href = '/releases/' + g.file;
+  download.removeAttribute('aria-disabled');
+  download.removeAttribute('tabindex');
+  download.textContent = '下载 v' + g.version + '（' + (g.size_bytes / 1048576).toFixed(1) + ' MB）';
+  document.getElementById('size').textContent = (g.size_bytes / 1048576).toFixed(1) + ' MB';
+  const date = new Date(g.published_at);
+  document.getElementById('pub').textContent = Number.isNaN(date.getTime()) ? '暂未提供' : date.toLocaleString('zh-CN');
+  document.getElementById('sha').textContent = g.sha256;
+  document.getElementById('archiveHint').textContent = g.file.endsWith('.zip') ? '下载的是 ZIP 压缩包，请先解压，再运行其中的安装程序。' : '下载后请核对文件校验值，再运行安装程序。';
+  copy.disabled = false;
+  document.title = 'QidiWork v' + g.version + ' 下载 · 启迪';
+}
+
+copy.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('sha').textContent);
+    copy.textContent = '已复制';
+  } catch { copy.textContent = '请选中校验值手动复制'; }
+});
+
+async function loadRelease() {
+  retry.hidden = true;
+  copy.disabled = true;
+  download.removeAttribute('href');
+  download.setAttribute('aria-disabled', 'true');
+  download.setAttribute('tabindex', '-1');
+  download.textContent = '正在读取下载信息…';
+  document.getElementById('version').textContent = '正在读取最新版本…';
+  document.getElementById('notes').textContent = '请稍候，正在获取发布清单。';
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch('/releases/latest.json', { cache: 'no-store', signal: controller.signal });
+    if (!response.ok) throw new Error('加载失败');
+    const data = await response.json();
+    render(data.gui, data.kernel || {});
+  } catch {
+    document.getElementById('version').textContent = '暂时无法获取最新版本';
+    document.getElementById('notes').textContent = '网络或版本清单暂时不可用。请重试，或通过页脚邮箱联系我们；不会自动提供旧版本。';
+    download.textContent = '下载暂不可用';
+    retry.hidden = false;
+  } finally { clearTimeout(timeout); }
+}
+retry.addEventListener('click', loadRelease);
+loadRelease();
+</script>
+<script src="analytics.js" data-page="/download/" defer></script>
+</body>
+</html>

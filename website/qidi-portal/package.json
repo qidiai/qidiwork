@@ -1,0 +1,14 @@
+{
+  "name": "qidi-portal",
+  "private": true,
+  "type": "module",
+  "description": "www.qidiai.ltd 门户构建脚本：Markdown → 纯静态站",
+  "scripts": {
+    "build": "node build.mjs",
+    "preview": "node build.mjs && python server/analytics.py",
+    "test": "node --test test-site.mjs && python -m unittest discover -s server -p test_analytics.py -v"
+  },
+  "dependencies": {
+    "marked": "^12.0.0"
+  }
+}

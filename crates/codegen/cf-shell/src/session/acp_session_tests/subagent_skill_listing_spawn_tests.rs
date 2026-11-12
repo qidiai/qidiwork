@@ -56,6 +56,7 @@ async fn bridge_with_skill_names(names: &[&str]) -> crate::tools::bridge::ToolBr
         session_env: std::sync::Arc::new(std::collections::HashMap::new()),
         notification_handle: ToolNotificationHandle::noop(),
         owner_session_id: None,
+        office_task: None,
         parent_scheduler_handle: None,
         skills: names.iter().map(|name| seed_skill(name)).collect(),
         state_path: std::env::temp_dir().join("qidi-subagent-listing-spawn-e2e/tool_state.json"),

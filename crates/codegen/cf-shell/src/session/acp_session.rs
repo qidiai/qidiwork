@@ -136,7 +136,6 @@ mod sampler_turn;
 use sampler_turn::*;
 #[path = "acp_session_impl/reasoning_pregenerate.rs"]
 mod reasoning_pregenerate;
-use reasoning_pregenerate::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;

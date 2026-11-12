@@ -105,6 +105,16 @@ pub enum BridgeEvent {
     QueueLagged {
         dropped: u64,
     },
+    /// 回合中运行态用量(每次 model call 结束一帧,内核 prompt ledger
+    /// 快照投影)。覆盖式语义:前端直接替换展示值,绝不累加;回合末权威
+    /// `turn_usage` 到达后由前端清场。仅在线面板消费,不落盘不回放。
+    UsageUpdate {
+        session_id: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        model_calls: u64,
+        num_turns: u64,
+    },
 }
 
 /// `session/prompt` 图片块载荷(前端 composer 附件)。字段名走 camelCase,
@@ -175,6 +185,27 @@ fn option_ids_of(params: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 解析 `x.ai/usage_update` 扩展通知 params。线上键为 camelCase
+/// (内核 emit_usage_update 投影),桥层转 snake_case 强类型元组供
+/// [`BridgeEvent::UsageUpdate`] 使用;任一键缺失/类型不符 → `None`
+/// (畸形帧不进前端,记日志丢弃)。
+fn parse_usage_update(
+    params: &serde_json::Value,
+) -> Option<(String, u64, u64, u64, u64)> {
+    let session_id = params.get("sessionId")?.as_str()?.to_string();
+    let input_tokens = params.get("inputTokens")?.as_u64()?;
+    let output_tokens = params.get("outputTokens")?.as_u64()?;
+    let model_calls = params.get("modelCalls")?.as_u64()?;
+    let num_turns = params.get("numTurns")?.as_u64()?;
+    Some((
+        session_id,
+        input_tokens,
+        output_tokens,
+        model_calls,
+        num_turns,
+    ))
 }
 
 fn with_office_task_meta(
@@ -478,6 +509,36 @@ impl AcpBridge {
                                 tracing::warn!(%session_id, "已移除会话的模型回显,忽略");
                             }
                         }
+                    }
+                }
+                Incoming::Notification { method, params }
+                    if method == "x.ai/usage_update" =>
+                {
+                    // 回合中运行态用量:纯转发(瞬态帧,不入库不回放)。
+                    // 未知会话直接丢,与 session/update 同语义(防串话)。
+                    if let Some((
+                        session_id,
+                        input_tokens,
+                        output_tokens,
+                        model_calls,
+                        num_turns,
+                    )) = parse_usage_update(&params)
+                    {
+                        let known = self.send_event_if_known(
+                            &session_id,
+                            BridgeEvent::UsageUpdate {
+                                session_id: session_id.clone(),
+                                input_tokens,
+                                output_tokens,
+                                model_calls,
+                                num_turns,
+                            },
+                        );
+                        if !known {
+                            tracing::debug!(%session_id, "未知会话的 usage_update,丢弃");
+                        }
+                    } else {
+                        tracing::debug!(?params, "畸形的 x.ai/usage_update,丢弃");
                     }
                 }
                 Incoming::Request { id, method, params } => {
@@ -1389,5 +1450,110 @@ mod tests {
     #[test]
     fn prompt_blocks_reject_empty() {
         assert!(build_prompt_blocks("", &[]).is_err());
+    }
+
+    /// parse_usage_update:线上 camelCase 键正确映射成桥层 snake_case 元组;
+    /// 缺键 / 类型不符 → None(畸形帧丢弃,不进前端)。
+    #[test]
+    fn usage_update_parses_to_event() {
+        let params = serde_json::json!({
+            "sessionId": "sess-1",
+            "inputTokens": 11,
+            "outputTokens": 7,
+            "modelCalls": 3,
+            "numTurns": 2,
+        });
+        assert_eq!(
+            parse_usage_update(&params),
+            Some(("sess-1".to_string(), 11, 7, 3, 2))
+        );
+        assert!(parse_usage_update(&serde_json::json!({"sessionId": "s"})).is_none());
+        assert!(parse_usage_update(&serde_json::json!({
+            "sessionId": "s",
+            "inputTokens": "11",
+            "outputTokens": 7,
+            "modelCalls": 1,
+            "numTurns": 1
+        }))
+        .is_none());
+        // 序列化形状:snake_case type tag + snake_case 字段(前端按此解析)。
+        let v = serde_json::to_value(BridgeEvent::UsageUpdate {
+            session_id: "s".into(),
+            input_tokens: 1,
+            output_tokens: 2,
+            model_calls: 3,
+            num_turns: 4,
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "usage_update",
+                "session_id": "s",
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "model_calls": 3,
+                "num_turns": 4
+            })
+        );
+    }
+
+    /// 行传输 mock:测试向 `line_tx` 推 agent→桥 帧,桥经
+    /// take_line_receiver 消费(唯一消费者契约)。
+    struct MockTransport {
+        lines: std::sync::Mutex<Option<mpsc::Receiver<String>>>,
+    }
+
+    impl AgentTransport for MockTransport {
+        fn send(&self, _line: String) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn take_line_receiver(&self) -> Result<mpsc::Receiver<String>, TransportError> {
+            self.lines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .ok_or(TransportError::Closed)
+        }
+        fn subscribe_exit(&self) -> broadcast::Receiver<ExitInfo> {
+            let (_tx, rx) = broadcast::channel::<ExitInfo>(1);
+            rx
+        }
+        fn is_running(&self) -> bool {
+            true
+        }
+        fn terminate(&self) {}
+        fn shutdown(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async {})
+        }
+    }
+
+    /// 未知会话的 usage_update 不得上屏:send_event_if_known 丢弃,事件流
+    /// 收不到任何帧(防串话,与 session/update 同语义)。
+    #[tokio::test]
+    async fn usage_update_unknown_session_dropped() {
+        use tokio::time::{timeout, Duration};
+        let (line_tx, line_rx) = mpsc::channel::<String>(16);
+        let transport = Arc::new(MockTransport {
+            lines: std::sync::Mutex::new(Some(line_rx)),
+        });
+        let bridge = AcpBridge::attach(transport).expect("attach");
+        assert!(bridge.sessions().is_empty(), "前置:无登记会话");
+        let mut events = bridge.subscribe();
+        line_tx
+            .send(
+                r#"{"jsonrpc":"2.0","method":"x.ai/usage_update","params":{"sessionId":"ghost","inputTokens":11,"outputTokens":7,"modelCalls":1,"numTurns":1}}"#
+                    .to_string(),
+            )
+            .await
+            .expect("send line");
+        // route_loop 异步消费该帧;若错误转发,事件必在窗口内到达。
+        let got = timeout(Duration::from_millis(100), events.recv()).await;
+        assert!(
+            got.is_err(),
+            "未知会话的 usage_update 必须被丢弃,不得上屏: {got:?}"
+        );
     }
 }

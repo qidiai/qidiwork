@@ -98,6 +98,11 @@ interface AcpEvent {
   error?: string;
   /** turn_usage 事件:session/prompt 应答 _meta 原样透传(桥层) */
   meta?: unknown;
+  /** usage_update 事件:回合中运行态用量快照(桥层转发,覆盖式不累加) */
+  input_tokens?: number;
+  output_tokens?: number;
+  model_calls?: number;
+  num_turns?: number;
   /** model_state 事件:内核 SessionModelState 原样透传(桥层) */
   state?: unknown;
   /** queue_lagged 事件:展示流拥堵时丢弃的帧数(桥层回灌) */
@@ -251,6 +256,8 @@ interface SessionBucket {
   title: string;
   /** 待挂载的回合用量(turn_usage 先于 turn_completed 到达) */
   pendingUsage: UsageInfo | null;
+  /** 回合中运行态用量快照(usage_update 流式覆盖;回合末权威值到达即清场) */
+  runningUsage: UsageInfo | null;
   /** 会话累计用量(token/成本/模型清单) */
   usage: SessionUsage;
   /** 内核报告的模型状态(未拿到前为 null,状态栏降级用到合上报) */
@@ -301,6 +308,7 @@ function ensureBucket(id: string): SessionBucket {
       titleRecorded: false,
       title: "",
       pendingUsage: null,
+      runningUsage: null,
       usage: emptySessionUsage(),
       modelState: null,
       replay: null,
@@ -684,12 +692,31 @@ async function onAcpEvent(ev: AcpEvent) {
       pushPermissionNotice(sid, `权限已失效：${ev.reason ?? "unknown"}`);
       break;
     }
+    case "usage_update": {
+      // 回合中运行态用量:每次 model call 一帧,覆盖式替换(绝不累加);
+      // 只服务 busy 桶(回合进行中),回合末权威 turn_usage 到达即清场。
+      const bucket = bucketOf(ev.session_id);
+      if (!bucket || !bucket.busy) break;
+      bucket.runningUsage = {
+        inputTokens: ev.input_tokens ?? 0,
+        outputTokens: ev.output_tokens ?? 0,
+        totalTokens: (ev.input_tokens ?? 0) + (ev.output_tokens ?? 0),
+        modelCalls: ev.model_calls ?? 0,
+        costUsdTicks: null,
+        costPartial: false,
+        incomplete: false,
+        turns: ev.num_turns ?? 0,
+        models: [],
+      };
+      break;
+    }
     case "turn_usage": {
       // 回合用量:先暂存桶上,turn_completed 时挂到刚完成的 assistant
       // 消息并累加进会话累计(桥层保证 usage 先于 completed 发出)
       const bucket = bucketOf(ev.session_id);
       if (!bucket) break;
       bucket.pendingUsage = parseUsageMeta(ev.meta);
+      bucket.runningUsage = null;
       break;
     }
     case "turn_completed": {
@@ -706,6 +733,8 @@ async function onAcpEvent(ev: AcpEvent) {
         }
         accumulateUsage(bucket.usage, bucket.pendingUsage);
         bucket.pendingUsage = null;
+        // 回合末权威 turn_usage 接管:清掉运行态快照,防流式值滞留
+        bucket.runningUsage = null;
       }
       // 删除在途:只落完成态与费用(失败后不永挂 busy),不续跑、不提示、不改视图。
       if (isSessionBlocked(bucket.id)) break;
@@ -744,6 +773,7 @@ async function onAcpEvent(ev: AcpEvent) {
         b.flushing = false;
         b.queue = [];
         b.pendingUsage = null;
+        b.runningUsage = null;
       }
       permissionQueue.value = [];
       {
@@ -1246,6 +1276,8 @@ export function useAgentState() {
     queued: computed<QueuedMessage[]>(() => activeBucket()?.queue ?? []),
     /** 活动会话累计用量(token/成本/模型)。 */
     sessionUsage: computed<SessionUsage>(() => activeBucket()?.usage ?? emptySessionUsage()),
+    /** 活动会话回合中运行态用量快照(非 busy 时为 null)。 */
+    runningUsage: computed<UsageInfo | null>(() => activeBucket()?.runningUsage ?? null),
     /** 活动会话的模型状态(内核应答;null=尚未拿到)。 */
     modelState: computed<ModelState | null>(() => activeBucket()?.modelState ?? null),
     /** 活动会话的历史回放状态(未回放为 null)。 */

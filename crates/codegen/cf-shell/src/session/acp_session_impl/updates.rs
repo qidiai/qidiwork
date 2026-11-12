@@ -324,6 +324,48 @@ impl SessionActor {
                 .forward_fire_and_forget(notification);
         }
     }
+    /// 每 model call 结束推送一帧运行态用量(面板流式 chip):门控
+    /// `gateway_enabled`(镜像 `emit_transient_notification`),投影后空账本
+    /// 跳帧(避免面板闪 0)。**瞬态**——不进 persistence_tx、不进
+    /// ReplayBuffer,只走 gateway fire-and-forget,防回放重复累加;回合末
+    /// 权威 `turn_usage` 仍由 `send_update` 持久通道发出,两者同账。
+    pub(super) fn emit_usage_update(&self, ledger: &cf_chat_state::UsageLedger) {
+        if !self
+            .notifications
+            .gateway_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let Some(usage) = crate::extensions::notification::PromptUsage::project_from_ledger(
+            Some(ledger),
+            ledger.incomplete,
+        ) else {
+            return;
+        };
+        if usage.totals.model_calls == 0
+            && usage.totals.input_tokens == 0
+            && usage.totals.output_tokens == 0
+        {
+            return;
+        }
+        let raw = serde_json::json!({
+            "sessionId": &*self.session_info.id.0,
+            "inputTokens": usage.totals.input_tokens,
+            "outputTokens": usage.totals.output_tokens,
+            "modelCalls": usage.totals.model_calls,
+            "numTurns": usage.num_turns,
+        });
+        let Ok(raw) = serde_json::value::to_raw_value(&raw) else {
+            return;
+        };
+        self.notifications
+            .gateway
+            .forward_fire_and_forget(acp::ExtNotification::new(
+                "x.ai/usage_update",
+                raw.into(),
+            ));
+    }
     /// Flush buffered notifications and drain the persistence merge buffer to
     /// disk. Blocks until the persistence actor confirms the write is complete.
     ///
@@ -1116,6 +1158,72 @@ mod cf_event_id_stamping_tests {
                 assert!(
                     numeric_seq(&persisted[0]) < numeric_seq(&persisted[1]),
                     "exit-leg delivery order must match id order too"
+                );
+            })
+            .await;
+    }
+
+    /// `emit_usage_update` 投影载荷:camelCase 四键 + sessionId,不含 cost;
+    /// 瞬态——不进 persistence_tx;空账本跳帧(防面板闪 0)。
+    #[tokio::test]
+    async fn usage_update_emit_projects_payload() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<cf_acp_lib::AcpClientMessage>();
+                let (persistence_tx, mut prx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                // 记一次主循环 model call,打开非空 prompt 账本。
+                actor.chat_state_handle.record_model_call_usage(
+                    Some("test-model".into()),
+                    cf_sampling_types::TokenUsage {
+                        prompt_tokens: 11,
+                        completion_tokens: 7,
+                        total_tokens: 18,
+                        reasoning_tokens: 0,
+                        cached_prompt_tokens: 0,
+                    },
+                    None,
+                    None,
+                );
+                let ledger = actor
+                    .chat_state_handle
+                    .try_get_prompt_usage()
+                    .await
+                    .expect("chat-state actor 应答")
+                    .expect("prompt ledger 已开账");
+                actor.emit_usage_update(&ledger);
+                let msg = gateway_rx
+                    .try_recv()
+                    .expect("usage_update 必须上 gateway");
+                let cf_acp_lib::AcpClientMessage::ExtNotification(args) = msg else {
+                    panic!("expected an x.ai/usage_update ext notification");
+                };
+                assert_eq!(args.request.method.as_ref(), "x.ai/usage_update");
+                let params: serde_json::Value =
+                    serde_json::from_str(args.request.params.get()).unwrap();
+                assert_eq!(params["sessionId"], serde_json::json!("test-actor"));
+                assert_eq!(params["inputTokens"], serde_json::json!(11));
+                assert_eq!(params["outputTokens"], serde_json::json!(7));
+                assert_eq!(params["modelCalls"], serde_json::json!(1));
+                assert_eq!(params["numTurns"], serde_json::json!(1));
+                assert!(
+                    params.get("cost").is_none()
+                        && params.get("costUsdTicks").is_none()
+                        && params.get("totalCostUsd").is_none(),
+                    "载荷不得含 cost 字段: {params}"
+                );
+                assert!(
+                    prx.try_recv().is_err(),
+                    "usage_update 不得进 persistence_tx(防回放重复累加)"
+                );
+                // 空账本跳帧:投影全零时不产生 gateway 帧(防面板闪 0)。
+                actor.emit_usage_update(&cf_chat_state::UsageLedger::default());
+                assert!(
+                    gateway_rx.try_recv().is_err(),
+                    "空账本必须跳帧,面板不得闪 0"
                 );
             })
             .await;

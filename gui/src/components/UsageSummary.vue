@@ -3,9 +3,16 @@ import { computed, ref, watch } from "vue";
 import { useAgentState } from "../composables/useAgent";
 import { fmtCost, fmtTokens } from "../services/usage";
 
-const { sessionUsage, sessionId } = useAgentState();
+const { sessionUsage, runningUsage, sessionId } = useAgentState();
 const details = ref<HTMLDetailsElement | null>(null);
-const tokens = computed(() => sessionUsage.value.inputTokens + sessionUsage.value.outputTokens);
+// chip = 会话累计 + 回合中运行态快照(输入+输出);cost 行不动(运行值无可信成本)。
+const tokens = computed(
+  () =>
+    sessionUsage.value.inputTokens +
+    sessionUsage.value.outputTokens +
+    (runningUsage.value?.inputTokens ?? 0) +
+    (runningUsage.value?.outputTokens ?? 0),
+);
 const cost = computed(() => sessionUsage.value.costSeen ? `${sessionUsage.value.costPartial ? '≈ ' : ''}${fmtCost(sessionUsage.value.costUsdTicks)}` : "尚无统计");
 watch(sessionId, () => { if (details.value) details.value.open = false; });
 </script>
@@ -19,8 +26,8 @@ watch(sessionId, () => { if (details.value) details.value.open = false; });
     <div class="usage-popover">
       <strong>本任务 · 已上报用量</strong>
       <dl>
-        <div><dt>输入 tokens</dt><dd>{{ tokens ? sessionUsage.inputTokens.toLocaleString() : '尚无统计' }}</dd></div>
-        <div><dt>输出 tokens</dt><dd>{{ tokens ? sessionUsage.outputTokens.toLocaleString() : '尚无统计' }}</dd></div>
+        <div><dt>输入 tokens</dt><dd>{{ tokens ? (sessionUsage.inputTokens + (runningUsage?.inputTokens ?? 0)).toLocaleString() : '尚无统计' }}</dd></div>
+        <div><dt>输出 tokens</dt><dd>{{ tokens ? (sessionUsage.outputTokens + (runningUsage?.outputTokens ?? 0)).toLocaleString() : '尚无统计' }}</dd></div>
         <div><dt>已上报费用（美元）</dt><dd>{{ cost }}</dd></div>
       </dl>
       <p v-if="!sessionUsage.costSeen">尚未收到费用数据，不代表免费。</p>

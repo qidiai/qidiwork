@@ -2059,6 +2059,13 @@ impl SessionActor {
                 );
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
+            // 本回合运行态用量快照:每次 model call 结束即推一帧给在线面板
+            // (门控 + 空账本跳帧见 updates.rs::emit_usage_update;不回放、不落盘)。
+            if response.usage.is_some() {
+                if let Ok(Some(ledger)) = self.chat_state_handle.try_get_prompt_usage().await {
+                    self.emit_usage_update(&ledger);
+                }
+            }
             if let Some(pt) = prompt_timing.take() {
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self

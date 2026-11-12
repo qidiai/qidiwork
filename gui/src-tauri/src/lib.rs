@@ -89,6 +89,15 @@ pub fn run() -> i32 {
         .setup(|app| {
             logging::init(app.path().app_log_dir().ok());
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "QidiWork GUI 启动");
+            // 首启自动释放内置技能到 ~/.qidi/skills/(幂等:已有技能整组跳过;
+            // 失败仅告警,不阻断启动)
+            if let Some(home) = app.path().home_dir().ok() {
+                let root = skills::skills_root(&home);
+                match skills_package::extract_bundled_skills(&root) {
+                    Ok(added) => tracing::info!(count = added.len(), "内置技能释放"),
+                    Err(e) => tracing::warn!(error = %e, "内置技能释放失败"),
+                }
+            }
             Ok(())
         })
         .manage(commands::AgentState::default())

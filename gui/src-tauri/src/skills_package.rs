@@ -537,6 +537,17 @@ pub fn extract_zip_to_dir(bytes: &[u8], dest: &Path) -> Result<Vec<String>, Stri
     Ok(dirs_after.difference(&dirs_before).cloned().collect())
 }
 
+// ------------------------------------------------------------ 内置技能包
+
+/// 解压随 GUI 二进制内置的技能包(`include_bytes!` 嵌入 zip)到 `dest`。
+///
+/// 首启自动释放:复用 `extract_zip_to_dir` 的幂等语义——顶层同名技能整组
+/// 跳过,绝不覆盖用户已有技能;返回本次新增的顶层目录名。
+pub fn extract_bundled_skills(dest: &Path) -> Result<Vec<String>, String> {
+    let bytes = include_bytes!("../resources/qidiwork-skills-bundle.zip");
+    extract_zip_to_dir(bytes, dest)
+}
+
 // ------------------------------------------------------------ 下载 + 安装
 
 /// 下载官方技能包字节流。
@@ -795,6 +806,23 @@ mod tests {
     fn extract_zip_rejects_non_zip_bytes() {
         let dest = temp_dir("notzip");
         assert!(extract_zip_to_dir(b"definitely not a zip", &dest).is_err());
+        std::fs::remove_dir_all(&dest).ok();
+    }
+
+    /// 内置技能包回归:解压到 tempdir,12 个技能目录全部新增且各含 SKILL.md。
+    #[test]
+    fn bundled_skills_extract_twelve() {
+        let dest = temp_dir("bundled");
+        let added = extract_bundled_skills(&dest).unwrap();
+        assert_eq!(added.len(), 12, "内置包应安装 12 个技能目录,实际:{:?}", added);
+        for name in &added {
+            assert!(
+                dest.join(name).join("SKILL.md").is_file(),
+                "技能 {name} 缺少 SKILL.md"
+            );
+        }
+        // 幂等:二次解压不新增也不覆盖
+        assert!(extract_bundled_skills(&dest).unwrap().is_empty());
         std::fs::remove_dir_all(&dest).ok();
     }
 

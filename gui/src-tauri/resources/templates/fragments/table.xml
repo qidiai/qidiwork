@@ -1,0 +1,1 @@
+<w:tbl><w:tblPr><w:tblStyle w:val="BidTable"/><w:tblW w:w="5000" w:type="pct"/><w:jc w:val="center"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid>{{GRID}}</w:tblGrid>{{ROWS}}</w:tbl>

@@ -43,6 +43,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
+# 标书导出 P0a(T1a)：docx = zip 包读写 / quick-xml 事件流解析 sdt / image 读图像素尺寸
+zip = { version = "3", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(windows)'.dependencies]
 # 特性集对齐主工程 windows 0.62(见 G:\qidiwork\Cargo.toml workspace deps)

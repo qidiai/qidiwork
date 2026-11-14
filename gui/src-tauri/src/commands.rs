@@ -1095,3 +1095,50 @@ mod tests {
         }
     }
 }
+
+/// 标书导出(P0a):模板 OOXML 填充。只写 .docx,不写 manifest(单写者=card.py)。
+#[tauri::command]
+pub async fn bid_export_docx(
+    app: tauri::AppHandle,
+    request: crate::office::bid::model::BidExportRequest,
+) -> Result<crate::office::bid::model::BidExportResult, String> {
+    let style_id = request
+        .style_id
+        .clone()
+        .unwrap_or_else(|| crate::office::bid::paths::DEFAULT_STYLE_ID.to_string());
+    let tpl = crate::office::bid::paths::resolve_template_path(&app, &style_id)?;
+    if request.output_path.trim().is_empty() {
+        return Err("输出路径为空".to_string());
+    }
+    let out = PathBuf::from(&request.output_path);
+    let out_display = out.display().to_string();
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let (stats, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        office::bid::fill::export(&request, &tpl, &out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(crate::office::bid::model::BidExportResult {
+        path: out_display,
+        bytes,
+        chapters: stats.chapters,
+        paragraphs: stats.paragraphs,
+        tables: stats.tables,
+        figures: stats.figures,
+    })
+}
+
+/// 标书产物结构校验:样式/页面/模板残留(不查业务计数)
+#[tauri::command]
+pub async fn bid_check_docx(path: String) -> Result<crate::office::bid::verify::VerifyReport, String> {
+    let p = path;
+    tauri::async_runtime::spawn_blocking(move || {
+        office::bid::verify::verify(Path::new(&p), None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}

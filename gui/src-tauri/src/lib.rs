@@ -73,6 +73,8 @@ pub fn run() -> i32 {
             commands::sessions_clear,
             commands::session_delete,
             commands::office_delete_workspace,
+            commands::bid_export_docx,
+            commands::bid_check_docx,
             transcript::session_transcript_tail,
             transcript::session_transcript_earlier,
             transcript::session_summary,

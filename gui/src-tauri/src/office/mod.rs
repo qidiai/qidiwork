@@ -7,6 +7,9 @@
 
 pub mod watch;
 
+/// 标书导出 P0a(T1):模板与底座(数据模型 / docx 包 / 模板生成器)。
+pub mod bid;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

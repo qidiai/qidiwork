@@ -458,7 +458,7 @@ rg -o 'w:pStyle w:val="BidCaption"' /tmp/document.xml | wc -l
 - `gui/src-tauri/tauri.conf.json`：`bundle.resources` 加入模板目录；路径解析（dev/安装态）
 - `gui/src/components/bid/FigureTable.vue`、`ChapterEditor.vue`
 - `gui/tests/bid-export/`：4 份 golden + 分层断言脚本
-- `docs/标书导出-模板OOXML填充方案-v1.md`（本文）
+- `docs/标书导出-模板OOXML填充方案-v1.1.md`（本文）
 - `docs/审计-链企Buddy优点整合qidiwork方案-2026-11-13.md`（审计依据）
 
 ---
@@ -474,6 +474,25 @@ rg -o 'w:pStyle w:val="BidCaption"' /tmp/document.xml | wc -l
 3. 首版样式参数已在 §5.3 全部量化，生成器直接翻译；Word 复核只验证视觉，不需要手工编辑权。
 
 **降级预案**：若 P0a 发现手写全套 `styles.xml` 超预期，改为“Word 手工做纯样式页（无锚点）→ 脚本注入 sdt 骨架”；两条路线都保持“锚点程序化”底线。
+
+---
+
+## 11. 复核记录（2026-11-14，v1.1 返工闭环）
+
+| 审计项 | 复核结果 | 证据 |
+|---|---|---|
+| ① 断言与“样式只在模板”矛盾 | ✅ 已关闭 | §6.2 分 `styles.xml` / `document.xml` 两层；§6.3 计数改 `rg -o … \| wc -l` |
+| ② R/F 无出处、事实错误 | ✅ 已关闭 | “依据文件”表 + §1.1 修正 + §1.4 路线取舍 + 附录 C 内联 R 定义；审计报告已入库（sha256 一致） |
+| ③ 3up 图注口径矛盾 | ✅ 已关闭 | §4.5 `caption_mode` + §5.4 默认 `per_image` + §6.2 按模式计数 |
+| ④ 页数门禁/TOC 耦合 | ✅ 已关闭 | §6.2 只记基线、P1 设目标；§6.4 Word/WPS 更新域，LO 偏差单独标注 |
+| 依赖未进独立 workspace | ✅ 已关闭 | §8/附录 B：`gui/src-tauri` 显式新增 `zip/quick-xml/image`；image 0.25.10；`zip.workspace` 隐患 |
+| 命令未注册 | ✅ 已关闭 | §8/§9：`lib.rs` 的 `generate_handler!` |
+| 模板未分发 | ✅ 已关闭 | §8/§9：`bundle.resources` + dev/安装态路径解析 |
+| manifest 单写者 | ✅ 已关闭 | §2/§8：`bid_export_docx` 只返回路径，`card.py` 唯一写者 |
+| 文档内部不一致 | ✅ 已关闭 | §3.3 补 `BID_CHAPTER`/`BID_TABLE_ROW`；§6.1 固定 4 份；§5.3 `firstLineChars` |
+| 复核新发现 | ✅ 已修 | 本文交付物路径残留 `v1` → 已改 `v1.1` |
+
+**复核结论**：4 处硬伤全部关闭；仓库偏差与内部不一致全部修正；复核发现并修正 1 处新残留；未发现新增阻断。可进 P0a。
 
 ---
 

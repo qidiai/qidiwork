@@ -1,6 +1,6 @@
-//! T2b：产物分层校验器（规格 §6.5）。
+//! T2b：产物分层校验器（规格 §6.5 / P0b §4.3）。
 //!
-//! 职责：对填充/导出后的 docx 做 16 项分层校验（样式 #1-#7 / 页面 #8-#9 / 文档 #10-#16），
+//! 职责：对填充/导出后的 docx 做 21 项分层校验（样式 #1-#7 / 页面 #8-#9 / 文档结构 #10-#14 / 计数 #15-#21），
 //! 顺序即规格表格顺序，输出 `VerifyReport`（`Serialize`，供 T3 命令返回）。
 //!
 //! 实现约定（规格 §6.5）：
@@ -8,7 +8,7 @@
 //!   找不到该样式 → 该 check `ok=false`、detail 写 `缺样式 X`，不 panic、不 Err。
 //! - 计数用 `xml.matches(needle).count()`。
 //! - 比较前先 `replace(" />", "/>")` 归一。
-//! - `expect=None` → #11-#16 计数类 check `ok=true` + detail `skipped`。
+//! - `expect=None` → #14-#20 计数类 check `ok=true` + detail `skipped`。
 
 use serde::Serialize;
 use std::path::Path;
@@ -16,11 +16,12 @@ use std::path::Path;
 use super::docx::DocxPackage;
 use super::BidResult;
 
-/// 期望计数（`expect=None` → 只查结构 #1-#10，#11-#16 skipped）
+/// 期望计数（`expect=None` → 只查结构 #1-#13，#14-#20 skipped）
 #[derive(Debug, Clone, Copy)]
 pub struct Expect {
     pub chapters: usize,
     pub figures: usize,
+    pub captions: usize,
     pub tables: usize,
     pub paragraphs: usize,
 }
@@ -51,8 +52,8 @@ impl VerifyReport {
     }
 }
 
-/// 十项 Bid 样式 id（规格 §6.5 #1）
-const BID_STYLES: [&str; 10] = [
+/// 十三项 Bid 样式 id（规格 §6.5 #1；P0b §4.3 加 BidTOC/BidHeader/BidFooter）
+const BID_STYLES: [&str; 13] = [
     "BidBody",
     "BidTitle1",
     "BidTitle2",
@@ -62,10 +63,13 @@ const BID_STYLES: [&str; 10] = [
     "BidTableBody",
     "BidCaption",
     "BidFigureCell",
+    "BidTOC",
+    "BidHeader",
+    "BidFooter",
     "BidTable",
 ];
 
-/// 对 `path` 处 docx 做 16 项分层校验；`expect=None` 时跳过计数类 check（#11-#16）
+/// 对 `path` 处 docx 做 21 项分层校验；`expect=None` 时跳过计数类 check（#15-#21）
 pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let pkg = DocxPackage::open(path)?;
     let styles = pkg.text("word/styles.xml")?;
@@ -75,9 +79,9 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let styles = styles.replace(" />", "/>");
     let document = document.replace(" />", "/>");
 
-    let mut checks = Vec::with_capacity(16);
+    let mut checks = Vec::with_capacity(21);
 
-    // #1 styles.present：w:styleId="Bid…" 十项齐全
+    // #1 styles.present：w:styleId="Bid…" 十三项齐全
     let missing: Vec<&str> = BID_STYLES
         .iter()
         .filter(|id| !styles.contains(&format!("w:styleId=\"{id}\"")))
@@ -87,7 +91,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         name: "styles.present".to_string(),
         ok: missing.is_empty(),
         detail: if missing.is_empty() {
-            "Bid 样式十项齐全".to_string()
+            "Bid 样式十三项齐全".to_string()
         } else {
             format!("缺样式: {}", missing.join("、"))
         },
@@ -114,6 +118,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
             r#"<w:sz w:val="30"/>"#,
             "<w:b/>",
             r#"<w:jc w:val="center"/>"#,
+            r#"<w:outlineLvl w:val="0"/>"#,
         ],
     ));
     checks.push(style_check(
@@ -166,11 +171,70 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         ],
     ));
 
-    // #10 doc.no_template_parts：不得含模板部件残留
+    // #10-#14 文档结构 check（P0b §4.3 新增 4 条，插在 page.margins 之后；B6 插 doc.styles_link）
+    // #10 doc.toc：目录域仍在（填充器不动 BID_TOC）
+    checks.push(contains_check(
+        "doc.toc",
+        &document,
+        &["fldSimple", r#"TOC \o"#],
+    ));
+    // #11 doc.header_footer：页眉页脚部件 + content-types + document 引用齐全
+    let content_types = pkg.text("[Content_Types].xml")?;
+    let hf_ok = pkg.contains("word/header1.xml")
+        && pkg.contains("word/footer1.xml")
+        && content_types.contains("header+xml")
+        && content_types.contains("footer+xml")
+        && document.contains("headerReference")
+        && document.contains("footerReference");
+    checks.push(Check {
+        name: "doc.header_footer".to_string(),
+        ok: hf_ok,
+        detail: if hf_ok {
+            "页眉页脚部件齐全".to_string()
+        } else {
+            "缺页眉/页脚部件、content-types 或 document 引用".to_string()
+        },
+    });
+    // #12 doc.styles_link：document.xml.rels 须声明 styles.xml / settings.xml 关系
+    //     （缺这两条 WPS 不应用样式、TOC 更新为空；P0a 模板 bug B6）
+    let rels = pkg.text("word/_rels/document.xml.rels")?;
+    let styles_link_ok = rels.contains(r#"relationships/styles" Target="styles.xml""#)
+        && rels.contains(r#"relationships/settings" Target="settings.xml""#);
+    checks.push(Check {
+        name: "doc.styles_link".to_string(),
+        ok: styles_link_ok,
+        detail: if styles_link_ok {
+            "styles/settings 关系齐全".to_string()
+        } else {
+            "document.xml.rels 缺 styles.xml 或 settings.xml 关系".to_string()
+        },
+    });
+    // #13 page_number_field：页脚含 PAGE / NUMPAGES 域
+    let footer = pkg.text("word/footer1.xml")?;
+    checks.push(contains_check(
+        "page_number_field",
+        &footer,
+        &[r#"instr=" PAGE ""#, r#"instr=" NUMPAGES ""#],
+    ));
+    // #14 table.first_col_fill：含 BidTableBody 的业务表须有 E6F2F9 首列底纹；无业务表 → skipped
+    let biz_tables: Vec<&str> = tables_with(&document, "BidTableBody");
+    checks.push(Check {
+        name: "table.first_col_fill".to_string(),
+        ok: biz_tables.iter().all(|t| t.contains(r#"w:fill="E6F2F9""#)),
+        detail: if biz_tables.is_empty() {
+            "skipped".to_string()
+        } else {
+            format!("{} 张业务表首列底纹齐全", biz_tables.len())
+        },
+    });
+
+    // #15 doc.no_template_parts：不得含模板部件残留
     //     （BID_DOC_TITLE/BID_CHAPTER* 的外层 sdt 包装在成品里是正常的，不断言其不存在）
     let forbidden = [
         "BID_TABLE_ROWS",
         "BID_FIGURE_SINGLE",
+        "BID_FIGURE_3UP",
+        "BID_FIGURE_WIDE",
         "正文占位",
         "图片占位",
         ">图注<",
@@ -190,48 +254,42 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         },
     });
 
-    // #11-#16 计数类 check：expect=None → ok=true + detail "skipped"
+    // #15-#21 计数类 check：expect=None → ok=true + detail "skipped"
     checks.push(count_check(
         "doc.chapters",
         expect,
-        &document,
-        r#"w:pStyle w:val="BidTitle1""#,
+        document.matches(r#"w:pStyle w:val="BidTitle1""#).count(),
         |e| e.chapters + 1,
     ));
     checks.push(count_check(
         "doc.page_breaks",
         expect,
-        &document,
-        "w:pageBreakBefore",
+        document.matches("w:pageBreakBefore").count(),
         |e| e.chapters,
     ));
     checks.push(count_check(
         "doc.paragraphs",
         expect,
-        &document,
-        r#"w:pStyle w:val="BidBody""#,
+        document.matches(r#"w:pStyle w:val="BidBody""#).count(),
         |e| e.paragraphs,
     ));
     checks.push(count_check(
         "doc.tables",
         expect,
-        &document,
-        "<w:tbl>",
+        count_tables_with(&document, "BidTableHeader"),
         |e| e.tables,
     ));
     checks.push(count_check(
         "doc.figures",
         expect,
-        &document,
-        "<w:drawing",
+        document.matches("<w:drawing").count(),
         |e| e.figures,
     ));
     checks.push(count_check(
         "doc.captions",
         expect,
-        &document,
-        r#"w:pStyle w:val="BidCaption""#,
-        |e| e.figures,
+        document.matches("BidCaption").count(),
+        |e| e.captions,
     ));
 
     Ok(VerifyReport { checks })
@@ -286,12 +344,11 @@ fn contains_check(name: &str, xml: &str, needles: &[&str]) -> Check {
     }
 }
 
-/// 计数断言（#11-#16）：`xml.matches(needle).count()` == want_of(expect)
+/// 计数断言（#14-#20）：got == want_of(expect)
 fn count_check(
     name: &str,
     expect: Option<&Expect>,
-    xml: &str,
-    needle: &str,
+    got: usize,
     want_of: impl FnOnce(&Expect) -> usize,
 ) -> Check {
     let Some(e) = expect else {
@@ -302,12 +359,28 @@ fn count_check(
         };
     };
     let want = want_of(e);
-    let got = xml.matches(needle).count();
     Check {
         name: name.to_string(),
         ok: got == want,
-        detail: format!("{needle} 计数 {got}，期望 {want}"),
+        detail: format!("计数 {got}，期望 {want}"),
     }
+}
+
+/// 按 `<w:tbl>` 切块，返回含 `needle` 的表块（`</w:tbl>` 止；3up 图桌不含 BidTableHeader，自然排除）
+fn tables_with<'a>(xml: &'a str, needle: &str) -> Vec<&'a str> {
+    xml.split("<w:tbl>")
+        .skip(1)
+        .filter_map(|chunk| {
+            let end = chunk.find("</w:tbl>")?;
+            let block = &chunk[..end + "</w:tbl>".len()];
+            block.contains(needle).then_some(block)
+        })
+        .collect()
+}
+
+/// 含 `needle` 的 `<w:tbl>` 块个数（#18 doc.tables 计数口径：3up 图桌不计入）
+fn count_tables_with(xml: &str, needle: &str) -> usize {
+    tables_with(xml, needle).len()
 }
 
 #[cfg(test)]
@@ -319,8 +392,8 @@ mod tests {
 
     const TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1.docx";
 
-    /// §6.5 表格顺序（styles.present 打头，doc.captions 收尾）
-    const SPEC_ORDER: [&str; 16] = [
+    /// §6.5 表格顺序（styles.present 打头，doc.captions 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link → 21 项）
+    const SPEC_ORDER: [&str; 21] = [
         "styles.present",
         "styles.body",
         "styles.title1",
@@ -330,6 +403,11 @@ mod tests {
         "styles.table_borders",
         "page.size",
         "page.margins",
+        "doc.toc",
+        "doc.header_footer",
+        "doc.styles_link",
+        "page_number_field",
+        "table.first_col_fill",
         "doc.no_template_parts",
         "doc.chapters",
         "doc.page_breaks",
@@ -343,11 +421,11 @@ mod tests {
         report.checks.iter().find(|c| c.name == name).unwrap()
     }
 
-    /// 对模板 docx 跑 verify(None)：16 条 check，名字顺序与 §6.5 表格一致
+    /// 对模板 docx 跑 verify(None)：21 条 check，名字顺序与 §6.5 表格一致
     #[test]
     fn report_has_16_checks_in_spec_order() {
         let report = verify(Path::new(TEMPLATE), None).unwrap();
-        assert_eq!(report.checks.len(), 16);
+        assert_eq!(report.checks.len(), 21);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, SPEC_ORDER);
         assert_eq!(report.checks.first().unwrap().name, "styles.present");
@@ -402,6 +480,7 @@ mod tests {
             Some(&Expect {
                 chapters: 9,
                 figures: 9,
+                captions: 9,
                 tables: 9,
                 paragraphs: 9,
             }),

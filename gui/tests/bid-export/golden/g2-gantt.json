@@ -1,0 +1,14 @@
+{
+  "title": "某县2026年度高标准农田建设项目施工进度计划",
+  "chapters": [
+    {
+      "title": "第一章 施工进度计划",
+      "blocks": [
+        {"type":"paragraph","text":"本工程施工总工期一百二十日历天，计划自开工令下达之日起算。"},
+        {"type":"paragraph","text":"横道图按月列示各分部工程起止时间，关键工序以粗线标识。"},
+        {"type":"figure","layout":"wide","items":[{"path":"../assets/image3.png"}],"caption":"图1-1 施工总进度横道图","ai_generated":false}
+      ]
+    }
+  ],
+  "expect": {"chapters":1,"figures":1,"captions":1,"tables":0,"paragraphs":2}
+}

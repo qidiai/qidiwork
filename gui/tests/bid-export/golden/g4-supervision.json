@@ -1,0 +1,73 @@
+{
+  "title": "某县2026年度高标准农田建设项目工程监理规划",
+  "chapters": [
+    {
+      "title": "第一章 监理工作范围",
+      "blocks": [
+        {"type":"paragraph","text":"本监理规划覆盖某县2026年度高标准农田建设项目施工阶段全过程监理。"},
+        {"type":"paragraph","text":"监理范围包括田间道路、灌排渠系、防护林及配套附属设施。"},
+        {"type":"paragraph","text":"保修阶段监理按国家有关规定及合同约定另行明确。"}
+      ]
+    },
+    {
+      "title": "第二章 监理工作内容",
+      "blocks": [
+        {"type":"paragraph","text":"审查施工组织设计与专项施工方案，核查进场材料质量证明文件。"},
+        {"type":"paragraph","text":"对关键工序实施旁站监理，对隐蔽工程实施验收签认。"},
+        {"type":"paragraph","text":"组织工地例会，协调参建各方关系，处理费用与工期索赔。"},
+        {"type":"figure","layout":"three_up","caption_mode":"per_group","caption":"图2-1 监理巡视路线与重点部位组图","items":[{"path":"../assets/image3.png"},{"path":"../assets/image3.png"},{"path":"../assets/image3.png"}]}
+      ]
+    },
+    {
+      "title": "第三章 监理工作目标",
+      "blocks": [
+        {"type":"paragraph","text":"质量控制目标为分部工程验收合格率百分之百，争创优质工程。"},
+        {"type":"paragraph","text":"进度控制目标为不突破批复的总工期一百二十日历天。"},
+        {"type":"paragraph","text":"投资控制目标为不突破批准的施工合同价款。"}
+      ]
+    },
+    {
+      "title": "第四章 监理工作依据",
+      "blocks": [
+        {"type":"paragraph","text":"现行水利水电工程施工质量验收规范及相关技术标准。"},
+        {"type":"paragraph","text":"经批准的施工图纸、设计变更及工程量清单。"},
+        {"type":"paragraph","text":"施工合同、监理合同及国家有关法律法规。"}
+      ]
+    },
+    {
+      "title": "第五章 项目监理机构",
+      "blocks": [
+        {"type":"paragraph","text":"项目监理机构采用直线制组织形式，总监理工程师负责制。"},
+        {"type":"paragraph","text":"专业监理工程师按专业配置，监理员协助开展现场检查。"},
+        {"type":"paragraph","text":"监理人员进退场计划与投标文件承诺保持一致。"},
+        {"type":"table","header":["岗位","人数","持证要求"],"rows":[["总监理工程师","1","水利水电工程专业注册监理工程师"],["专业监理工程师","2","相关专业中级及以上职称"]]}
+      ]
+    },
+    {
+      "title": "第六章 监理工作程序",
+      "blocks": [
+        {"type":"paragraph","text":"施工准备阶段审查开工条件，签署开工令后方可施工。"},
+        {"type":"paragraph","text":"施工阶段按巡视、旁站、平行检验相结合的方式实施监督。"},
+        {"type":"paragraph","text":"竣工验收阶段审查竣工资料并组织预验收。"},
+        {"type":"figure","layout":"three_up","caption_mode":"per_group","caption":"图6-1 关键工序旁站部位组图","items":[{"path":"../assets/image3.png"},{"path":"../assets/image3.png"},{"path":"../assets/image3.png"}]}
+      ]
+    },
+    {
+      "title": "第七章 监理工作方法",
+      "blocks": [
+        {"type":"paragraph","text":"采用旁站、巡视、平行检验相结合的方法实施现场监理。"},
+        {"type":"paragraph","text":"对重大质量隐患下发监理通知单，必要时签发工程暂停令。"},
+        {"type":"paragraph","text":"建立监理日志与月报制度，做到过程记录可追溯。"}
+      ]
+    },
+    {
+      "title": "第八章 监理工作制度",
+      "blocks": [
+        {"type":"paragraph","text":"实行图纸会审、设计交底与施工组织设计审查制度。"},
+        {"type":"paragraph","text":"实行材料进场报验与见证取样送检制度。"},
+        {"type":"paragraph","text":"实行安全事故隐患报告与监理档案管理制度。"}
+      ]
+    }
+  ],
+  "expect": {"chapters":8,"figures":6,"captions":2,"tables":1,"paragraphs":24}
+}

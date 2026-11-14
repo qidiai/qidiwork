@@ -1,0 +1,20 @@
+{
+  "title": "某县2026年度高标准农田建设项目施工平面布置",
+  "chapters": [
+    {
+      "title": "第一章 施工平面布置",
+      "blocks": [
+        {"type":"paragraph","text":"施工平面布置按分期分块组织，主体工程区与材料堆放区保持运输通道畅通。"},
+        {"type":"paragraph","text":"现场围挡采用连续封闭设置，出入口设冲洗设施与警示标志。"},
+        {"type":"figure","layout":"three_up","caption_mode":"per_image","caption":"图1-1 施工总平面布置组图","items":[{"path":"../assets/image3.png","caption":"图1-1 施工总平面布置示意"},{"path":"../assets/image3.png","caption":"图1-2 材料堆场与加工区示意"},{"path":"../assets/image3.png","caption":"图1-3 临时排水与围挡示意"}]}
+      ]
+    },
+    {
+      "title": "第二章 临时设施",
+      "blocks": [
+        {"type":"paragraph","text":"办公区与生活区分开设置，配备消防器材与卫生设施。"}
+      ]
+    }
+  ],
+  "expect": {"chapters":2,"figures":3,"captions":3,"tables":0,"paragraphs":3}
+}

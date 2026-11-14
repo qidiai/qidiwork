@@ -171,7 +171,7 @@ mod tests {
 
     /// 1. 对 template_gen::template_document_xml() 建索引 → 恰好 9 条，tag 集合 == ALL_TAGS
     #[test]
-    fn nine_sdts_indexed_matching_all_tags() {
+    fn sdts_indexed_matching_all_tags() {
         let xml = template_document_xml();
         let ranges = index_sdt(&xml).unwrap();
         assert_eq!(ranges.len(), ALL_TAGS.len());

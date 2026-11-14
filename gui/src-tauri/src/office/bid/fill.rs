@@ -3,16 +3,22 @@
 //! 职责：把 BidExportRequest 灌进模板锚点，产出 docx。
 //! - 章模板（BID_CHAPTER）整段取用，逐章替换 TITLE/BODY 后拼接
 //! - 表格/图片/图注走 §5.5 片段库（include_str!）
-//! - BID_TABLE_ROWS / BID_FIGURE_SINGLE 两个部件库块整块删成空串
+//! - BID_TABLE_ROWS / BID_FIGURE_SINGLE / BID_FIGURE_3UP / BID_FIGURE_WIDE
+//!   四个部件库块整块删成空串（BID_TOC 原样保留）
+//! - 保存前把 word/header1.xml 的 {{DOC_TITLE}} 替换成文档标题
+//! - 版式参数取 DocStyle::default()（P0b §4.2：fill 不新增参数，不做 toml 加载）
 
 use std::path::Path;
 
 use super::docx::{drawing_run, emu_from_cm, escape_xml, image_size_px, DocxPackage};
-use super::model::{BidExportRequest, Block, FillStats};
+use super::model::{
+    BidExportRequest, Block, CaptionMode, DocStyle, FigureBlock, FigureItem, FigureLayout,
+    FillStats,
+};
 use super::template::{apply_edits, content, find, index_sdt, SdtRange};
 use super::template_gen::{
     ALL_TAGS, TAG_CHAPTER, TAG_CHAPTER_BODY, TAG_CHAPTER_TITLE, TAG_CHAPTERS, TAG_DOC_TITLE,
-    TAG_FIGURE_SINGLE, TAG_TABLE_ROWS,
+    TAG_FIGURE_3UP, TAG_FIGURE_SINGLE, TAG_FIGURE_WIDE, TAG_TABLE_ROWS,
 };
 use super::{BidError, BidResult};
 
@@ -20,8 +26,14 @@ use super::{BidError, BidResult};
 const PARAGRAPH_XML: &str = include_str!("../../../resources/templates/fragments/paragraph.xml");
 const TABLE_XML: &str = include_str!("../../../resources/templates/fragments/table.xml");
 const TABLE_ROW_XML: &str = include_str!("../../../resources/templates/fragments/table_row.xml");
-const FIGURE_SINGLE_XML: &str = include_str!("../../../resources/templates/fragments/figure_single.xml");
+const FIGURE_SINGLE_XML: &str =
+    include_str!("../../../resources/templates/fragments/figure_single.xml");
+const FIGURE_WIDE_XML: &str = include_str!("../../../resources/templates/fragments/figure_wide.xml");
+const FIGURE_3UP_XML: &str = include_str!("../../../resources/templates/fragments/figure_3up.xml");
 const CAPTION_XML: &str = include_str!("../../../resources/templates/fragments/caption.xml");
+
+/// 3up 不足 3 张时补的空单元格（§4.2：不拉伸、不报错、不生成图注）
+const EMPTY_FIGURE_CELL: &str = "<w:tc><w:tcPr><w:tcW w:w=\"3515\" w:type=\"dxa\"/></w:tcPr><w:p><w:pPr><w:pStyle w:val=\"BidFigureCell\"/></w:pPr></w:p></w:tc>";
 
 /// 内容区宽（twips）：A4 宽 11906 - 2×680 页边距 = 10546
 const CONTENT_WIDTH_TWIPS: u32 = 10546;
@@ -31,13 +43,15 @@ fn anchor<'a>(ranges: &'a [SdtRange], tag: &str) -> BidResult<&'a SdtRange> {
     find(ranges, tag).ok_or_else(|| BidError::new(format!("模板缺少锚点 {tag}")))
 }
 
-/// 导出主流程（规格 §6.2 八步）
+/// 导出主流程（规格 §6.2 八步 + P0b §4.2 页眉替换）
 pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<(FillStats, u64)> {
     // 1) 校验 + 输出路径非空
     req.validate()?;
     if req.output_path.trim().is_empty() {
         return Err(BidError::new("输出路径为空"));
     }
+    // P0b §4.2：版式参数内取默认（不做 toml 加载）
+    let style = DocStyle::default();
     // 2) 开包，取 word/document.xml
     let mut pkg = DocxPackage::open(template)?;
     let xml = pkg.text("word/document.xml")?;
@@ -57,7 +71,7 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
     let mut fig_no = 0u32;
     for chapter in &req.chapters {
         let title_para = format!(
-            "<w:p><w:pPr><w:pStyle w:val=\"BidTitle1\"/><w:pageBreakBefore/></w:pPr>\
+            "<w:p><w:pPr><w:pStyle w:val=\"BidTitle1\"/><w:pageBreakBefore/><w:outlineLvl w:val=\"0\"/></w:pPr>\
              <w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
             escape_xml(&chapter.title)
         );
@@ -66,9 +80,12 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
             match block {
                 Block::Paragraph { .. } => stats.paragraphs += 1,
                 Block::Table { .. } => stats.tables += 1,
-                Block::Figure { .. } => stats.figures += 1,
+                Block::Figure(fig) => stats.figures += fig.items.len(),
             }
-            body_xml.push_str(&render_block(block, &mut pkg, &mut fig_no, req.figure_width_cm)?);
+            let (block_xml, captions) =
+                render_block(block, &mut pkg, &mut fig_no, req.figure_width_cm, &style)?;
+            stats.captions += captions;
+            body_xml.push_str(&block_xml);
         }
         let mut edits = vec![
             (title_rng.content_start, title_rng.content_end, title_para),
@@ -77,13 +94,15 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
         chapters_xml.push_str(&apply_edits(chapter_tpl, &mut edits)?);
     }
     stats.chapters = req.chapters.len();
-    // 6) 文档装配：标题段 / 章区 / 两个部件库块整块删除
+    // 6) 文档装配：标题段 / 章区 / 四个部件库块整块删除（BID_TOC 不动）
     let doc_title = anchor(&ranges, TAG_DOC_TITLE)?;
     let chapters = anchor(&ranges, TAG_CHAPTERS)?;
     let table_rows = anchor(&ranges, TAG_TABLE_ROWS)?;
     let figure_single = anchor(&ranges, TAG_FIGURE_SINGLE)?;
+    let figure_3up = anchor(&ranges, TAG_FIGURE_3UP)?;
+    let figure_wide = anchor(&ranges, TAG_FIGURE_WIDE)?;
     let doc_title_para = format!(
-        "<w:p><w:pPr><w:pStyle w:val=\"BidTitle1\"/></w:pPr>\
+        "<w:p><w:pPr><w:pStyle w:val=\"BidTitle1\"/><w:outlineLvl w:val=\"9\"/></w:pPr>\
          <w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
         escape_xml(&req.title)
     );
@@ -92,11 +111,18 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
         (chapters.content_start, chapters.content_end, chapters_xml),
         (table_rows.block_start, table_rows.block_end, String::new()),
         (figure_single.block_start, figure_single.block_end, String::new()),
+        (figure_3up.block_start, figure_3up.block_end, String::new()),
+        (figure_wide.block_start, figure_wide.block_end, String::new()),
     ];
     let new_xml = apply_edits(&xml, &mut edits)?;
     // 7) 写回 document.xml
     pkg.set_text("word/document.xml", new_xml);
-    // 8) 父目录不存在先创建，再保存
+    // 8) 保存前替换页眉标题（P0b §4.2）
+    if pkg.contains("word/header1.xml") {
+        let hdr = pkg.text("word/header1.xml")?;
+        pkg.set_text("word/header1.xml", hdr.replace("{{DOC_TITLE}}", &escape_xml(&req.title)));
+    }
+    // 9) 父目录不存在先创建，再保存
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -104,27 +130,29 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
     Ok((stats, std::fs::metadata(out)?.len()))
 }
 
-/// 块渲染（§6.4）：段落 → paragraph 片段；表格 → render_table；图片 → render_figure
+/// 块渲染（§6.4）：段落 → paragraph 片段；表格 → render_table；图 → render_figure。
+/// 返回 (块 xml, 本块新增的图注段数)
 fn render_block(
     block: &Block,
     pkg: &mut DocxPackage,
     fig_no: &mut u32,
     figure_width_cm: Option<f32>,
-) -> BidResult<String> {
+    style: &DocStyle,
+) -> BidResult<(String, usize)> {
     match block {
-        Block::Paragraph { text } => Ok(PARAGRAPH_XML
-            .replace("{{STYLE}}", "BidBody")
-            .replace("{{TEXT}}", &escape_xml(text))),
-        Block::Table { header, rows } => render_table(header, rows),
-        Block::Figure { path, caption, ai_generated } => {
-            *fig_no += 1;
-            render_figure(pkg, *fig_no, path, caption, *ai_generated, figure_width_cm)
-        }
+        Block::Paragraph { text } => Ok((
+            PARAGRAPH_XML
+                .replace("{{STYLE}}", "BidBody")
+                .replace("{{TEXT}}", &escape_xml(text)),
+            0,
+        )),
+        Block::Table { header, rows } => Ok((render_table(header, rows, style)?, 0)),
+        Block::Figure(fig) => render_figure(pkg, fig_no, fig, style, figure_width_cm),
     }
 }
 
 /// 表格渲染（§6.4 + §5.5 table.xml / table_row.xml）
-fn render_table(header: &[String], rows: &[Vec<String>]) -> BidResult<String> {
+fn render_table(header: &[String], rows: &[Vec<String>], style: &DocStyle) -> BidResult<String> {
     let cols = header.len();
     if cols == 0 {
         return Err(BidError::new("表格表头不能为空"));
@@ -138,25 +166,43 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> BidResult<String> {
         .map(|w| format!("<w:gridCol w:w=\"{w}\"/>"))
         .collect();
 
+    // 数据行首列底纹（first_col_fill 空串 → 不输出该元素）
+    let first_col_shd = if style.table.first_col_fill.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{}\"/>",
+            style.table.first_col_fill
+        )
+    };
+
     let mut rows_xml = String::new();
-    // 表头行：{{HEADER_FLAG}} = <w:tblHeader/>，单元格样式 BidTableHeader
-    rows_xml.push_str(&render_row(&widths, header, "<w:tblHeader/>", "BidTableHeader"));
-    // 数据行：flag 空串 + BidTableBody
+    // 表头行：{{HEADER_FLAG}} = <w:tblHeader/>，单元格样式 BidTableHeader，首列不加底纹
+    rows_xml.push_str(&render_row(&widths, header, "<w:tblHeader/>", "BidTableHeader", ""));
+    // 数据行：flag 空串 + BidTableBody + 首列底纹
     for row in rows {
-        rows_xml.push_str(&render_row(&widths, row, "", "BidTableBody"));
+        rows_xml.push_str(&render_row(&widths, row, "", "BidTableBody", &first_col_shd));
     }
     Ok(TABLE_XML
         .replace("{{GRID}}", &grid)
         .replace("{{ROWS}}", &rows_xml))
 }
 
-/// 单行渲染（§5.5 table_row.xml）：表头行带 <w:tblHeader/>，数据行 flag 为空串
-fn render_row(widths: &[u32], cells: &[String], header_flag: &str, style: &str) -> String {
+/// 单行渲染（§5.5 table_row.xml）：表头行带 <w:tblHeader/>，数据行 flag 为空串；
+/// `first_col_shd` 只用于数据行首列 tcPr（表头行传空串）
+fn render_row(
+    widths: &[u32],
+    cells: &[String],
+    header_flag: &str,
+    style: &str,
+    first_col_shd: &str,
+) -> String {
     let mut cells_xml = String::new();
     for (i, text) in cells.iter().enumerate() {
         let w = widths.get(i).copied().unwrap_or(0);
+        let shd = if i == 0 { first_col_shd } else { "" };
         cells_xml.push_str(&format!(
-            "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/></w:tcPr>\
+            "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{shd}</w:tcPr>\
              <w:p><w:pPr><w:pStyle w:val=\"{style}\"/></w:pPr>\
              <w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p></w:tc>",
             escape_xml(text)
@@ -167,42 +213,114 @@ fn render_row(widths: &[u32], cells: &[String], header_flag: &str, style: &str) 
         .replace("{{CELLS}}", &cells_xml)
 }
 
-/// 单图渲染（§6.3 尺寸算法 + §6.4 figure_single.xml / caption.xml）
+/// 图块渲染（§4.2 三布局）：按 fig.layout 分支。
+/// 返回 (块 xml, 本块生成的图注段数)
 fn render_figure(
     pkg: &mut DocxPackage,
-    fig_no: u32,
-    path: &str,
-    caption: &str,
-    ai_generated: bool,
+    fig_no: &mut u32,
+    fig: &FigureBlock,
+    style: &DocStyle,
     figure_width_cm: Option<f32>,
+) -> BidResult<(String, usize)> {
+    match fig.layout {
+        FigureLayout::Single | FigureLayout::Wide => {
+            // single 走请求宽（默认 15.5cm）；wide 走内容区全宽
+            let width_cm = match fig.layout {
+                FigureLayout::Single => figure_width_cm.unwrap_or(15.5),
+                _ => style.figure.wide_width_cm,
+            };
+            let item = &fig.items[0];
+            let caption = caption_text(item, fig, style);
+            let drawing = render_drawing(pkg, fig_no, &item.path, width_cm, 20.0, &caption)?;
+            let caption_xml = CAPTION_XML.replace("{{TEXT}}", &escape_xml(&caption));
+            let tpl = match fig.layout {
+                FigureLayout::Wide => FIGURE_WIDE_XML,
+                _ => FIGURE_SINGLE_XML,
+            };
+            Ok((
+                tpl.replace("{{DRAWING}}", &drawing).replace("{{CAPTION}}", &caption_xml),
+                1,
+            ))
+        }
+        FigureLayout::ThreeUp => {
+            let cell_w_cm = style.figure.cell_width_cm;
+            let per_image = matches!(fig.caption_mode, CaptionMode::PerImage);
+            let mut cells = String::new();
+            let mut captions = 0usize;
+            for item in &fig.items {
+                let caption = caption_text(item, fig, style);
+                // 每格：图片段 +（per_image 时）图注段；宽 cell_width_cm，高上限 10cm
+                let drawing = render_drawing(pkg, fig_no, &item.path, cell_w_cm, 10.0, &caption)?;
+                let cap = if per_image {
+                    captions += 1;
+                    CAPTION_XML.replace("{{TEXT}}", &escape_xml(&caption))
+                } else {
+                    String::new()
+                };
+                cells.push_str(&format!(
+                    "<w:tc><w:tcPr><w:tcW w:w=\"3515\" w:type=\"dxa\"/></w:tcPr>\
+                     <w:p><w:pPr><w:pStyle w:val=\"BidFigureCell\"/><w:spacing w:line=\"240\" w:lineRule=\"auto\"/><w:jc w:val=\"center\"/></w:pPr>{drawing}</w:p>{cap}</w:tc>"
+                ));
+            }
+            // 不足 3 张补空单元格（§4.2：不拉伸、不报错、不生成图注）
+            for _ in fig.items.len()..3 {
+                cells.push_str(EMPTY_FIGURE_CELL);
+            }
+            let mut out = FIGURE_3UP_XML.replace("{{CELLS}}", &cells);
+            if !per_image {
+                // per_group：组图注放表格之后 1 段
+                out.push_str(&CAPTION_XML.replace(
+                    "{{TEXT}}",
+                    &escape_xml(&caption_text(&fig.items[0], fig, style)),
+                ));
+                captions = 1;
+            }
+            Ok((out, captions))
+        }
+    }
+}
+
+/// 图注文本（§4.2 唯一真值）：per_image 取 item.caption（single/wide 回退 fig.caption）；
+/// per_group 取 fig.caption；ai_generated 追加 style.figure.ai_label
+fn caption_text(item: &FigureItem, fig: &FigureBlock, style: &DocStyle) -> String {
+    let base = match fig.caption_mode {
+        CaptionMode::PerImage => item.caption.clone().unwrap_or_else(|| fig.caption.clone()),
+        CaptionMode::PerGroup => fig.caption.clone(),
+    };
+    if fig.ai_generated {
+        format!("{base}{}", style.figure.ai_label)
+    } else {
+        base
+    }
+}
+
+/// 图片 drawing 段（§6.3 尺寸算法）：宽 = width_cm；高按像素比换算；
+/// 高超过 max_h_cm 上限时按高反算宽，保持比例
+fn render_drawing(
+    pkg: &mut DocxPackage,
+    fig_no: &mut u32,
+    path: &str,
+    width_cm: f32,
+    max_h_cm: f32,
+    descr: &str,
 ) -> BidResult<String> {
     let (px_w, px_h) = image_size_px(Path::new(path))?;
-    // 宽 = figure_width_cm（默认 15.5cm）；高按像素比换算，整数四舍五入
-    let mut width_em = emu_from_cm(figure_width_cm.unwrap_or(15.5));
+    let mut width_em = emu_from_cm(width_cm);
     let mut height_em = (width_em * px_h as u64 + px_w as u64 / 2) / px_w as u64;
-    // 高超过 20cm 上限时按高反算宽，保持比例
-    let max_h_em = emu_from_cm(20.0);
+    // 高超过上限按高反算宽，保持比例
+    let max_h_em = emu_from_cm(max_h_cm);
     if height_em > max_h_em {
         width_em = max_h_em * px_w as u64 / px_h as u64;
         height_em = max_h_em;
     }
-    // P0a 恒"每图一注"：ai_generated 时图注追加 AI 标注
-    let caption_final = if ai_generated {
-        format!("{caption}（AI 生成示意图）")
-    } else {
-        caption.to_string()
-    };
+    *fig_no += 1;
     let png = std::fs::read(path)?;
     let rid = pkg.add_png(&png, &format!("fig-{fig_no}"))?;
-    let drawing = drawing_run(&rid, width_em, height_em, fig_no, &caption_final);
-    let caption_xml = CAPTION_XML.replace("{{TEXT}}", &escape_xml(&caption_final));
-    Ok(FIGURE_SINGLE_XML
-        .replace("{{DRAWING}}", &drawing)
-        .replace("{{CAPTION}}", &caption_xml))
+    Ok(drawing_run(&rid, width_em, height_em, *fig_no, descr))
 }
 
 // ---------------------------------------------------------------------------
-// 单测（规格 §6.2 验收：最小样本导出 / 转义 / 缺锚点报错）
+// 单测（规格 §6.2 验收：最小样本导出 / 转义 / 缺锚点报错 / 3up per_group）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -257,7 +375,16 @@ mod tests {
                                 vec!["路基整平".into(), "推土机粗平+平地机精平，压实度≥93%".into(), "每200m检测一点".into()],
                             ],
                         },
-                        Block::Figure { path: img.clone(), caption: "图1-1 塘底整平与排水示意".to_string(), ai_generated: true },
+                        Block::Figure(FigureBlock {
+                            layout: FigureLayout::Single,
+                            items: vec![FigureItem {
+                                path: img.clone(),
+                                caption: Some("图1-1 塘底整平与排水示意".to_string()),
+                            }],
+                            caption: "图1-1 塘底整平与排水示意".to_string(),
+                            caption_mode: CaptionMode::PerImage,
+                            ai_generated: true,
+                        }),
                     ],
                 },
                 Chapter {
@@ -274,9 +401,9 @@ mod tests {
         };
 
         let (stats, bytes) = export(&req, Path::new(TEMPLATE), &out).unwrap();
-        assert_eq!((stats.chapters, stats.paragraphs, stats.tables, stats.figures), (2, 4, 1, 1));
+        assert_eq!((stats.chapters, stats.paragraphs, stats.tables, stats.figures, stats.captions), (2, 4, 1, 1, 1));
         assert!(bytes > 0);
-        let report = verify::verify(&out, Some(&Expect { chapters: 2, figures: 1, tables: 1, paragraphs: 4 })).unwrap();
+        let report = verify::verify(&out, Some(&Expect { chapters: 2, figures: 1, captions: 1, tables: 1, paragraphs: 4 })).unwrap();
         let bad: Vec<String> = report.checks.iter().filter(|c| !c.ok)
             .map(|c| format!("{}:{}", c.name, c.detail)).collect();
         assert!(bad.is_empty(), "不合格 check: {}", bad.join("; "));
@@ -317,5 +444,44 @@ mod tests {
         let err = export(&minimal_req("b", &out), &tpl, &out).unwrap_err();
         assert!(err.to_string().contains("模板缺少锚点"), "错误信息不符: {err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2a 新测：3up per_group 3 张图 → drawing=3、BidCaption=1、<w:tc>=3 且 <w:tr>=1
+    #[test]
+    fn three_up_per_group_has_one_caption() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-t2c1-3up-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("threeup.docx");
+        let img = asset_png();
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Figure(FigureBlock {
+                    layout: FigureLayout::ThreeUp,
+                    items: vec![
+                        FigureItem { path: img.clone(), caption: None },
+                        FigureItem { path: img.clone(), caption: None },
+                        FigureItem { path: img.clone(), caption: None },
+                    ],
+                    caption: "图1-1 三栏总示意".to_string(),
+                    caption_mode: CaptionMode::PerGroup,
+                    ai_generated: false,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        let (stats, _) = export(&req, Path::new(TEMPLATE), &out).unwrap();
+        assert_eq!((stats.figures, stats.captions), (3, 1));
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        assert_eq!(doc.matches("<w:drawing").count(), 3, "3up 须 3 个 drawing: {doc}");
+        assert_eq!(doc.matches("BidCaption").count(), 1, "per_group 只 1 段图注: {doc}");
+        assert_eq!(doc.matches("<w:tc>").count(), 3, "3up 须 3 个单元格: {doc}");
+        assert_eq!(doc.matches("<w:tr>").count(), 1, "3up 须 1 行: {doc}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

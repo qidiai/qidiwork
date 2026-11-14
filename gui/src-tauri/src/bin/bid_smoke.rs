@@ -21,6 +21,7 @@ use qidiwork_gui::office::bid::verify::{self, Expect};
 struct FixtureExpect {
     chapters: usize,
     figures: usize,
+    captions: usize,
     tables: usize,
     paragraphs: usize,
 }
@@ -59,9 +60,11 @@ fn run() -> Result<(), String> {
     // 图片路径解析：相对路径 → 相对 fixture 文件所在目录的绝对路径
     for chapter in &mut fixture.req.chapters {
         for block in &mut chapter.blocks {
-            if let Block::Figure { path, .. } = block {
-                if !Path::new(path.as_str()).is_absolute() {
-                    *path = fixture_dir.join(path.as_str()).to_string_lossy().to_string();
+            if let Block::Figure(fig) = block {
+                for item in &mut fig.items {
+                    if !Path::new(item.path.as_str()).is_absolute() {
+                        item.path = fixture_dir.join(item.path.as_str()).to_string_lossy().to_string();
+                    }
                 }
             }
         }
@@ -93,6 +96,7 @@ fn run() -> Result<(), String> {
         Some(&Expect {
             chapters: fixture.expect.chapters,
             figures: fixture.expect.figures,
+            captions: fixture.expect.captions,
             tables: fixture.expect.tables,
             paragraphs: fixture.expect.paragraphs,
         }),

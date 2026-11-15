@@ -1,6 +1,6 @@
 //! T2b：产物分层校验器（规格 §6.5 / P0b §4.3）。
 //!
-//! 职责：对填充/导出后的 docx 做 21 项分层校验（样式 #1-#7 / 页面 #8-#9 / 文档结构 #10-#14 / 计数 #15-#21），
+//! 职责：对填充/导出后的 docx 做 23 项分层校验（样式 #1-#8 / 页面 #9-#10 / 文档结构 #11-#17 / 计数 #18-#23），
 //! 顺序即规格表格顺序，输出 `VerifyReport`（`Serialize`，供 T3 命令返回）。
 //!
 //! 实现约定（规格 §6.5）：
@@ -8,7 +8,9 @@
 //!   找不到该样式 → 该 check `ok=false`、detail 写 `缺样式 X`，不 panic、不 Err。
 //! - 计数用 `xml.matches(needle).count()`。
 //! - 比较前先 `replace(" />", "/>")` 归一。
-//! - `expect=None` → #14-#20 计数类 check `ok=true` + detail `skipped`。
+//! - `expect=None` → #18-#23 计数类 check `ok=true` + detail `skipped`。
+//! - 元素顺序（#8 styles.element_order / #15 doc.element_order，G2 护栏）：容器第一层子元素名
+//!   只保留在顺序表内的（表外未知元素跳过），下标须单调不减；自闭合标签不增深度。
 
 use serde::Serialize;
 use std::path::Path;
@@ -16,7 +18,7 @@ use std::path::Path;
 use super::docx::DocxPackage;
 use super::BidResult;
 
-/// 期望计数（`expect=None` → 只查结构 #1-#13，#14-#20 skipped）
+/// 期望计数（`expect=None` → 只查结构 #1-#17，#18-#23 skipped）
 #[derive(Debug, Clone, Copy)]
 pub struct Expect {
     pub chapters: usize,
@@ -69,7 +71,24 @@ const BID_STYLES: [&str; 13] = [
     "BidTable",
 ];
 
-/// 对 `path` 处 docx 做 21 项分层校验；`expect=None` 时跳过计数类 check（#15-#21）
+/// OOXML 容器子元素顺序表（G2 护栏；只列本项目会用到的；表外元素视为"未知"，跳过不判）
+const PPR: &[&str] = &[
+    "pStyle", "keepNext", "keepLines", "pageBreakBefore", "pBdr", "shd", "tabs", "spacing", "ind",
+    "contextualSpacing", "jc", "outlineLvl", "rPr", "sectPr",
+];
+const RPR: &[&str] = &[
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike", "dstrike", "color",
+    "spacing", "w", "kern", "position", "sz", "szCs", "highlight", "u",
+];
+const TBLPR: &[&str] = &[
+    "tblStyle", "tblW", "jc", "tblCellSpacing", "tblInd", "tblBorders", "shd", "tblLayout",
+    "tblCellMar", "tblLook",
+];
+const TRPR: &[&str] = &["cantSplit", "trHeight", "tblHeader"];
+const TCPR: &[&str] = &["tcW", "gridSpan", "vMerge", "tcBorders", "shd", "vAlign"];
+const SECTPR: &[&str] = &["headerReference", "footerReference", "pgSz", "pgMar", "cols", "docGrid"];
+
+/// 对 `path` 处 docx 做 23 项分层校验；`expect=None` 时跳过计数类 check（#18-#23）
 pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let pkg = DocxPackage::open(path)?;
     let styles = pkg.text("word/styles.xml")?;
@@ -79,7 +98,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let styles = styles.replace(" />", "/>");
     let document = document.replace(" />", "/>");
 
-    let mut checks = Vec::with_capacity(21);
+    let mut checks = Vec::with_capacity(23);
 
     // #1 styles.present：w:styleId="Bid…" 十三项齐全
     let missing: Vec<&str> = BID_STYLES
@@ -152,14 +171,24 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         ],
     ));
 
-    // #8 page.size
+    // #8 styles.element_order（G2 护栏）：styles.xml 全部 pPr/rPr 的第一层子元素顺序须单调
+    //     符合 PPR/RPR 顺序表；表外元素跳过不判；首个违规 detail 写该容器元素序列（截断 120 字符）
+    checks.push(element_order_check(
+        "styles.element_order",
+        &[
+            (&styles, "pPr", PPR),
+            (&styles, "rPr", RPR),
+        ],
+    ));
+
+    // #9 page.size
     checks.push(contains_check(
         "page.size",
         &document,
         &[r#"w:w="11906""#, r#"w:h="16838""#],
     ));
 
-    // #9 page.margins
+    // #10 page.margins
     checks.push(contains_check(
         "page.margins",
         &document,
@@ -171,11 +200,16 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         ],
     ));
 
-    // #10-#14 文档结构 check（P0b §4.3 新增 4 条，插在 page.margins 之后；B6 插 doc.styles_link）
-    // #10 doc.toc：目录域仍在（填充器不动 BID_TOC）。限定 w:val="BID_TOC" 的 sdt 块内断言；找不到块 → ok=false
-    let toc_ok = match sdt_block(&document, "BID_TOC") {
+    // #11-#16 文档结构 check（P0b §4.3 新增 4 条，插在 page.margins 之后；B6 插 doc.styles_link）
+    // #11 doc.toc：目录域仍在（填充器不动 BID_TOC）。限定 w:tag w:val="BID_TOC" 的 sdt 块内断言；找不到块 → ok=false
+    //     （事件流索引，Word 写成 <w:sdt w:rsidR="..."> 带属性时也能命中；手写深度计数已废弃）
+    let ranges = crate::office::bid::template::index_sdt(&document)?;
+    let toc_ok = match crate::office::bid::template::find(&ranges, "BID_TOC") {
         None => false,
-        Some(block) => block.contains("fldSimple") && block.contains("TOC"),
+        Some(r) => {
+            let block = &document[r.block_start..r.block_end];
+            block.contains("fldSimple") && block.contains("TOC")
+        }
     };
     checks.push(Check {
         name: "doc.toc".to_string(),
@@ -186,24 +220,31 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
             "缺 BID_TOC 块或块内无 fldSimple/TOC".to_string()
         },
     });
-    // #11 doc.header_footer：页眉页脚部件 + content-types + document 引用齐全
+    // #12 doc.header_footer：页眉页脚部件 + content-types + document 引用齐全；
+    //     且页眉部件不得残留 {{DOC_TITLE}} 占位符（占位符只存在于 word/header1.xml，#17 查 document.xml 覆盖不到）
     let content_types = pkg.text("[Content_Types].xml")?;
+    let header = if pkg.contains("word/header1.xml") {
+        pkg.text("word/header1.xml")?
+    } else {
+        String::new()
+    };
     let hf_ok = pkg.contains("word/header1.xml")
         && pkg.contains("word/footer1.xml")
         && content_types.contains("header+xml")
         && content_types.contains("footer+xml")
         && document.contains("headerReference")
-        && document.contains("footerReference");
+        && document.contains("footerReference")
+        && !header.contains("{{DOC_TITLE}}");
     checks.push(Check {
         name: "doc.header_footer".to_string(),
         ok: hf_ok,
         detail: if hf_ok {
-            "页眉页脚部件齐全".to_string()
+            "页眉页脚部件齐全且页眉无 {{DOC_TITLE}} 占位残留".to_string()
         } else {
-            "缺页眉/页脚部件、content-types 或 document 引用".to_string()
+            "缺页眉/页脚部件、content-types 或 document 引用，或页眉残留 {{DOC_TITLE}} 占位符".to_string()
         },
     });
-    // #12 doc.styles_link：document.xml.rels 须声明 styles.xml / settings.xml 关系
+    // #13 doc.styles_link：document.xml.rels 须声明 styles.xml / settings.xml 关系
     //     （缺这两条 WPS 不应用样式、TOC 更新为空；P0a 模板 bug B6）
     let rels = pkg.text("word/_rels/document.xml.rels")?;
     let styles_link_ok = rels.contains(r#"relationships/styles" Target="styles.xml""#)
@@ -217,14 +258,33 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
             "document.xml.rels 缺 styles.xml 或 settings.xml 关系".to_string()
         },
     });
-    // #13 page_number_field：页脚含 PAGE / NUMPAGES 域
+    // #14 page_number_field：页脚含 PAGE / NUMPAGES 域
     let footer = pkg.text("word/footer1.xml")?;
     checks.push(contains_check(
         "page_number_field",
         &footer,
         &[r#"instr=" PAGE ""#, r#"instr=" NUMPAGES ""#],
     ));
-    // #14 table.first_col_fill：含 BidTableHeader 的业务表逐行断言首列底纹；无业务表 → skipped
+    // #15 doc.element_order（G2 护栏）：document.xml 全 6 容器 + header/footer 的 pPr/rPr 子元素顺序
+    //     （" />" 未归一部件就地归一后再判，自闭合标签不增深度）
+    let header_norm = header.replace(" />", "/>");
+    let footer_norm = footer.replace(" />", "/>");
+    checks.push(element_order_check(
+        "doc.element_order",
+        &[
+            (&document, "pPr", PPR),
+            (&document, "rPr", RPR),
+            (&document, "tblPr", TBLPR),
+            (&document, "trPr", TRPR),
+            (&document, "tcPr", TCPR),
+            (&document, "sectPr", SECTPR),
+            (&header_norm, "pPr", PPR),
+            (&header_norm, "rPr", RPR),
+            (&footer_norm, "pPr", PPR),
+            (&footer_norm, "rPr", RPR),
+        ],
+    ));
+    // #16 table.first_col_fill：含 BidTableHeader 的业务表逐行断言首列底纹；无业务表 → skipped
     //     （块内 <w:tr> 数 = R（含表头）；w:fill="E6F2F9" 出现次数 == R-1；第 2..R 行首个 <w:tc> 必含该 shd）
     let biz_tables: Vec<&str> = tables_with(&document, "BidTableHeader");
     let first_col_ok = biz_tables.iter().all(|t| first_col_fill_ok(t));
@@ -240,8 +300,9 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         },
     });
 
-    // #15 doc.no_template_parts：不得含模板部件残留
-    //     （BID_DOC_TITLE/BID_CHAPTER* 的外层 sdt 包装在成品里是正常的，不断言其不存在）
+    // #17 doc.no_template_parts：不得含模板部件残留
+    //     （BID_DOC_TITLE/BID_CHAPTER* 的外层 sdt 包装在成品里是正常的，不断言其不存在；
+    //      {{DOC_TITLE}} 只存在于 word/header1.xml，已在 #12 doc.header_footer 断言，此处查 document.xml 覆盖不到）
     let forbidden = [
         "BID_TABLE_ROWS",
         "BID_FIGURE_SINGLE",
@@ -249,7 +310,6 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         "BID_FIGURE_WIDE",
         "BID_TABLE_ROW",
         "BID_FIGURE_CAPTION",
-        "{{DOC_TITLE}}",
         "正文占位",
         "图片占位",
         ">图注<",
@@ -269,7 +329,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         },
     });
 
-    // #15-#21 计数类 check：expect=None → ok=true + detail "skipped"
+    // #18-#23 计数类 check：expect=None → ok=true + detail "skipped"
     checks.push(count_check(
         "doc.chapters",
         expect,
@@ -318,6 +378,107 @@ fn style_block<'a>(styles: &'a str, id: &str) -> Option<&'a str> {
     Some(&styles[start..at + end_rel + "</w:style>".len()])
 }
 
+/// 容器子元素顺序断言（G2 护栏）：`xml` 中每个 `<w:{container}>…</w:{container}>` 块
+/// （容器不会同名嵌套，简单 find 即可）的第一层子元素名，只保留在 `order` 表内的
+/// （表外未知元素跳过），下标须单调不减；违规返回 `"pPr: jc 出现在 shd 之前"` 这类信息
+/// （附该容器元素序列，供 check detail 截断 120 字符使用）。
+fn order_ok(xml: &str, container: &str, order: &[&str]) -> Result<(), String> {
+    let open_tag = format!("<w:{container}");
+    let close_tag = format!("</w:{container}>");
+    let mut from = 0;
+    while let Some(rel) = xml[from..].find(&open_tag) {
+        let start = from + rel;
+        let close_rel = xml[start..]
+            .find(&close_tag)
+            .ok_or_else(|| format!("{container}: 未找到闭合标签"))?;
+        let block = &xml[start..start + close_rel + close_tag.len()];
+        let names = first_level_names(block);
+        let mut prev: Option<usize> = None;
+        for name in names.iter().copied() {
+            if let Some(idx) = order.iter().position(|x| *x == name) {
+                if let Some(p) = prev {
+                    if idx < p {
+                        let seq = names.join(", ");
+                        let seq: &str = if seq.len() > 120 { &seq[..120] } else { seq.as_str() };
+                        let prev_name = order[p];
+                        return Err(format!(
+                            "{container}: {name} 出现在 {prev_name} 之前；序列: {seq}"
+                        ));
+                    }
+                }
+                prev = Some(idx);
+            }
+        }
+        from = start + close_rel + close_tag.len();
+    }
+    Ok(())
+}
+
+/// 解析容器块的第一层子元素名：容器自身开始标签跳过；自闭合标签不增深度（深度 0 时记录）；
+/// 其余开标签深度 +1（深度为 1 时记录 name）；遇 `</w:Name>` 深度 -1。
+fn first_level_names(block: &str) -> Vec<&str> {
+    let inner = match block.find('>') {
+        Some(e) => &block[e + 1..],
+        None => return Vec::new(),
+    };
+    let mut names = Vec::new();
+    let mut depth = 0usize;
+    let mut rest = inner;
+    while let Some(lt) = rest.find('<') {
+        let tail = &rest[lt..];
+        let Some(gt) = tail.find('>') else { break };
+        let tag = &tail[..=gt];
+        if let Some(name) = tag_name(tag) {
+            if tag.starts_with("</") {
+                depth = depth.saturating_sub(1);
+            } else if tag.ends_with("/>") {
+                if depth == 0 {
+                    names.push(name);
+                }
+            } else {
+                depth += 1;
+                if depth == 1 {
+                    names.push(name);
+                }
+            }
+        }
+        rest = &tail[gt + 1..];
+    }
+    names
+}
+
+/// 标签名：`<w:pPr>` / `<w:b/>` / `</w:jc>` → `pPr` / `b` / `jc`；非 `w:` 前缀返回 None
+fn tag_name(tag: &str) -> Option<&str> {
+    let mut inner = tag.strip_prefix('<')?;
+    inner = inner.strip_prefix('/').unwrap_or(inner);
+    inner = inner.strip_prefix("w:")?;
+    let end = inner.find(|c: char| !c.is_ascii_alphanumeric())?;
+    Some(&inner[..end])
+}
+
+/// 元素顺序 check（styles.element_order / doc.element_order）：对 `(xml, 容器, 顺序表)` 逐对跑
+/// `order_ok`；任一违规 → ok=false，detail 写首个违规信息（含元素序列，截断 120 字符内）；
+/// 全过 → ok=true，detail 写 `共检查 N 个容器`。
+fn element_order_check(name: &str, runs: &[(&str, &str, &[&str])]) -> Check {
+    let mut containers = 0usize;
+    for (xml, container, order) in runs {
+        containers += xml.matches(&format!("<w:{container}")).count();
+        if let Err(msg) = order_ok(xml, container, order) {
+            let detail: String = msg.chars().take(120).collect();
+            return Check {
+                name: name.to_string(),
+                ok: false,
+                detail,
+            };
+        }
+    }
+    Check {
+        name: name.to_string(),
+        ok: true,
+        detail: format!("共检查 {containers} 个容器"),
+    }
+}
+
 /// 样式块内容断言（#2-#7）：块内须含全部 needle；找不到样式 → ok=false + `缺样式 X`
 fn style_check(name: &str, styles: &str, id: &str, needles: &[&str]) -> Check {
     match style_block(styles, id) {
@@ -345,7 +506,7 @@ fn style_check(name: &str, styles: &str, id: &str, needles: &[&str]) -> Check {
     }
 }
 
-/// 包含断言（#8-#9）：xml 须含全部 needle
+/// 包含断言（#9-#10）：xml 须含全部 needle
 fn contains_check(name: &str, xml: &str, needles: &[&str]) -> Check {
     let missing: Vec<&str> = needles.iter().copied().filter(|n| !xml.contains(n)).collect();
     Check {
@@ -359,7 +520,7 @@ fn contains_check(name: &str, xml: &str, needles: &[&str]) -> Check {
     }
 }
 
-/// 计数断言（#14-#20）：got == want_of(expect)
+/// 计数断言（#18-#23）：got == want_of(expect)
 fn count_check(
     name: &str,
     expect: Option<&Expect>,
@@ -393,24 +554,6 @@ fn tables_with<'a>(xml: &'a str, needle: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// 取 `w:tag w:val="{tag}"` 所在 sdt 的**整块**原文（<w:sdt>…</w:sdt>）；找不到返回 None
-fn sdt_block<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
-    let needle = format!("w:val=\"{tag}\"");
-    let at = xml.find(&needle)?;
-    let start = xml[..at].rfind("<w:sdt>")?;
-    // 从 start 起做 <w:sdt> / </w:sdt> 深度计数找配对结尾
-    let mut depth = 0usize;
-    let mut i = start;
-    while i < xml.len() {
-        if xml[i..].starts_with("<w:sdt>") { depth += 1; i += 7; }
-        else if xml[i..].starts_with("</w:sdt>") {
-            depth -= 1; i += 8;
-            if depth == 0 { return Some(&xml[start..i]); }
-        } else { i += 1; }
-    }
-    None
-}
-
 /// 单张业务表首列底纹逐行判定：<w:tr> 数 R，E6F2F9 出现 R-1 次，且第 2..R 行首个 <w:tc> 内含该 shd
 fn first_col_fill_ok(table: &str) -> bool {
     let rows: Vec<&str> = table.split("<w:tr>").skip(1).collect(); // 每段以该行内容开头
@@ -429,7 +572,7 @@ fn first_col_fill_ok(table: &str) -> bool {
     })
 }
 
-/// 含 `needle` 的 `<w:tbl>` 块个数（#18 doc.tables 计数口径：3up 图桌不计入）
+/// 含 `needle` 的 `<w:tbl>` 块个数（#21 doc.tables 计数口径：3up 图桌不计入）
 fn count_tables_with(xml: &str, needle: &str) -> usize {
     tables_with(xml, needle).len()
 }
@@ -445,8 +588,8 @@ mod tests {
 
     const TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1.docx";
 
-    /// §6.5 表格顺序（styles.present 打头，doc.captions 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link → 21 项）
-    const SPEC_ORDER: [&str; 21] = [
+    /// §6.5 表格顺序（styles.present 打头，doc.captions 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link；G2 在 styles.table_borders 后插 styles.element_order、在 page_number_field 后插 doc.element_order → 23 项）
+    const SPEC_ORDER: [&str; 23] = [
         "styles.present",
         "styles.body",
         "styles.title1",
@@ -454,12 +597,14 @@ mod tests {
         "styles.table_header",
         "styles.caption",
         "styles.table_borders",
+        "styles.element_order",
         "page.size",
         "page.margins",
         "doc.toc",
         "doc.header_footer",
         "doc.styles_link",
         "page_number_field",
+        "doc.element_order",
         "table.first_col_fill",
         "doc.no_template_parts",
         "doc.chapters",
@@ -474,11 +619,11 @@ mod tests {
         report.checks.iter().find(|c| c.name == name).unwrap()
     }
 
-    /// 对模板 docx 跑 verify(None)：21 条 check，名字顺序与 §6.5 表格一致
+    /// 对模板 docx 跑 verify(None)：23 条 check，名字顺序与 §6.5 表格一致
     #[test]
-    fn report_has_16_checks_in_spec_order() {
+    fn report_has_23_checks_in_spec_order() {
         let report = verify(Path::new(TEMPLATE), None).unwrap();
-        assert_eq!(report.checks.len(), 21);
+        assert_eq!(report.checks.len(), 23);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, SPEC_ORDER);
         assert_eq!(report.checks.first().unwrap().name, "styles.present");
@@ -614,6 +759,98 @@ mod tests {
 
         let report = verify(&tampered, None).unwrap();
         assert!(!check(&report, "doc.toc").ok, "{:?}", check(&report, "doc.toc"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向篡改：导出件 word/header1.xml 标题文本前插回 {{DOC_TITLE}} → doc.header_footer 必须 ok=false
+    /// （占位符只存在于页眉部件，#17 的 document.xml 断言覆盖不到；本测试即 #12 页眉占位检查的反向用例）
+    #[test]
+    fn header_placeholder_left_fails() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-hdr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("hdr.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        let mut pkg = DocxPackage::open(&out).unwrap();
+        let header = pkg.text("word/header1.xml").unwrap();
+        assert!(!header.contains("{{DOC_TITLE}}"), "导出器未替换页眉占位符: {header}");
+        pkg.set_text(
+            "word/header1.xml",
+            header.replacen(
+                "<w:t xml:space=\"preserve\">",
+                "<w:t xml:space=\"preserve\">{{DOC_TITLE}}",
+                1,
+            ),
+        );
+        let tampered = dir.join("tampered.docx");
+        pkg.save(&tampered).unwrap();
+
+        let report = verify(&tampered, None).unwrap();
+        assert!(
+            !check(&report, "doc.header_footer").ok,
+            "{:?}",
+            check(&report, "doc.header_footer")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向篡改：导出最小 docx → styles.xml BidTitle1 块把 `<w:b/>` 从 `<w:color` 前移到
+    /// `</w:rPr>` 前（制造 color→b，违反 RPR 顺序表）→ styles.element_order 必须 ok=false
+    #[test]
+    fn styles_order_tamper_fails() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("order.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        let mut pkg = DocxPackage::open(&out).unwrap();
+        let styles = pkg.text("word/styles.xml").unwrap();
+        let block = style_block(&styles, "BidTitle1").unwrap();
+        assert!(
+            block.contains("<w:b/><w:color"),
+            "BidTitle1 块结构变化，无 <w:b/><w:color 可篡改: {block}"
+        );
+        let tampered_block = block
+            .replace("<w:b/><w:color", "<w:color")
+            .replacen("</w:rPr>", "<w:b/></w:rPr>", 1);
+        pkg.set_text("word/styles.xml", styles.replacen(block, &tampered_block, 1));
+        let tampered = dir.join("tampered.docx");
+        pkg.save(&tampered).unwrap();
+
+        let report = verify(&tampered, None).unwrap();
+        assert!(
+            !check(&report, "styles.element_order").ok,
+            "{:?}",
+            check(&report, "styles.element_order")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 模板与导出件的 styles/document/header/footer 子元素顺序均合规
+    /// （styles.element_order 与 doc.element_order 都必须 ok=true）
+    #[test]
+    fn current_outputs_pass_order() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-order-pass-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("order-pass.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        for path in [Path::new(TEMPLATE), out.as_path()] {
+            let report = verify(path, None).unwrap();
+            assert!(
+                check(&report, "styles.element_order").ok,
+                "{path:?} styles.element_order: {:?}",
+                check(&report, "styles.element_order")
+            );
+            assert!(
+                check(&report, "doc.element_order").ok,
+                "{path:?} doc.element_order: {:?}",
+                check(&report, "doc.element_order")
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

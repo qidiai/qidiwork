@@ -67,16 +67,16 @@ pub const ALL_TAGS: [&str; 12] = [
 // §3.3 / §3.4 全文（唯一真值，按 DocStyle 渲染）
 // ---------------------------------------------------------------------------
 
-/// §3.3 `word/document.xml` 全文（默认 DocStyle，含 XML 声明）
+/// §3.3 `word/document.xml` 全文（默认 DocStyle，含 XML 声明）。
+/// 默认路径恒为 A4 纵向（11906×16838），直接传尺寸常量，不经过纸型解析，无 Err 路径。
 pub fn template_document_xml() -> String {
-    // 默认纸型恒为 "A4V"（pg_sz_el 的合法输入），此路不会失败；
-    // 铁律禁 unwrap/expect/panic，用 unwrap_or_default 兜底（实际不可达）
-    template_document_xml_for(&DocStyle::default()).unwrap_or_default()
+    document_xml_with(&DocStyle::default(), 11906, 16838)
 }
 
 /// §3.3 `word/document.xml` 全文（指定 DocStyle）；纸型不受支持时返回 Err
 pub fn template_document_xml_for(style: &DocStyle) -> BidResult<String> {
-    document_xml(style)
+    let (w, h) = pg_sz_twips(&style.page.paper)?;
+    Ok(document_xml_with(style, w, h))
 }
 
 /// §3.4 `word/styles.xml` 全文（默认 DocStyle，含 XML 声明）
@@ -131,12 +131,12 @@ pub fn generate_to_with(out: &Path, style: &DocStyle) -> BidResult<u64> {
 }
 
 /// §3.3 `word/document.xml` 全文：12 锚点 + TOC/3up/wide 部件库 + header/footer 引用。
-/// 页边距由 `DocStyle::margin_twips()` 渲染；pgSz 由 `DocStyle::page.paper` 渲染；
-/// 其余版式常量与 P0a 模板逐字一致。纸型不受支持时返回 Err。
-fn document_xml(style: &DocStyle) -> BidResult<String> {
+/// 页边距由 `DocStyle::margin_twips()` 渲染；pgSz 由调用方传入的 `(w, h)` twips 渲染；
+/// 其余版式常量与 P0a 模板逐字一致。
+fn document_xml_with(style: &DocStyle, w: u32, h: u32) -> String {
     let m = style.margin_twips();
-    let pg_sz = pg_sz_el(&style.page.paper)?;
-    Ok(format!(
+    let pg_sz = format!("<w:pgSz w:w=\"{w}\" w:h=\"{h}\"/>");
+    format!(
 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
@@ -214,7 +214,7 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:body>
 </w:document>
 "#
-    ))
+    )
 }
 
 /// §3.4 `word/styles.xml` 全文：10 个旧样式由 `DocStyle` 计算（默认值与 P0a 模板逐字一致），
@@ -363,10 +363,10 @@ fn jc_val(align: &str) -> &str {
     }
 }
 
-/// 纸型 → `w:pgSz` 元素：A4 / A4V 同值 11906×16838（A4 纵向）；其它值报错
-fn pg_sz_el(paper: &str) -> BidResult<&'static str> {
+/// 纸型 → pgSz 宽高（twips）：A4 / A4V 同值 11906×16838（A4 纵向）；其它值报错
+fn pg_sz_twips(paper: &str) -> BidResult<(u32, u32)> {
     match paper {
-        "A4" | "A4V" => Ok("<w:pgSz w:w=\"11906\" w:h=\"16838\"/>"),
+        "A4" | "A4V" => Ok((11906, 16838)),
         other => Err(BidError::new(format!("不支持的纸型: {other}"))),
     }
 }

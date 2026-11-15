@@ -270,3 +270,113 @@ impl BidExportRequest {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// 单测（B2 返工：validate 负例 4 条，不导出文件）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    fn req_with(chapter: Chapter) -> BidExportRequest {
+        BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![chapter],
+            output_path: String::new(),
+            style_id: None,
+            figure_width_cm: None,
+        }
+    }
+
+    fn fig_chapter(layout: FigureLayout, items: Vec<FigureItem>, caption: &str, mode: CaptionMode) -> Chapter {
+        Chapter {
+            title: "c".to_string(),
+            blocks: vec![Block::Figure(FigureBlock {
+                layout,
+                items,
+                caption: caption.to_string(),
+                caption_mode: mode,
+                ai_generated: false,
+            })],
+        }
+    }
+
+    fn item(path: &str, caption: Option<&str>) -> FigureItem {
+        FigureItem { path: path.to_string(), caption: caption.map(str::to_string) }
+    }
+
+    /// B2 新测 1：single 传 2 张图 → Err 且含"单图/宽图只能有 1 张图"
+    #[test]
+    fn single_two_items_rejected() {
+        let ch = fig_chapter(
+            FigureLayout::Single,
+            vec![item("a.png", None), item("b.png", None)],
+            "c",
+            CaptionMode::PerImage,
+        );
+        let err = req_with(ch).validate().unwrap_err();
+        assert!(
+            err.to_string().contains("单图/宽图只能有 1 张图"),
+            "错误信息不符: {err}"
+        );
+    }
+
+    /// B2 新测 2：three_up 传 4 张图 → Err
+    #[test]
+    fn three_up_four_items_rejected() {
+        let ch = fig_chapter(
+            FigureLayout::ThreeUp,
+            vec![
+                item("a.png", Some("1")),
+                item("b.png", Some("2")),
+                item("c.png", Some("3")),
+                item("d.png", Some("4")),
+            ],
+            "",
+            CaptionMode::PerImage,
+        );
+        let err = req_with(ch).validate().unwrap_err();
+        assert!(
+            err.to_string().contains("三栏图桌最多 3 张图"),
+            "错误信息不符: {err}"
+        );
+    }
+
+    /// B2 新测 3：three_up + per_image 且某项无 caption → Err 且含"三栏图桌逐图图注不能为空"
+    #[test]
+    fn three_up_per_image_missing_caption_rejected() {
+        let ch = fig_chapter(
+            FigureLayout::ThreeUp,
+            vec![
+                item("a.png", Some("1")),
+                item("b.png", None),
+                item("c.png", Some("3")),
+            ],
+            "",
+            CaptionMode::PerImage,
+        );
+        let err = req_with(ch).validate().unwrap_err();
+        assert!(
+            err.to_string().contains("三栏图桌逐图图注不能为空"),
+            "错误信息不符: {err}"
+        );
+    }
+
+    /// B2 新测 4：per_group 且组 caption 为空 → Err 且含"图注不能为空"
+    #[test]
+    fn per_group_empty_caption_rejected() {
+        let ch = fig_chapter(
+            FigureLayout::Single,
+            vec![item("a.png", None)],
+            "",
+            CaptionMode::PerGroup,
+        );
+        let err = req_with(ch).validate().unwrap_err();
+        assert!(
+            err.to_string().contains("图注不能为空"),
+            "错误信息不符: {err}"
+        );
+    }
+}

@@ -176,12 +176,15 @@ fn render_table(header: &[String], rows: &[Vec<String>], style: &DocStyle) -> Bi
         )
     };
 
+    // cant_split：true → <w:cantSplit/>，false → 空串（表头行/数据行一致）
+    let cant_split = if style.table.cant_split { "<w:cantSplit/>" } else { "" };
+
     let mut rows_xml = String::new();
     // 表头行：{{HEADER_FLAG}} = <w:tblHeader/>，单元格样式 BidTableHeader，首列不加底纹
-    rows_xml.push_str(&render_row(&widths, header, "<w:tblHeader/>", "BidTableHeader", ""));
+    rows_xml.push_str(&render_row(&widths, header, "<w:tblHeader/>", "BidTableHeader", "", cant_split));
     // 数据行：flag 空串 + BidTableBody + 首列底纹
     for row in rows {
-        rows_xml.push_str(&render_row(&widths, row, "", "BidTableBody", &first_col_shd));
+        rows_xml.push_str(&render_row(&widths, row, "", "BidTableBody", &first_col_shd, cant_split));
     }
     Ok(TABLE_XML
         .replace("{{GRID}}", &grid)
@@ -189,6 +192,7 @@ fn render_table(header: &[String], rows: &[Vec<String>], style: &DocStyle) -> Bi
 }
 
 /// 单行渲染（§5.5 table_row.xml）：表头行带 <w:tblHeader/>，数据行 flag 为空串；
+/// `cant_split` 由 `style.table.cant_split` 决定（<w:cantSplit/> 或空串）；
 /// `first_col_shd` 只用于数据行首列 tcPr（表头行传空串）
 fn render_row(
     widths: &[u32],
@@ -196,6 +200,7 @@ fn render_row(
     header_flag: &str,
     style: &str,
     first_col_shd: &str,
+    cant_split: &str,
 ) -> String {
     let mut cells_xml = String::new();
     for (i, text) in cells.iter().enumerate() {
@@ -209,6 +214,7 @@ fn render_row(
         ));
     }
     TABLE_ROW_XML
+        .replace("{{CANTS_SPLIT}}", cant_split)
         .replace("{{HEADER_FLAG}}", header_flag)
         .replace("{{CELLS}}", &cells_xml)
 }
@@ -483,5 +489,162 @@ mod tests {
         assert_eq!(doc.matches("<w:tc>").count(), 3, "3up 须 3 个单元格: {doc}");
         assert_eq!(doc.matches("<w:tr>").count(), 1, "3up 须 1 行: {doc}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B2 新测 7：3up per_image 3 图 → <w:drawing>=3、BidCaption=3、<w:tc>=3
+    #[test]
+    fn three_up_per_image_three_captions() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-t2c1-3up-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("threeup-cap.docx");
+        let img = asset_png();
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Figure(FigureBlock {
+                    layout: FigureLayout::ThreeUp,
+                    items: vec![
+                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()) },
+                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()) },
+                        FigureItem { path: img.clone(), caption: Some("图1-3 丙".to_string()) },
+                    ],
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    ai_generated: false,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        assert_eq!(doc.matches("<w:drawing").count(), 3, "3 图须 3 个 drawing: {doc}");
+        assert_eq!(doc.matches("BidCaption").count(), 3, "per_image 须 3 段图注: {doc}");
+        assert_eq!(doc.matches("<w:tc>").count(), 3, "3up 须 3 个单元格: {doc}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B2 新测 8：wide 1 图 → drawing=1 且 cx="6696000"（18.6cm 内容区全宽）
+    #[test]
+    fn wide_uses_full_content_width() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-t2c1-wide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("wide.docx");
+        let img = asset_png();
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Figure(FigureBlock {
+                    layout: FigureLayout::Wide,
+                    items: vec![FigureItem { path: img.clone(), caption: Some("图1-1 总平面".to_string()) }],
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    ai_generated: false,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        assert_eq!(doc.matches("<w:drawing").count(), 1, "wide 须 1 个 drawing: {doc}");
+        assert!(
+            doc.contains("cx=\"6696000\""),
+            "wide 须用 18.6cm 全宽 cx=6696000: {doc}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B2 新测 9：3up 2 图 → <w:tc>=3、drawing=2、BidCaption=2（第 3 格补空单元格）
+    #[test]
+    fn three_up_with_two_items_fills_empty_cell() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-t2c1-3up-2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("threeup-2.docx");
+        let img = asset_png();
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Figure(FigureBlock {
+                    layout: FigureLayout::ThreeUp,
+                    items: vec![
+                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()) },
+                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()) },
+                    ],
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    ai_generated: false,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        assert_eq!(doc.matches("<w:tc>").count(), 3, "2 图须补空单元格至 3: {doc}");
+        assert_eq!(doc.matches("<w:drawing").count(), 2, "2 图须 2 个 drawing: {doc}");
+        assert_eq!(doc.matches("BidCaption").count(), 2, "per_image 须 2 段图注: {doc}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B2 新测 10：标题含 <&> → header1.xml 不含 {{DOC_TITLE}}、含 &lt;&amp;&gt;
+    #[test]
+    fn header_title_replaced_and_escaped() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-t2c1-hdr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("hdr.docx");
+        let req = BidExportRequest {
+            title: "<&>".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Paragraph { text: "b".to_string() }],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let hdr = pkg.text("word/header1.xml").unwrap();
+        assert!(!hdr.contains("{{DOC_TITLE}}"), "页眉占位符未替换: {hdr}");
+        assert!(hdr.contains("&lt;&amp;&gt;"), "页眉未含转义后标题: {hdr}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// B2 新测 11：cant_split=false 渲染不含 <w:cantSplit/>；true 则含（直接调私有 render_row）
+    #[test]
+    fn cant_split_false_omits_element() {
+        let widths = [3516u32, 3515, 3515];
+        let cells = ["a".to_string()];
+        let off = render_row(&widths, &cells, "", "BidTableBody", "", "");
+        assert!(
+            !off.contains("<w:cantSplit/>"),
+            "cant_split=false 不得输出 <w:cantSplit/>: {off}"
+        );
+        let on = render_row(&widths, &cells, "", "BidTableBody", "", "<w:cantSplit/>");
+        assert!(
+            on.contains("<w:cantSplit/>"),
+            "cant_split=true 须输出 <w:cantSplit/>: {on}"
+        );
+        // 语义兜底：render_table 按 style.table.cant_split 布尔计算该串
+        let mut style = DocStyle::default();
+        style.table.cant_split = false;
+        let tbl = render_table(&["h".to_string()], &[vec!["b".to_string()]], &style).unwrap();
+        assert!(!tbl.contains("<w:cantSplit/>"), "cant_split=false 全表不得含: {tbl}");
+        let tbl_on = render_table(&["h".to_string()], &[vec!["b".to_string()]], &DocStyle::default()).unwrap();
+        assert!(tbl_on.contains("<w:cantSplit/>"), "cant_split=true 全表须含: {tbl_on}");
     }
 }

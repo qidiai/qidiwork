@@ -1,1 +1,1 @@
-<w:tr><w:trPr><w:cantSplit/>{{HEADER_FLAG}}</w:trPr>{{CELLS}}</w:tr>
+<w:tr><w:trPr>{{CANTS_SPLIT}}{{HEADER_FLAG}}</w:trPr>{{CELLS}}</w:tr>

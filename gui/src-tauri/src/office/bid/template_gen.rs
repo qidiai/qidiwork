@@ -8,7 +8,8 @@
 //! 片段库（§3.5）落在 `resources/templates/fragments/`，由填充片 `include_str!` 消费，本片只负责落盘。
 //!
 //! 对外仅暴露：`generate_to` / `generate_to_with` / `template_document_xml[_for]` /
-//! `template_styles_xml[_for]` / `TAG_*` / `ALL_TAGS`（旧签名保留，内部转调 `*_for(&DocStyle)`）。
+//! `template_styles_xml[_for]` / `TAG_*` / `ALL_TAGS`（旧签名保留，内部转调 `*_for(&DocStyle)`；
+//! `template_document_xml_for` 返回 `BidResult`，纸型不受支持即 Err）。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -68,11 +69,13 @@ pub const ALL_TAGS: [&str; 12] = [
 
 /// §3.3 `word/document.xml` 全文（默认 DocStyle，含 XML 声明）
 pub fn template_document_xml() -> String {
-    template_document_xml_for(&DocStyle::default())
+    // 默认纸型恒为 "A4V"（pg_sz_el 的合法输入），此路不会失败；
+    // 铁律禁 unwrap/expect/panic，用 unwrap_or_default 兜底（实际不可达）
+    template_document_xml_for(&DocStyle::default()).unwrap_or_default()
 }
 
-/// §3.3 `word/document.xml` 全文（指定 DocStyle）
-pub fn template_document_xml_for(style: &DocStyle) -> String {
+/// §3.3 `word/document.xml` 全文（指定 DocStyle）；纸型不受支持时返回 Err
+pub fn template_document_xml_for(style: &DocStyle) -> BidResult<String> {
     document_xml(style)
 }
 
@@ -101,7 +104,7 @@ pub fn generate_to_with(out: &Path, style: &DocStyle) -> BidResult<u64> {
     entries.insert("_rels/.rels".to_string(), ROOT_RELS_XML.as_bytes().to_vec());
     entries.insert(
         "word/document.xml".to_string(),
-        template_document_xml_for(style).into_bytes(),
+        template_document_xml_for(style)?.into_bytes(),
     );
     entries.insert(
         "word/styles.xml".to_string(),
@@ -128,10 +131,12 @@ pub fn generate_to_with(out: &Path, style: &DocStyle) -> BidResult<u64> {
 }
 
 /// §3.3 `word/document.xml` 全文：12 锚点 + TOC/3up/wide 部件库 + header/footer 引用。
-/// 页边距由 `DocStyle::margin_twips()` 渲染；其余版式常量与 P0a 模板逐字一致。
-fn document_xml(style: &DocStyle) -> String {
+/// 页边距由 `DocStyle::margin_twips()` 渲染；pgSz 由 `DocStyle::page.paper` 渲染；
+/// 其余版式常量与 P0a 模板逐字一致。纸型不受支持时返回 Err。
+fn document_xml(style: &DocStyle) -> BidResult<String> {
     let m = style.margin_twips();
-    format!(
+    let pg_sz = pg_sz_el(&style.page.paper)?;
+    Ok(format!(
 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
@@ -201,7 +206,7 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <w:sectPr>
       <w:headerReference w:type="default" r:id="rId1"/>
       <w:footerReference w:type="default" r:id="rId2"/>
-      <w:pgSz w:w="11906" w:h="16838"/>
+      {pg_sz}
       <w:pgMar w:top="{m}" w:right="{m}" w:bottom="{m}" w:left="{m}" w:header="851" w:footer="992" w:gutter="0"/>
       <w:cols w:space="425"/>
       <w:docGrid w:linePitch="312"/>
@@ -209,7 +214,7 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:body>
 </w:document>
 "#
-    )
+    ))
 }
 
 /// §3.4 `word/styles.xml` 全文：10 个旧样式由 `DocStyle` 计算（默认值与 P0a 模板逐字一致），
@@ -248,27 +253,27 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:style w:type="paragraph" w:styleId="BidTitle1">
     <w:name w:val="BidTitle1"/>
     <w:pPr><w:jc w:val="{h1_align}"/><w:outlineLvl w:val="0"/></w:pPr>
-    <w:rPr><w:color w:val="{h1_color}"/><w:sz w:val="{h1_sz}"/>{h1_bold}</w:rPr>
+    <w:rPr>{h1_bold}<w:color w:val="{h1_color}"/><w:sz w:val="{h1_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTitle2">
     <w:name w:val="BidTitle2"/>
     <w:pPr><w:jc w:val="{h2_align}"/><w:outlineLvl w:val="1"/></w:pPr>
-    <w:rPr><w:color w:val="{h2_color}"/><w:sz w:val="{h2_sz}"/>{h2_bold}</w:rPr>
+    <w:rPr>{h2_bold}<w:color w:val="{h2_color}"/><w:sz w:val="{h2_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTitle3">
     <w:name w:val="BidTitle3"/>
     <w:pPr><w:jc w:val="{h3_align}"/><w:outlineLvl w:val="2"/></w:pPr>
-    <w:rPr><w:color w:val="{h3_color}"/><w:sz w:val="{h3_sz}"/>{h3_bold}</w:rPr>
+    <w:rPr>{h3_bold}<w:color w:val="{h3_color}"/><w:sz w:val="{h3_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTitle4">
     <w:name w:val="BidTitle4"/>
     <w:pPr><w:jc w:val="{h4_align}"/><w:outlineLvl w:val="3"/></w:pPr>
-    <w:rPr><w:color w:val="{h4_color}"/><w:sz w:val="{h4_sz}"/>{h4_bold}</w:rPr>
+    <w:rPr>{h4_bold}<w:color w:val="{h4_color}"/><w:sz w:val="{h4_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTableHeader">
     <w:name w:val="BidTableHeader"/>
-    <w:pPr><w:jc w:val="center"/><w:shd w:val="clear" w:color="auto" w:fill="{header_fill}"/></w:pPr>
-    <w:rPr><w:color w:val="{header_color}"/><w:sz w:val="{body_sz}"/><w:b/></w:rPr>
+    <w:pPr><w:shd w:val="clear" w:color="auto" w:fill="{header_fill}"/><w:jc w:val="center"/></w:pPr>
+    <w:rPr><w:b/><w:color w:val="{header_color}"/><w:sz w:val="{body_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTableBody">
     <w:name w:val="BidTableBody"/>
@@ -278,7 +283,7 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:style w:type="paragraph" w:styleId="BidCaption">
     <w:name w:val="BidCaption"/>
     <w:pPr><w:jc w:val="{cap_align}"/></w:pPr>
-    <w:rPr><w:sz w:val="{cap_sz}"/><w:b/></w:rPr>
+    <w:rPr><w:b/><w:sz w:val="{cap_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidFigureCell">
     <w:name w:val="BidFigureCell"/>
@@ -287,17 +292,17 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTOC">
     <w:name w:val="BidTOC"/>
-    <w:pPr><w:jc w:val="left"/><w:spacing w:line="360" w:lineRule="auto"/></w:pPr>
+    <w:pPr><w:spacing w:line="360" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidHeader">
     <w:name w:val="BidHeader"/>
     <w:pPr><w:jc w:val="center"/></w:pPr>
-    <w:rPr><w:sz w:val="18"/><w:color w:val="595959"/></w:rPr>
+    <w:rPr><w:color w:val="595959"/><w:sz w:val="18"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidFooter">
     <w:name w:val="BidFooter"/>
     <w:pPr><w:jc w:val="center"/></w:pPr>
-    <w:rPr><w:sz w:val="18"/><w:color w:val="595959"/></w:rPr>
+    <w:rPr><w:color w:val="595959"/><w:sz w:val="18"/></w:rPr>
   </w:style>
   <w:style w:type="table" w:styleId="BidTable">
     <w:name w:val="BidTable"/>
@@ -355,6 +360,14 @@ fn jc_val(align: &str) -> &str {
     match align {
         "justify" => "both",
         other => other,
+    }
+}
+
+/// 纸型 → `w:pgSz` 元素：A4 / A4V 同值 11906×16838（A4 纵向）；其它值报错
+fn pg_sz_el(paper: &str) -> BidResult<&'static str> {
+    match paper {
+        "A4" | "A4V" => Ok("<w:pgSz w:w=\"11906\" w:h=\"16838\"/>"),
+        other => Err(BidError::new(format!("不支持的纸型: {other}"))),
     }
 }
 
@@ -574,7 +587,7 @@ mod tests {
         let styles = template_styles_xml_for(&style);
         assert!(styles.contains(r#"<w:sz w:val="28"/>"#), "14pt → sz 28: {styles}");
         assert!(styles.contains("112233"), "h1 颜色被覆盖: {styles}");
-        let doc = template_document_xml_for(&style);
+        let doc = template_document_xml_for(&style).unwrap();
         assert!(doc.contains(r#"w:top="1134""#), "2.0cm → 1134 twips: {doc}");
     }
 
@@ -626,6 +639,32 @@ mod tests {
             assert!(
                 doc.contains(&format!("w:val=\"{tag}\"")),
                 "document.xml 缺少锚点 {tag}"
+            );
+        }
+    }
+
+    /// B2 新测：纸型不受支持（A3）→ template_document_xml_for 返回 Err 且含"不支持的纸型"
+    #[test]
+    fn unsupported_paper_rejected() {
+        let mut style = DocStyle::default();
+        style.page.paper = "A3".to_string();
+        let err = template_document_xml_for(&style).unwrap_err();
+        assert!(
+            err.to_string().contains("不支持的纸型"),
+            "错误信息不符: {err}"
+        );
+    }
+
+    /// B2 新测：A4 与 A4V 渲染的 pgSz 同为 11906×16838
+    #[test]
+    fn a4_and_a4v_same_pgsz() {
+        for paper in ["A4", "A4V"] {
+            let mut style = DocStyle::default();
+            style.page.paper = paper.to_string();
+            let doc = template_document_xml_for(&style).unwrap();
+            assert!(
+                doc.contains("w:w=\"11906\"") && doc.contains("w:h=\"16838\""),
+                "纸型 {paper} 的 pgSz 不符: {doc}"
             );
         }
     }

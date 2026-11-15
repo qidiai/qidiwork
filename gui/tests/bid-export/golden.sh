@@ -14,6 +14,7 @@ run() { # name chapters figures captions tables paragraphs
 
 run g1-construction 5 2 2 2 15
 run g2-gantt        1 1 1 0 2
+unzip -p ../tests/bid-export/out/g2-gantt.docx word/document.xml | grep -q 'cx="6696000"' || { echo "FAIL wide-width-18.6cm"; FAIL=1; }
 run g3-siteplan     2 3 3 0 3
 run g4-supervision  8 6 2 1 24
 

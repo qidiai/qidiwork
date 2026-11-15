@@ -15,6 +15,8 @@ ch=$2; fig=$3; cap=$4; tbl=$5; par=$6
 # $1 相对脚本所在目录解析（out/ 与脚本同目录），绝对路径原样保留
 case "$DOCX" in
   /*) ;;
+  [A-Za-z]:[\\/]*) ;;
+  \\\\*) ;;
   *) DOCX="$(dirname "$0")/$DOCX" ;;
 esac
 

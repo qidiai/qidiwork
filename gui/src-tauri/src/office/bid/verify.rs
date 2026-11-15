@@ -439,6 +439,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use super::super::fill::export;
+    use super::super::model::{BidExportRequest, Block, Chapter};
     use crate::office::bid::docx::DocxPackage;
 
     const TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1.docx";
@@ -539,5 +541,80 @@ mod tests {
         .unwrap();
         assert!(!check(&report, "doc.chapters").ok, "{:?}", check(&report, "doc.chapters"));
         assert!(!check(&report, "doc.figures").ok, "{:?}", check(&report, "doc.figures"));
+    }
+
+    /// 反向篡改测试用最小请求：1 章 1 段 1 表（3 列表头 + 2 行数据）、无图
+    fn minimal_export_req(out: &Path) -> BidExportRequest {
+        BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![
+                    Block::Paragraph { text: "正文段".to_string() },
+                    Block::Table {
+                        header: vec!["列一".into(), "列二".into(), "列三".into()],
+                        rows: vec![
+                            vec!["a1".into(), "a2".into(), "a3".into()],
+                            vec!["b1".into(), "b2".into(), "b3".into()],
+                        ],
+                    },
+                ],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        }
+    }
+
+    /// 反向篡改：导出件 document.xml 首个 `w:fill="E6F2F9"` 改成 FFFFFF → table.first_col_fill 必须 ok=false
+    #[test]
+    fn tampered_shading_fails() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-fill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("shading.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        let mut pkg = DocxPackage::open(&out).unwrap();
+        let document = pkg.text("word/document.xml").unwrap();
+        assert!(document.contains(r#"w:fill="E6F2F9""#));
+        pkg.set_text(
+            "word/document.xml",
+            document.replacen(r#"w:fill="E6F2F9""#, r#"w:fill="FFFFFF""#, 1),
+        );
+        let tampered = dir.join("tampered.docx");
+        pkg.save(&tampered).unwrap();
+
+        let report = verify(&tampered, None).unwrap();
+        assert!(
+            !check(&report, "table.first_col_fill").ok,
+            "{:?}",
+            check(&report, "table.first_col_fill")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向篡改：导出件 document.xml `w:val="BID_TOC"` 改成 BID_TOC_REMOVED → doc.toc 必须 ok=false
+    #[test]
+    fn missing_toc_block_fails() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-toc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("toc.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        let mut pkg = DocxPackage::open(&out).unwrap();
+        let document = pkg.text("word/document.xml").unwrap();
+        assert!(document.contains(r#"w:val="BID_TOC""#));
+        pkg.set_text(
+            "word/document.xml",
+            document.replace(r#"w:val="BID_TOC""#, r#"w:val="BID_TOC_REMOVED""#),
+        );
+        let tampered = dir.join("tampered.docx");
+        pkg.save(&tampered).unwrap();
+
+        let report = verify(&tampered, None).unwrap();
+        assert!(!check(&report, "doc.toc").ok, "{:?}", check(&report, "doc.toc"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

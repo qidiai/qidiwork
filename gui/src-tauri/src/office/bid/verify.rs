@@ -172,12 +172,20 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     ));
 
     // #10-#14 文档结构 check（P0b §4.3 新增 4 条，插在 page.margins 之后；B6 插 doc.styles_link）
-    // #10 doc.toc：目录域仍在（填充器不动 BID_TOC）
-    checks.push(contains_check(
-        "doc.toc",
-        &document,
-        &["fldSimple", r#"TOC \o"#],
-    ));
+    // #10 doc.toc：目录域仍在（填充器不动 BID_TOC）。限定 w:val="BID_TOC" 的 sdt 块内断言；找不到块 → ok=false
+    let toc_ok = match sdt_block(&document, "BID_TOC") {
+        None => false,
+        Some(block) => block.contains("fldSimple") && block.contains("TOC"),
+    };
+    checks.push(Check {
+        name: "doc.toc".to_string(),
+        ok: toc_ok,
+        detail: if toc_ok {
+            "BID_TOC 块目录域齐全".to_string()
+        } else {
+            "缺 BID_TOC 块或块内无 fldSimple/TOC".to_string()
+        },
+    });
     // #11 doc.header_footer：页眉页脚部件 + content-types + document 引用齐全
     let content_types = pkg.text("[Content_Types].xml")?;
     let hf_ok = pkg.contains("word/header1.xml")
@@ -216,15 +224,19 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         &footer,
         &[r#"instr=" PAGE ""#, r#"instr=" NUMPAGES ""#],
     ));
-    // #14 table.first_col_fill：含 BidTableBody 的业务表须有 E6F2F9 首列底纹；无业务表 → skipped
-    let biz_tables: Vec<&str> = tables_with(&document, "BidTableBody");
+    // #14 table.first_col_fill：含 BidTableHeader 的业务表逐行断言首列底纹；无业务表 → skipped
+    //     （块内 <w:tr> 数 = R（含表头）；w:fill="E6F2F9" 出现次数 == R-1；第 2..R 行首个 <w:tc> 必含该 shd）
+    let biz_tables: Vec<&str> = tables_with(&document, "BidTableHeader");
+    let first_col_ok = biz_tables.iter().all(|t| first_col_fill_ok(t));
     checks.push(Check {
         name: "table.first_col_fill".to_string(),
-        ok: biz_tables.iter().all(|t| t.contains(r#"w:fill="E6F2F9""#)),
+        ok: first_col_ok,
         detail: if biz_tables.is_empty() {
             "skipped".to_string()
+        } else if first_col_ok {
+            format!("{} 张业务表首列底纹逐行齐全", biz_tables.len())
         } else {
-            format!("{} 张业务表首列底纹齐全", biz_tables.len())
+            "业务表首列底纹逐行断言不通过（fill 计数或首列 shd 缺失）".to_string()
         },
     });
 
@@ -235,6 +247,9 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         "BID_FIGURE_SINGLE",
         "BID_FIGURE_3UP",
         "BID_FIGURE_WIDE",
+        "BID_TABLE_ROW",
+        "BID_FIGURE_CAPTION",
+        "{{DOC_TITLE}}",
         "正文占位",
         "图片占位",
         ">图注<",
@@ -376,6 +391,42 @@ fn tables_with<'a>(xml: &'a str, needle: &str) -> Vec<&'a str> {
             block.contains(needle).then_some(block)
         })
         .collect()
+}
+
+/// 取 `w:tag w:val="{tag}"` 所在 sdt 的**整块**原文（<w:sdt>…</w:sdt>）；找不到返回 None
+fn sdt_block<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let needle = format!("w:val=\"{tag}\"");
+    let at = xml.find(&needle)?;
+    let start = xml[..at].rfind("<w:sdt>")?;
+    // 从 start 起做 <w:sdt> / </w:sdt> 深度计数找配对结尾
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < xml.len() {
+        if xml[i..].starts_with("<w:sdt>") { depth += 1; i += 7; }
+        else if xml[i..].starts_with("</w:sdt>") {
+            depth -= 1; i += 8;
+            if depth == 0 { return Some(&xml[start..i]); }
+        } else { i += 1; }
+    }
+    None
+}
+
+/// 单张业务表首列底纹逐行判定：<w:tr> 数 R，E6F2F9 出现 R-1 次，且第 2..R 行首个 <w:tc> 内含该 shd
+fn first_col_fill_ok(table: &str) -> bool {
+    let rows: Vec<&str> = table.split("<w:tr>").skip(1).collect(); // 每段以该行内容开头
+    let r = rows.len();
+    if r == 0 { return false; }
+    if table.matches("w:fill=\"E6F2F9\"").count() != r - 1 { return false; }
+    rows.iter().skip(1).all(|row| {
+        match row.find("<w:tc>") {
+            Some(pos) => {
+                let tail = &row[pos..];
+                let cell_end = tail.find("</w:tc>").unwrap_or(tail.len());
+                tail[..cell_end].contains("w:fill=\"E6F2F9\"")
+            }
+            None => false,
+        }
+    })
 }
 
 /// 含 `needle` 的 `<w:tbl>` 块个数（#18 doc.tables 计数口径：3up 图桌不计入）

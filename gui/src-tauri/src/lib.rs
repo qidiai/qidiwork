@@ -87,6 +87,8 @@ pub fn run() -> i32 {
             onboarding::onboarding_marker_read,
             onboarding::onboarding_marker_write,
             updater::check_gui_update,
+            commands::download_gui_update,
+            commands::run_downloaded_update,
             diag::export_diag
         ])
         .setup(|app| {

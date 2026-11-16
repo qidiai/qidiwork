@@ -84,8 +84,19 @@ async function setPermLevel(level: PermLevel): Promise<void> {
   }
 }
 
-// 更新提示条(R1-GUI):onMounted 拉取,有新版才显示;失败静默。
-const update = ref<{ version: string; url: string } | null>(null);
+// 更新提示条(R1-GUI + U 片下载校验):onMounted 拉取,有新版才显示;失败静默。
+type GuiUpdate = {
+  version: string;
+  url: string;
+  sha256?: string | null;
+  sig?: string | null;
+};
+const update = ref<GuiUpdate | null>(null);
+// U 片:下载态 / 落地路径 / 是否通过签名校验(Rust 侧定论,前端只展示)
+const dlBusy = ref(false);
+const dlError = ref("");
+const dlPath = ref("");
+const dlVerified = ref(false);
 // 诊断日志导出(R2)。
 const diagBusy = ref(false);
 const diagPath = ref("");
@@ -168,10 +179,57 @@ async function openLoginUri(): Promise<void> {
 // 检查 GUI 新版本(R1-GUI):失败静默,不打扰用户。
 async function checkUpdate(): Promise<void> {
   try {
-    const res = await invoke<{ version: string; url: string } | null>("check_gui_update");
+    const res = await invoke<GuiUpdate | null>("check_gui_update");
     update.value = res ?? null;
   } catch {
     update.value = null;
+  }
+  // 版本信息刷新后,旧的落地/校验状态一律作废
+  dlPath.value = "";
+  dlVerified.value = false;
+  dlError.value = "";
+}
+
+// 下载安装包(U 片):Rust 侧流式落盘到 %TEMP%\qidiwork-update\,
+// 边写边算 sha256 并按清单 sig 验签;已验证/未验证由后端回传。
+async function downloadUpdate(): Promise<void> {
+  if (dlBusy.value || !update.value) return;
+  dlBusy.value = true;
+  dlError.value = "";
+  dlPath.value = "";
+  dlVerified.value = false;
+  try {
+    const res = await invoke<{
+      path: string;
+      bytes: number;
+      sha256: string;
+      verified: boolean;
+    }>("download_gui_update", {
+      version: update.value.version,
+      url: update.value.url,
+      sha256: update.value.sha256 ?? "",
+      sig: update.value.sig ?? null,
+    });
+    dlPath.value = res.path;
+    dlVerified.value = res.verified;
+    if (!res.verified) {
+      pushSystem("安装包已下载,但未通过签名校验;运行前请自行确认来源。");
+    }
+  } catch (e) {
+    dlError.value = String(e);
+  } finally {
+    dlBusy.value = false;
+  }
+}
+
+// 运行已下载的安装程序:后端只放行更新目录内的 .exe,前端不拼路径。
+async function runUpdate(): Promise<void> {
+  if (!dlPath.value) return;
+  dlError.value = "";
+  try {
+    await invoke("run_downloaded_update", { path: dlPath.value });
+  } catch (e) {
+    dlError.value = String(e);
   }
 }
 
@@ -274,10 +332,29 @@ onMounted(() => {
       </div>
 
       <div v-else class="modal-body">
-        <!-- 更新提示条(R1-GUI):仅检测到新版时出现 -->
+        <!-- 更新提示条(R1-GUI + U 片):版本 / 校验徽标 / 下载 → 运行安装程序 -->
         <div v-if="update" class="update-banner">
-          <span>📦 发现新版本 {{ update.version }}</span>
-          <button class="link-btn" @click.prevent="openUpdateUrl">去下载</button>
+          <div class="update-line">
+            <span>📦 发现新版本 {{ update.version }}</span>
+            <span
+              v-if="dlPath"
+              class="update-badge"
+              :class="dlVerified ? 'badge-ok' : 'badge-warn'"
+            >
+              {{ dlVerified ? "已验证" : "未验证" }}
+            </span>
+          </div>
+          <div class="update-actions">
+            <button v-if="!dlPath" class="btn" :disabled="dlBusy" @click="downloadUpdate">
+              {{ dlBusy ? "下载中…" : "下载" }}
+            </button>
+            <button v-else class="btn primary" @click="runUpdate">运行安装程序</button>
+            <button class="link-btn" @click.prevent="openUpdateUrl">用浏览器下载</button>
+          </div>
+          <p v-if="dlPath && !dlVerified" class="update-warn">
+            ⚠ 此安装包未通过签名校验，运行前请自行确认来源可信。
+          </p>
+          <p v-if="dlError" class="err">{{ dlError }}</p>
         </div>
 
         <!-- 诊断日志导出(R2) -->
@@ -621,18 +698,51 @@ onMounted(() => {
   align-self: flex-start;
 }
 
-/* 更新提示条(R1-GUI) */
+/* 更新提示条(R1-GUI + U 片下载校验) */
 .update-banner {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   padding: 8px 12px;
   border: 1px solid var(--accent);
   border-radius: var(--radius);
   background: var(--accent-soft, var(--bg-panel));
   color: var(--text-primary);
   font-size: var(--font-size-sm);
+}
+
+.update-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-badge {
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: var(--font-size-sm);
+}
+
+.badge-ok {
+  color: var(--accent);
+}
+
+.badge-warn {
+  color: var(--warning, #b45309);
+  border-color: var(--warning, #b45309);
+}
+
+.update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-warn {
+  margin: 0;
+  color: var(--warning, #b45309);
 }
 
 /* 诊断日志导出(R2) */

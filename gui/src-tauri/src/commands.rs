@@ -1197,3 +1197,23 @@ pub async fn bid_export_md(
     })
 }
 
+/// 下载 GUI 更新包到 `%TEMP%\qidiwork-update\`(施工规格 2026-11-17 §U.3)。
+///
+/// 流式写盘 + 边写边算 sha256(不整包进内存),超限 / 摘要不符 / 验签失败
+/// 一律删除已下载文件并 Err;`sig` 是清单里的 base64 Ed25519 签名,
+/// 签名对象为 sha256 的 **32 字节原始摘要**。
+#[tauri::command]
+pub async fn download_gui_update(
+    version: String,
+    url: String,
+    sha256: String,
+    sig: Option<String>,
+) -> Result<crate::updater::DownloadedUpdate, String> {
+    crate::updater::download_update_versioned(&url, &sha256, sig.as_deref(), &version).await
+}
+
+/// 运行已下载的安装程序:仅允许 `%TEMP%\qidiwork-update\` 下直接存放的 `.exe`。
+#[tauri::command]
+pub fn run_downloaded_update(path: String) -> Result<(), String> {
+    crate::updater::run_downloaded_update(&path)
+}

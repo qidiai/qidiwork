@@ -36,3 +36,5 @@ pub mod verify;
 pub mod fill;
 pub mod paths;
 pub mod markdown;
+pub mod project;
+pub mod import_docx;

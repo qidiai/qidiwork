@@ -1,8 +1,8 @@
 //! 标书导出 CLI（P0c 收尾 + P1-1 D3 `--md`）。
 //!
 //! 用法：
-//! - `bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>]`
-//! - `bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>]`
+//! - `bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]`
+//! - `bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]`
 //! - `bid_export --check-only <docx>`
 //!
 //! 导出路径：读请求 JSON → `office::bid::model::BidExportRequest`
@@ -16,6 +16,9 @@
 //! 输出约定（供脚本消费）：
 //! - 成功：一行 JSON 摘要 `{"path":…,"bytes":…,"chapters":…,"paragraphs":…,"tables":…,"figures":…}`
 //!   + `EXPORT OK`，exit 0
+//! - `--pages`（M1）：24 项 check 通过后再用本机 WPS 实测页数（`office::bid::pages::measure`），
+//!   摘要里多一个 `"pages":N`，并在摘要行之后、`EXPORT OK` 之前打印 `PAGES=<n>`；
+//!   测量失败只打 `WARN 页数测量失败: …`（stderr），不改退出码
 //! - 结构校验失败：`CHECK FAIL <失败 check 名,逗号分隔>`，exit 1
 //! - 参数/读盘/导出错误：`ERROR <原因>`，exit 2
 //! - `--check-only`：`{"checks":N,"ok":true}` + `CHECK OK`，exit 0
@@ -25,11 +28,12 @@ use std::process::exit;
 
 use qidiwork_gui::office::bid::fill;
 use qidiwork_gui::office::bid::markdown;
-use qidiwork_gui::office::bid::model::{BidExportRequest, BidExportResult, Block};
+use qidiwork_gui::office::bid::model::{BidExportRequest, Block};
+use qidiwork_gui::office::bid::pages;
 use qidiwork_gui::office::bid::verify::{self, VerifyReport};
 
 const USAGE: &str =
-    "用法: bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>]\n       bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>]\n       bid_export --check-only <docx>";
+    "用法: bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]\n       bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]\n       bid_export --check-only <docx>";
 
 /// 结构校验不合格
 const EXIT_CHECK_FAIL: i32 = 1;
@@ -43,6 +47,8 @@ enum Cmd {
         input: PathBuf,
         out: PathBuf,
         template: PathBuf,
+        /// `--pages`：导出后追加 WPS 实测页数
+        pages: bool,
     },
     /// `--md <file.md>`：Markdown 内容入口（`number = !--no-number`）
     ExportMd {
@@ -50,6 +56,8 @@ enum Cmd {
         out: PathBuf,
         template: PathBuf,
         number: bool,
+        /// `--pages`：导出后追加 WPS 实测页数
+        pages: bool,
     },
     CheckOnly {
         docx: PathBuf,
@@ -62,13 +70,15 @@ fn main() {
             input,
             out,
             template,
-        }) => run_export(&input, &out, &template),
+            pages,
+        }) => run_export(&input, &out, &template, pages),
         Ok(Cmd::ExportMd {
             md,
             out,
             template,
             number,
-        }) => run_export_md(&md, &out, &template, number),
+            pages,
+        }) => run_export_md(&md, &out, &template, number, pages),
         Ok(Cmd::CheckOnly { docx }) => run_check_only(&docx),
         Err(msg) => error(&msg),
     }
@@ -93,7 +103,7 @@ fn flag_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
         .ok_or_else(|| format!("缺少 {flag} 的值\n{USAGE}"))
 }
 
-/// 参数解析：`--input`/`--md`/`--out`/`--template` 任意顺序；`--no-number` 为开关；
+/// 参数解析：`--input`/`--md`/`--out`/`--template` 任意顺序；`--no-number`/`--pages` 为开关；
 /// `--check-only` 单独使用；`--md` 与 `--input` 互斥；
 /// 任何带值 flag 缺值都报「缺少 <flag> 的值」并 exit 2
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
@@ -103,6 +113,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
     let mut template: Option<PathBuf> = None;
     let mut check_only: Option<PathBuf> = None;
     let mut no_number = false;
+    let mut pages = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--input" => input = Some(flag_value(&mut args, "--input")?),
@@ -110,6 +121,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             "--out" => out = Some(flag_value(&mut args, "--out")?),
             "--template" => template = Some(flag_value(&mut args, "--template")?),
             "--no-number" => no_number = true,
+            "--pages" => pages = true,
             "--check-only" => check_only = Some(flag_value(&mut args, "--check-only")?),
             other => return Err(format!("未知参数 {other}\n{USAGE}")),
         }
@@ -119,6 +131,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             return Err(format!(
                 "--check-only 不能与 --input/--md/--out/--template/--no-number 混用\n{USAGE}"
             ));
+        }
+        if pages {
+            return Err(format!("--check-only 不能与 --pages 混用\n{USAGE}"));
         }
         return Ok(Cmd::CheckOnly { docx });
     }
@@ -136,11 +151,13 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             out,
             template,
             number: !no_number,
+            pages,
         }),
         (None, Some(input), Some(out)) => Ok(Cmd::ExportJson {
             input,
             out,
             template,
+            pages,
         }),
         // 缺参分两种情况报，便于脚本精确匹配（仍附 USAGE 便于人工排障）
         (md, input, _) => {
@@ -190,7 +207,7 @@ fn failed_names(report: &VerifyReport) -> String {
 }
 
 /// 导出：请求 JSON → docx → 结构校验
-fn run_export(input: &Path, out: &Path, template: &Path) -> ! {
+fn run_export(input: &Path, out: &Path, template: &Path, pages: bool) -> ! {
     let text = match std::fs::read_to_string(input) {
         Ok(t) => t,
         Err(e) => error(&format!("读请求文件失败 {}: {e}", input.display())),
@@ -202,11 +219,11 @@ fn run_export(input: &Path, out: &Path, template: &Path) -> ! {
 
     let base = input.parent().map(Path::to_path_buf).unwrap_or_default();
     resolve_figure_paths(&mut req, &base);
-    export_and_verify(req, out, template)
+    export_and_verify(req, out, template, pages)
 }
 
 /// 导出：Markdown → `parse_markdown_with(src, md 父目录, !no_number)` → 同上导出 + 校验
-fn run_export_md(md: &Path, out: &Path, template: &Path, number: bool) -> ! {
+fn run_export_md(md: &Path, out: &Path, template: &Path, number: bool, pages: bool) -> ! {
     let md_abs = match absolute(md) {
         Ok(p) => p,
         Err(e) => error(&e),
@@ -228,11 +245,14 @@ fn run_export_md(md: &Path, out: &Path, template: &Path, number: bool) -> ! {
         style_id: None,
         figure_width_cm: None,
     };
-    export_and_verify(req, out, template)
+    export_and_verify(req, out, template, pages)
 }
 
 /// 导出 + 24 项结构校验 + 摘要输出（`--input` / `--md` 共用的收尾）
-fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path) -> ! {
+///
+/// `with_pages`：校验通过后再用本机 WPS 实测页数（`pages::measure`）；
+/// 测量失败只打 `WARN`，不影响摘要与退出码。
+fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path, with_pages: bool) -> ! {
     let out_abs = match absolute(out) {
         Ok(p) => p,
         Err(e) => error(&e),
@@ -258,20 +278,46 @@ fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path) -> 
         exit(EXIT_CHECK_FAIL);
     }
 
-    let summary = BidExportResult {
+    // `--pages`：本机 WPS 实测（失败只警告，不改退出码、摘要不带 pages）
+    let mut measured: Option<u32> = None;
+    if with_pages {
+        match pages::measure(&out_abs) {
+            Ok(stat) => measured = Some(stat.pages),
+            Err(e) => eprintln!("WARN 页数测量失败: {e}"),
+        }
+    }
+    let summary = ExportSummary {
         path: out_abs.to_string_lossy().to_string(),
         bytes,
         chapters: stats.chapters,
         paragraphs: stats.paragraphs,
         tables: stats.tables,
         figures: stats.figures,
+        pages: measured,
     };
     match serde_json::to_string(&summary) {
         Ok(line) => println!("{line}"),
         Err(e) => error(&format!("摘要序列化失败: {e}")),
     }
+    // 摘要行之后、`EXPORT OK` 之前补一行机器可读的页数（无 --pages 不打印）
+    if let Some(pages) = measured {
+        println!("PAGES={pages}");
+    }
     println!("EXPORT OK");
     exit(0)
+}
+
+/// 摘要行（字段顺序与原 `BidExportResult` 一致，`--pages` 命中才追加 `pages`）
+#[derive(serde::Serialize)]
+struct ExportSummary {
+    path: String,
+    bytes: u64,
+    chapters: usize,
+    paragraphs: usize,
+    tables: usize,
+    figures: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pages: Option<u32>,
 }
 
 /// 只校验：`verify(&p, None)`

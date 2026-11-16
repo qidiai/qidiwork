@@ -16,10 +16,10 @@ CLI 位置：`gui/src-tauri/src/bin/bid_export.rs`（`cargo run --bin bid_export
 
 ```bash
 # 1) 从请求 JSON 导出（--out 覆盖请求 JSON 里的 output_path）
-bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>]
+bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]
 
 # 2) 从 Markdown 导出（P1-1：默认自动编号；--no-number 关掉自动编号）
-bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>]
+bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]
 
 # 3) 只校验（不导出，跑 verify::verify(&p, None)）
 bid_export --check-only <docx>
@@ -116,6 +116,60 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
   `ERROR 导出失败: 横道图日期非法: <start>..<end>`；跨度过大见上条。
 - `demo.md` 里的横道图为 3 工序 / 25 天跨度 → 4 个 7 天桶，导出件含 7 格底纹（覆盖桶数）。
 
+## 页数实测（`--pages` / `bid_pages`）
+
+页数**不估算**，用本机 WPS（COM `KWPS.Application`）只读打开导出件、`Repaginate()` 后
+`ComputeStatistics(2)`（页）/ `ComputeStatistics(0)`（字）实测，**不保存、不改动原文件**。
+实现：`office/bid/pages.rs`（`pages::measure(&docx) -> PageStat { pages, words }`），
+脚本写法照 `gui/tests/bid-export/render-wps.ps1`（先 `Get-Process wps` 判断是否已有实例，
+只在自己拉起实例时才 `Quit()`，不会关掉用户正开着的窗口）。
+
+独立 CLI（`gui/src-tauri/src/bin/bid_pages.rs`）：
+
+```bash
+cargo run --quiet --bin bid_pages -- ../tests/bid-export/out/md-demo.docx
+```
+
+```json
+{"pages":5,"words":514}
+PAGES OK
+```
+
+导出时顺带实测（`--pages`，`--input` / `--md` 两条路径都支持）：
+
+```bash
+cargo run --quiet --bin bid_export -- \
+    --md ../tests/bid-export/md/demo.md \
+    --out ../tests/bid-export/out/md-demo.docx \
+    --pages
+```
+
+```json
+{"path":"…/out/md-demo.docx","bytes":78335,"chapters":3,"paragraphs":6,"tables":1,"figures":5,"pages":5}
+PAGES=5
+EXPORT OK
+```
+
+口径：
+
+- `--pages` 只在**导出 + 24 项 check 全过之后**才测页数：check 失败（exit 1）不测。
+- 摘要行仍是第一行（字段顺序不变），`pages` 追加在末尾；随后一行 `PAGES=<n>`，再 `EXPORT OK`。
+- 测量失败（本机没装 WPS / COM 未注册 / 文档打不开 / 输出无法解析）只打
+  `WARN 页数测量失败: <原因>` 到 stderr，**摘要不带 `pages`、退出码不变（仍 0）**——
+  页数是旁证，不是导出门槛。
+- `bid_pages` 失败统一 `ERROR <原因>`（stderr）+ exit 2：缺参 / 文件不存在 /
+  `无法解析页数输出: …` / PowerShell 非 0 退出。
+- `--check-only` 与 `--pages` 不能混用（`ERROR --check-only 不能与 --pages 混用` + exit 2）；
+  只校验不导出，没有可测的新产物。
+- **平台**：仅 Windows（需本机 WPS，本项目实测 `F:\wps\WPS Office\12.1.0.29690`，
+  COM 已注册为 `KWPS.Application`）。非 Windows 平台 `pages::measure` 直接返回
+  `Err("页数测量仅支持 Windows（需本机 WPS）")`。
+- 备注：`bid_pages` 对**不是 docx** 的文件不做内容校验——WPS 会当纯文本开成新文档并返回
+  1 页，页数无意义；要断言「是不是有效 docx」请用 `bid_export --check-only`。
+- 与 `gui/tests/bid-export/render-wps.ps1` 的分工：本 CLI 只报页/字（快）；
+  `render-wps.ps1` 另外落一份 PDF（人工核对版式、`p0b-page-baseline.md` 基线），
+  两者页数应一致。
+
 ## 请求 JSON 示例
 
 顶层字段对应 `office::bid::model::BidExportRequest`：`title`、`chapters[]`、
@@ -188,9 +242,9 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
   `Bid Template v1`。这条由 check #24 `doc.metadata_anonymous` 兜底校验，
   因此**老产物**（P0c 之前生成、仍是模板元数据的 docx）跑 `--check-only` 会报
   `CHECK FAIL doc.metadata_anonymous`，重新导出一次即可。
-- **页数不要用本 CLI 取**：`bid_export` 只做结构校验，不渲染。页数请用
-  `gui/tests/bid-export/render-wps.ps1`（WPS 转 PDF 后读页数），口径见
-  `docs/ops/wps-render-verify.md`。
+- **页数用 `--pages` 实测**（本机 WPS COM，见上节「页数实测」）；不加 `--pages` 时
+  `bid_export` 只做结构校验、不渲染。需要同时落 PDF 人工核对版式时用
+  `gui/tests/bid-export/render-wps.ps1`，口径见 `docs/ops/wps-render-verify.md`。
 - 输出目录不存在会自动创建；`--out` 相对路径按当前工作目录解析。
 - 默认模板可用 `--template` 覆盖，换模板后 13 项 Bid 样式的 check 依然生效（模板漂移会直接报错）。
 - 回归：`bash ../tests/bid-export/golden.sh` 跑 4 份 golden 夹具 + `md/demo.md`，期望 `GOLDEN OK (5/5)`。

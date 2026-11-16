@@ -8,9 +8,13 @@
 //! - 空行分隔的普通文本 → 一个 [`Block::Paragraph`]，段内换行以空格连接后 trim。
 //! - GFM 表格（`| a | b |` 紧跟 `| --- | --- |`）→ [`Block::Table`]，单元格 trim。
 //!   而是"表头 + 分隔行"却列数不一致（含数据行列数不符）→ `Err("表格第 N 行列数不符")`，N 从表头算 1。
-//! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`，`{ai}` → `ai_generated`，
-//!   可组合为 `{wide,ai}`，标记内逗号分隔并容忍空格）；连续 3 行图片（中间无空行）
-//!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`；任一张带 `{ai}` → 整组 `ai_generated`）。
+//! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`，`{ai}` → 该图 `item.ai`
+//!   且 `ai_generated`，可组合为 `{wide,ai}`，标记内逗号分隔并容忍空格）；连续 3 行图片
+//!   （中间无空行）→ 一个 `ThreeUp` + `per_image`（图注取各自 `[]`；每张的 `{ai}` 记到各自
+//!   `item.ai`，任一张带 `{ai}` → 整组 `ai_generated` 也为真）。
+//!   标记内**只认** `wide` / `ai`（大小写敏感）：出现其它 token 或空 token（如 `{AI}`、
+//!   `{width}`、`{wide,}`、`{}`）→ `Err("图片标记不识别: {tail}")`，tail 为花括号内原文，
+//!   绝不静默降级成段落（那会丢图）。
 //! - 围栏 ```` ```gantt [标题] ```` … ```` ``` ````（P1-5 §2）→ [`Block::Gantt`]：行格式
 //!   `开始..结束 | 工序名`；空行忽略，格式不符 / 未闭合 / 无工序各有独立 Err 文案。
 //! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
@@ -72,10 +76,11 @@ pub fn parse_markdown_with(
             continue;
         }
         // 图片：先吃掉整段连续图片行（空行即中断）。
-        if parse_image_line(text).is_some() {
-            let mut run = Vec::new();
+        if let Some(first) = parse_image_line(text)? {
+            let mut run = vec![first];
+            i += 1;
             while i < lines.len() {
-                match parse_image_line(lines[i].trim()) {
+                match parse_image_line(lines[i].trim())? {
                     Some(spec) => {
                         run.push(spec);
                         i += 1;
@@ -269,6 +274,8 @@ impl MdParser<'_> {
                     items.push(FigureItem {
                         path: resolve_image(self.base_dir, &spec.path)?,
                         caption: caption_of(&spec.caption),
+                        // 逐图标记：`{ai}` 只标本张，不串到同组其它图
+                        ai: spec.ai,
                     });
                 }
                 self.push_block(Block::Figure(FigureBlock {
@@ -276,7 +283,8 @@ impl MdParser<'_> {
                     items,
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
-                    // 任一张带 `{ai}` → 整组标记为 AI 生成（导出一致）
+                    // 组级标记：任一张带 `{ai}` → 整组 ai_generated（per_group 组图注要用；
+                    // per_image 逐图标注走各自 item.ai，见 fill::caption_text）
                     ai_generated: run[idx..idx + 3].iter().any(|spec| spec.ai),
                 }));
                 idx += 3;
@@ -290,6 +298,7 @@ impl MdParser<'_> {
                 let item = FigureItem {
                     path: resolve_image(self.base_dir, &spec.path)?,
                     caption: caption_of(&spec.caption),
+                    ai: spec.ai,
                 };
                 self.push_block(Block::Figure(FigureBlock {
                     layout,
@@ -402,44 +411,56 @@ struct ImageSpec {
     ai: bool,
 }
 
-fn parse_image_line(line: &str) -> Option<ImageSpec> {
-    let rest = line.trim().strip_prefix("![")?;
-    let close = rest.find("](")?;
+fn parse_image_line(line: &str) -> BidResult<Option<ImageSpec>> {
+    let Some(rest) = line.trim().strip_prefix("![") else {
+        return Ok(None);
+    };
+    let Some(close) = rest.find("](") else {
+        return Ok(None);
+    };
     let caption = &rest[..close];
     let after = &rest[close + 2..];
-    let rparen = after.rfind(')')?;
+    let Some(rparen) = after.rfind(')') else {
+        return Ok(None);
+    };
     let path = after[..rparen].trim();
     let tail = after[rparen + 1..].trim();
-    let (wide, ai) = parse_image_flags(tail)?;
+    let Some((wide, ai)) = parse_image_flags(tail)? else {
+        return Ok(None); // 行尾另有内容 → 不是整行图片，按普通段落
+    };
     if path.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(ImageSpec {
+    Ok(Some(ImageSpec {
         caption: caption.trim().to_string(),
         path: path.to_string(),
         wide,
         ai,
-    })
+    }))
 }
 
 /// 行尾标记 → `(wide, ai)`：`""` 表示无标记，`{a,b}` 内逗号分隔、容忍空格。
 ///
-/// `None` = 行尾还有别的内容（不是整行图片）。
-fn parse_image_flags(tail: &str) -> Option<(bool, bool)> {
+/// - `Ok(None)` = 行尾另有内容（不是整行图片），交由段落处理；
+/// - 标记内只认 `wide` / `ai`（大小写敏感），**其它 token 或空 token** 一律
+///   `Err("图片标记不识别: {tail}")`（tail = 花括号内原文）：静默降级会把整张图丢掉。
+fn parse_image_flags(tail: &str) -> BidResult<Option<(bool, bool)>> {
     if tail.is_empty() {
-        return Some((false, false));
+        return Ok(Some((false, false)));
     }
-    let inner = tail.strip_prefix('{')?.strip_suffix('}')?;
+    let Some(inner) = tail.strip_prefix('{').and_then(|t| t.strip_suffix('}')) else {
+        return Ok(None);
+    };
     let mut wide = false;
     let mut ai = false;
     for token in inner.split(',') {
         match token.trim() {
             "wide" => wide = true,
             "ai" => ai = true,
-            _ => return None,
+            _ => return Err(BidError::new(format!("图片标记不识别: {inner}"))),
         }
     }
-    Some((wide, ai))
+    Ok(Some((wide, ai)))
 }
 
 /// `#..######` + 必需的一个空格（`#` 独占一行也算标题）。
@@ -838,6 +859,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// N1 新测：未知/空图片标记 → Err 含"图片标记不识别"（不得静默降级成段落丢图）
+    #[test]
+    fn unknown_image_flag_rejected() {
+        let dir = tmp_dir("bad-flag");
+        for bad in ["{AI}", "{width}", "{wide,}", "{}"] {
+            let src = format!("# 标题\n\n## 示意图\n\n![图1]({IMAGE}){bad}\n");
+            let err = parse_markdown(&src, &dir).unwrap_err();
+            assert!(
+                err.to_string().contains("图片标记不识别"),
+                "bad={bad} 错误信息不符: {err}"
+            );
+        }
+        // 花括号内原文原样回显（tail）
+        let src = format!("# 标题\n\n## 示意图\n\n![图1]({IMAGE}){{wide,height}}\n");
+        let err = parse_markdown(&src, &dir).unwrap_err();
+        assert!(
+            err.to_string().contains("图片标记不识别: wide,height"),
+            "tail 应为花括号内原文: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 三栏里任一张带 `{ai}` → 整组 ai_generated = true
     #[test]
     fn three_up_ai_if_any() {
@@ -858,6 +901,9 @@ mod tests {
         assert_eq!(figs[0].layout, FigureLayout::ThreeUp);
         assert_eq!(figs[0].items.len(), 3);
         assert!(figs[0].ai_generated);
+        // 逐图标记：只有第 2 张带 `{ai}`，不得整组都置 true（N1）
+        let per_item: Vec<bool> = figs[0].items.iter().map(|i| i.ai).collect();
+        assert_eq!(per_item, vec![false, true, false], "item.ai 应逐图标记");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -44,7 +44,10 @@ CLI 位置：`gui/src-tauri/src/bin/bid_project.rs`（`cargo run --bin bid_proje
 - `figure_width_cm`：透传给导出层，`null` 用默认 15.5cm。
 
 Markdown 口径与 `bid_export --md` 完全一致（见 P1-1 规格 §1）：`##` 成章、`###`/`####` 成小节、
-GFM 表格、整行 `![图注](路径)` 成图（连写 3 行合成三栏图桌、`{wide}` 后缀为通栏图）。
+GFM 表格、整行 `![图注](路径)` 成图（连写 3 行合成三栏图桌、`{wide}` 后缀为通栏图、
+`{ai}` 后缀给**该张**图图注追加「（AI 生成示意图）」、`{wide,ai}` 可组合）。图片标记内只认
+`wide` / `ai`（大小写敏感），出现其它标记或空标记（`{AI}`、`{width}`、`{wide,}`、`{}`）→
+`ERROR 章节解析失败 …: 图片标记不识别: <花括号内原文>` + exit 2，不会静默丢图。
 图片相对路径一律按**项目根目录**（`<proj>/`）解析——`assets/` 与 `chapters/` 平级，
 所以 `chapters/01-概述.md` 里写 `![施工现场平面布置](assets/image3.png)`，
 指向 `<proj>/assets/image3.png`（写成 `chapters/assets/…` 会找不到图）。

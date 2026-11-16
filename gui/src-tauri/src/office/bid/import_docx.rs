@@ -821,6 +821,7 @@ mod tests {
                         items: vec![FigureItem {
                             path: image.to_string_lossy().to_string(),
                             caption: Some("图1-1 回环图".to_string()),
+                            ai: false,
                         }],
                         caption: String::new(),
                         caption_mode: CaptionMode::default(),

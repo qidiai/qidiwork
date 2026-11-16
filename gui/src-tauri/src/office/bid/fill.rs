@@ -238,12 +238,18 @@ fn render_gantt(gantt: &GanttBlock) -> BidResult<(String, usize)> {
         .map(|w| format!("<w:gridCol w:w=\"{w}\"/>"))
         .collect();
 
-    // 表头行：`工序` + 各桶起始日 `MM-DD`（桶按自然日切，从 min_start 起算）
+    // 表头行：`工序` + 各桶起始日（桶按自然日切，从 min_start 起算）。
+    // 跨年（min_start 与 max_end 不同年）时带年份 `YYYY-MM-DD`，否则仍 `MM-DD`（列窄）
+    let cross_year = ymd_from_days(min_start).0 != ymd_from_days(max_end).0;
     let mut header: Vec<String> = Vec::with_capacity(cols);
     header.push("工序".to_string());
     for b in 0..buckets {
-        let (_, month, day) = ymd_from_days(min_start + b * bucket_days);
-        header.push(format!("{month:02}-{day:02}"));
+        let (year, month, day) = ymd_from_days(min_start + b * bucket_days);
+        header.push(if cross_year {
+            format!("{year:04}-{month:02}-{day:02}")
+        } else {
+            format!("{month:02}-{day:02}")
+        });
     }
     let mut rows_xml = render_gantt_row(&widths, &header, None);
 
@@ -442,13 +448,18 @@ fn render_figure(
 }
 
 /// 图注文本（§4.2 唯一真值）：per_image 取 item.caption（single/wide 回退 fig.caption）；
-/// per_group 取 fig.caption；ai_generated 追加 style.figure.ai_label
+/// per_group 取 fig.caption；AI 标注按模式取：
+/// `per_image` → **逐图 `item.ai`**（同组非 AI 图不误标），
+/// `per_group` → 组级 `fig.ai_generated`（组图注只有一条）。
 fn caption_text(item: &FigureItem, fig: &FigureBlock, style: &DocStyle) -> String {
-    let base = match fig.caption_mode {
-        CaptionMode::PerImage => item.caption.clone().unwrap_or_else(|| fig.caption.clone()),
-        CaptionMode::PerGroup => fig.caption.clone(),
+    let (base, ai) = match fig.caption_mode {
+        CaptionMode::PerImage => (
+            item.caption.clone().unwrap_or_else(|| fig.caption.clone()),
+            item.ai,
+        ),
+        CaptionMode::PerGroup => (fig.caption.clone(), fig.ai_generated),
     };
-    if fig.ai_generated {
+    if ai {
         format!("{base}{}", style.figure.ai_label)
     } else {
         base
@@ -541,6 +552,7 @@ mod tests {
                             items: vec![FigureItem {
                                 path: img.clone(),
                                 caption: Some("图1-1 塘底整平与排水示意".to_string()),
+                                ai: true,
                             }],
                             caption: "图1-1 塘底整平与排水示意".to_string(),
                             caption_mode: CaptionMode::PerImage,
@@ -691,9 +703,9 @@ mod tests {
                 blocks: vec![Block::Figure(FigureBlock {
                     layout: FigureLayout::ThreeUp,
                     items: vec![
-                        FigureItem { path: img.clone(), caption: None },
-                        FigureItem { path: img.clone(), caption: None },
-                        FigureItem { path: img.clone(), caption: None },
+                        FigureItem { path: img.clone(), caption: None, ai: false },
+                        FigureItem { path: img.clone(), caption: None, ai: false },
+                        FigureItem { path: img.clone(), caption: None, ai: false },
                     ],
                     caption: "图1-1 三栏总示意".to_string(),
                     caption_mode: CaptionMode::PerGroup,
@@ -730,9 +742,9 @@ mod tests {
                 blocks: vec![Block::Figure(FigureBlock {
                     layout: FigureLayout::ThreeUp,
                     items: vec![
-                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()) },
-                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()) },
-                        FigureItem { path: img.clone(), caption: Some("图1-3 丙".to_string()) },
+                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()), ai: false },
+                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()), ai: false },
+                        FigureItem { path: img.clone(), caption: Some("图1-3 丙".to_string()), ai: false },
                     ],
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
@@ -753,6 +765,55 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// N1 新测：3 张里只有第 2 张带 `{ai}` → 导出件仅 1 条图注追加「（AI 生成示意图）」
+    #[test]
+    fn three_up_marks_only_ai_items() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-n1-ai-item-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("threeup-ai.docx");
+        let img = asset_png();
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Figure(FigureBlock {
+                    layout: FigureLayout::ThreeUp,
+                    items: vec![
+                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()), ai: false },
+                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()), ai: true },
+                        FigureItem { path: img.clone(), caption: Some("图1-3 丙".to_string()), ai: false },
+                    ],
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    // 组级也为真（Markdown 解析器口径：任一 item.ai → 组级 true），
+                    // 但 per_image 逐图标注只看各 item.ai，不得把同组非 AI 图一起标
+                    ai_generated: true,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        assert_eq!(doc.matches("BidCaption").count(), 3, "per_image 须 3 段图注: {doc}");
+        // 图注 run 里的标注只 1 处（descpr/descr 属性里也会带标注，故按 `</w:t>` 收尾计数）
+        assert_eq!(
+            doc.matches("（AI 生成示意图）</w:t>").count(),
+            1,
+            "只有第 2 张该带 AI 标注: {doc}"
+        );
+        assert!(
+            doc.contains("<w:t xml:space=\"preserve\">图1-2 乙（AI 生成示意图）</w:t>"),
+            "AI 标注应紧跟第 2 张图注: {doc}"
+        );
+        assert!(!doc.contains("图1-1 甲（AI 生成示意图）"), "第 1 张不得被误标: {doc}");
+        assert!(!doc.contains("图1-3 丙（AI 生成示意图）"), "第 3 张不得被误标: {doc}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// B2 新测 8：wide 1 图 → drawing=1 且 cx="6696000"（18.6cm 内容区全宽）
     #[test]
     fn wide_uses_full_content_width() {
@@ -766,7 +827,7 @@ mod tests {
                 title: "c".to_string(),
                 blocks: vec![Block::Figure(FigureBlock {
                     layout: FigureLayout::Wide,
-                    items: vec![FigureItem { path: img.clone(), caption: Some("图1-1 总平面".to_string()) }],
+                    items: vec![FigureItem { path: img.clone(), caption: Some("图1-1 总平面".to_string()), ai: false }],
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
                     ai_generated: false,
@@ -802,8 +863,8 @@ mod tests {
                 blocks: vec![Block::Figure(FigureBlock {
                     layout: FigureLayout::ThreeUp,
                     items: vec![
-                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()) },
-                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()) },
+                        FigureItem { path: img.clone(), caption: Some("图1-1 甲".to_string()), ai: false },
+                        FigureItem { path: img.clone(), caption: Some("图1-2 乙".to_string()), ai: false },
                     ],
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
@@ -1077,6 +1138,25 @@ mod tests {
         assert_eq!(doc.matches("BidCaption").count(), 0, "标题为空不加图注: {doc}");
         assert_eq!(doc.matches("<w:cantSplit/>").count(), 4, "每行都 cantSplit: {doc}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// N1 新测：跨年（2026-12-20..2027-01-10）→ 表头带年份 `YYYY-MM-DD`，不再只有 `MM-DD`
+    #[test]
+    fn cross_year_gantt_labels_include_year() {
+        let block = GanttBlock {
+            title: String::new(),
+            tasks: vec![gantt_task("跨年工序", "2026-12-20", "2027-01-10")],
+        };
+        let (xml, _) = render_gantt(&block).unwrap();
+        // span 22 天 → 7 天/桶 → 4 桶：12-20 / 12-27 / 01-03 / 01-10
+        assert_eq!(xml.matches("<w:gridCol").count(), 5, "1 + 4 桶: {xml}");
+        for label in ["2026-12-20", "2026-12-27", "2027-01-03", "2027-01-10"] {
+            assert!(xml.contains(label), "跨年表头缺 {label}: {xml}");
+        }
+        assert!(
+            !xml.contains(">12-20<") && !xml.contains(">01-03<"),
+            "跨年时必须带年份，不得退回 MM-DD: {xml}"
+        );
     }
 
     /// P1-5 §3.2：跨度 > 112 天 → 14 天/桶（2026-01-01..06-30 共 181 天 → 13 桶）

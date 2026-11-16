@@ -7,10 +7,20 @@
 //! `PAGES=<n> WORDS=<m>`，Rust 侧解析。
 //!
 //! 平台：仅 Windows（需本机装 WPS 且 COM 已注册）；其他平台 `measure` 直接返回 Err。
+//!
+//! 超时兜底：WPS 偶发卡在 `Repaginate()`，子进程最长等 90s（每 200ms `try_wait`），
+//! 超时 → `kill()` + 回收 → `Err("页数测量超时（90s）")`，绝不无限阻塞调用方。
 
 use std::path::Path;
+#[cfg(windows)]
+use std::time::{Duration, Instant};
 
 use super::{BidError, BidResult};
+
+/// 子进程最长等待（WPS 卡死时必须有上限，否则 GUI 命令永久挂起）
+const MEASURE_TIMEOUT: Duration = Duration::from_secs(90);
+/// `try_wait` 轮询间隔
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// 实测页数 / 字数（WPS 渲染后统计，非字符数估算）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +34,8 @@ pub struct PageStat {
 /// 内联 PowerShell 脚本（Windows 专用）。
 ///
 /// 要点：
-/// - `OutputEncoding=UTF8`：重定向输出按 UTF-8 解码，异常信息不乱码；
+/// - `OutputEncoding` / `ErrorEncoding` 均为 UTF8：重定向输出按 UTF-8 解码，
+///   stdout 与 stderr（中文异常信息）都不乱码；
 /// - 先 `Get-Process wps` 判断是否已有实例，**只在自己拉起实例时** `Quit()`，
 ///   避免关掉用户正在编辑的窗口；
 /// - `Documents.Open($env:BID_DOCX, $false, $true)` 第三参 `$true` = 只读；
@@ -32,7 +43,10 @@ pub struct PageStat {
 /// - 正常输出单行 `PAGES=<n> WORDS=<m>`；异常写 stderr 并让退出码非 0。
 #[cfg(windows)]
 const SCRIPT: &str = r#"$ErrorActionPreference = 'Stop'
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::ErrorEncoding = [System.Text.Encoding]::UTF8
+} catch { }
 $docxPath = $env:BID_DOCX
 if (-not $docxPath) { [Console]::Error.WriteLine('BID_DOCX 为空'); exit 3 }
 if (-not (Test-Path -LiteralPath $docxPath)) { [Console]::Error.WriteLine(('文件不存在: ' + $docxPath)); exit 3 }
@@ -79,12 +93,38 @@ pub fn measure(docx: &Path) -> BidResult<PageStat> {
     let abs = dunce::canonicalize(docx)
         .map_err(|e| BidError::new(format!("路径解析失败 {}: {e}", docx.display())))?;
 
-    let output = std::process::Command::new("powershell")
+    // 不用 output()（无超时无上限）：spawn + 轮询 90s，超时 kill 并回收
+    let mut child = std::process::Command::new("powershell")
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", SCRIPT])
         .env("BID_DOCX", &abs)
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| BidError::new(format!("启动 PowerShell 失败: {e}")))?;
+
+    let deadline = Instant::now() + MEASURE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break, // 已退出：下面读输出
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // 回收，避免僵尸进程
+                    return Err(BidError::new("页数测量超时（90s）"));
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BidError::new(format!("等待 PowerShell 进程失败: {e}")));
+            }
+        }
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|e| BidError::new(format!("读取 PowerShell 输出失败: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -144,4 +184,38 @@ fn parse_count(raw: &str) -> Option<u32> {
 #[cfg(not(windows))]
 pub fn measure(_docx: &Path) -> BidResult<PageStat> {
     Err(BidError::new("页数测量仅支持 Windows（需本机 WPS）"))
+}
+
+// ---------------------------------------------------------------------------
+// 单测：真实测量要 COM + WPS（CI 不可用），此处覆盖 `parse_output` 的异常分支
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, windows))]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    /// 正常输出：容忍噪点行与千分位逗号
+    #[test]
+    fn parse_output_accepts_noise_and_thousands() {
+        let stat = parse_output("some noise\nPAGES=12 WORDS=1,234\n").unwrap();
+        assert_eq!(stat, PageStat { pages: 12, words: 1234 });
+    }
+
+    /// 页数为 0（WPS 未重排版/统计失败）→ Err 且含"页数 0"
+    #[test]
+    fn parse_output_rejects_zero_pages() {
+        let err = parse_output("PAGES=0 WORDS=10").unwrap_err();
+        assert!(err.to_string().contains("页数 0"), "错误信息不符: {err}");
+    }
+
+    /// 缺 `PAGES=` / `WORDS=` → Err 且含"无法解析页数输出"
+    #[test]
+    fn parse_output_rejects_garbage() {
+        let err = parse_output("ComObject 未注册").unwrap_err();
+        assert!(
+            err.to_string().contains("无法解析页数输出"),
+            "错误信息不符: {err}"
+        );
+    }
 }

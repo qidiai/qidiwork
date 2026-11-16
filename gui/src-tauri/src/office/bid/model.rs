@@ -168,6 +168,9 @@ pub enum CaptionMode { #[default] PerImage, PerGroup }
 pub struct FigureItem {
     pub path: String,
     #[serde(default)] pub caption: Option<String>,
+    /// 该张图片本身是 AI 生成示意图（Markdown 里 `{ai}` 写在图片行尾）：
+    /// `per_image` 时**逐图**决定是否追加 `figure.ai_label`，同组其它图不受影响。
+    #[serde(default)] pub ai: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -411,7 +414,7 @@ mod tests {
     }
 
     fn item(path: &str, caption: Option<&str>) -> FigureItem {
-        FigureItem { path: path.to_string(), caption: caption.map(str::to_string) }
+        FigureItem { path: path.to_string(), caption: caption.map(str::to_string), ai: false }
     }
 
     /// B2 新测 1：single 传 2 张图 → Err 且含"单图/宽图只能有 1 张图"

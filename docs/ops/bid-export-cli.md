@@ -89,6 +89,11 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 - 首行 `| a | b |` 紧跟分隔行 `| --- | --- |` → GFM 表格（首行表头，其余数据行，列数以表头为准）。
 - `![图注](路径)` 单行 → 单图 `single`（无图注可写 `![](...)`）。
 - `![图注](路径){wide}` → 宽图 `wide`（内容区全宽 18.6cm）。
+- `![图注](路径){ai}` → 该图图注追加「（AI 生成示意图）」；**只标写了 `{ai}` 的那张**，
+  三栏组图里同组其它图不受影响（逐图 `item.ai`）。
+- `{wide,ai}` 可组合（逗号分隔、容忍空格）。标记内**只认** `wide` / `ai`（大小写敏感），
+  出现其它 token 或空 token（`{AI}`、`{width}`、`{wide,}`、`{}`）→
+  `ERROR Markdown 解析失败: 图片标记不识别: <花括号内原文>` + exit 2，不再静默降级成段落丢图。
 - 连续 3 行图片（行间无空行）→ 三栏组图 `three_up` + 逐图图注。
 - 围栏 ```` ```gantt [标题] ```` … ```` ``` ```` → 原生表格横道图（P1-5，无图片、无新依赖）：
   每行一个工序，写作 `开始..结束 | 工序名`（`YYYY-MM-DD`，含首含尾），空行忽略，
@@ -108,7 +113,8 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 ```
 ````
 
-- 表头行 `工序` + 各桶起始日 `MM-DD`；任务覆盖的桶填 `#4877AC` 底纹（判定
+- 表头行 `工序` + 各桶起始日（同年写 `MM-DD`；`min_start` 与 `max_end` **跨年**时改带年份
+  `YYYY-MM-DD`）；任务覆盖的桶填 `#4877AC` 底纹（判定
   `task_start < bucket_end && task_end >= bucket_start`），其余桶留空。
 - 表格复用 `tblStyle=BidTable`；**所有单元格（含表头行）一律 `BidTableBody`，不用 `BidTableHeader`**，
   因此业务表计数 `doc.tables` / `check.sh tables` 不受横道图影响。
@@ -219,7 +225,10 @@ EXPORT OK
 - `figure.layout`：`single` / `wide` / `three_up`；`three_up` 不足三张时补空单元格，不拉伸、不报错。
 - `figure.caption_mode`：`per_image`（逐图图注，默认）/ `per_group`（整组一条图注）。
 - `figure.items[].path` 支持相对路径（按**请求 JSON 所在目录**解析，与 `bid_smoke` 同口径）与绝对路径。
-- `ai_generated: true` 时图注自动追加「（AI 生成示意图）」标识。
+- `figure.items[].ai`（默认 `false`）逐图标 AI：`per_image` 时**只**给 `ai: true` 的那张图注追加
+  「（AI 生成示意图）」；`per_group` 时按组级 `ai_generated` 决定（组图注只有一条）。
+- `ai_generated: true` 时该组图注自动追加「（AI 生成示意图）」标识（组级判定；`per_image` 下以
+  `items[].ai` 为准，任一 `items[].ai` 为真时 `ai_generated` 也应为真，供 `per_group` 用）。
 - 请求 JSON 里的多余字段（如 fixture 的 `expect`）被忽略，可直接复用 `gui/tests/bid-export/` 下的夹具。
 
 ## 退出码

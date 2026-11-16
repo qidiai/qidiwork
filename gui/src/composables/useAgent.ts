@@ -92,7 +92,10 @@ interface AcpEvent {
   /** 桥原样透传的 ACP `PermissionOption`,键为 camelCase `optionId`。 */
   options?: { optionId: string; name: string; kind?: string }[];
   stop_reason?: string;
-  /** permission_cancelled 事件:权限失效原因(bridge_restart | turn_ended)。 */
+  /**
+   * permission_cancelled 事件:权限失效原因(bridge_restart | turn_ended | timeout)。
+   * 带上 request_id 时只失效该条(超时);不带表示整会话失效。
+   */
   reason?: string;
   session_restored?: never;
   error?: string;
@@ -679,14 +682,21 @@ async function onAcpEvent(ev: AcpEvent) {
       break;
     }
     case "permission_cancelled": {
-      // 权限失效上行:桥重启或回合终止后旧条目已无法应答,本地必须清掉(否则僵尸对话框);
-      // 该会话仍 busy 时一并解除(回合终止事件可能已被 queue_lagged 丢弃)。
+      // 权限失效上行:桥重启(agent 退出)/回合终止/超时后旧条目已无法应答,本地必须清掉(否则僵尸对话框)。
+      // 带 request_id(超时)→ 只移除那一条:回合还在跑,同类请求仍可应答,busy 不能清;
+      // 不带(bridge_restart | turn_ended)→ 整会话失效,清空队列并在该会话仍 busy 时一并解除
+      // (回合终止事件可能已被 queue_lagged 丢弃)。
       const sid = ev.session_id ?? "";
-      permissionQueue.value = permissionQueue.value.filter((p) => p.sessionId !== sid);
-      const bucket = bucketOf(sid);
-      if (bucket?.busy) {
-        bucket.busy = false;
-        bucket.flushing = false;
+      const rid = ev.request_id;
+      permissionQueue.value = permissionQueue.value.filter((p) =>
+        rid === undefined ? p.sessionId !== sid : !(p.sessionId === sid && p.requestId === rid)
+      );
+      if (rid === undefined) {
+        const bucket = bucketOf(sid);
+        if (bucket?.busy) {
+          bucket.busy = false;
+          bucket.flushing = false;
+        }
       }
       // 删除中/已删除不提示:失效是删除的预期结果,不能把错误写进当前视图
       pushPermissionNotice(sid, `权限已失效：${ev.reason ?? "unknown"}`);

@@ -259,6 +259,49 @@ pub fn update_dir() -> PathBuf {
     std::env::temp_dir().join(UPDATE_DIR_NAME)
 }
 
+// ---------------------------------------------------------------- 校验收尾
+
+/// 下载地址只允许 `https://`。
+///
+/// 明文的 `http://` 可被中间人整包替换(再配上清单被改的风险),安装包一律走 TLS;
+/// 其它 scheme(`file:` / `ftp:`…)同样拒绝。大小写不敏感、容忍首尾空白。
+fn require_https(url: &str) -> Result<(), String> {
+    if url.trim().to_ascii_lowercase().starts_with("https://") {
+        Ok(())
+    } else {
+        Err("更新地址必须是 https".to_string())
+    }
+}
+
+/// 是否可标记为「已验证」(纯函数,便于覆盖各失败分支)。
+///
+/// 清单未给 sha256(空串)→ 一律 false(**不报错**,过渡态);sha 不匹配 → false;
+/// 摘要对得上时以验签结果为准。
+fn resolve_verified(expected_sha: &str, actual_sha: &str, sig_ok: bool) -> bool {
+    let expected = expected_sha.trim();
+    if expected.is_empty() || !sha256_matches(expected, actual_sha) {
+        return false;
+    }
+    sig_ok
+}
+
+/// 校验结果的收尾闸:Ok 原样返回;Err → **先删除已落盘的安装包**再上抛。
+///
+/// 校验失败的文件不可信(被篡改/半截),留在更新目录里会被用户手动双击运行
+/// (§U 纪律:宁可让用户重来)。抽成函数以便测试真实删盘行为。
+async fn settle_verification(
+    target: &std::path::Path,
+    verdict: Result<bool, String>,
+) -> Result<bool, String> {
+    match verdict {
+        Ok(verified) => Ok(verified),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(target).await;
+            Err(e)
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 下载
 
 /// 下载安装包到 `%TEMP%\qidiwork-update\<文件名>`。
@@ -288,10 +331,7 @@ pub async fn download_update_versioned(
     if url.is_empty() {
         return Err("下载地址为空".to_string());
     }
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return Err(format!("下载地址必须是 http(s): {url}"));
-    }
+    require_https(url)?;
     let expected = sha256.trim();
     if !expected.is_empty() && parse_sha256_hex(expected).is_none() {
         return Err("清单里的 sha256 不是 64 位十六进制".to_string());
@@ -370,13 +410,13 @@ pub async fn download_update_versioned(
         return Err(format!("sha256 校验失败:期望 {expected},实际 {actual_hex}"));
     }
 
-    let verified = match check_signature(configured_pubkey(), &digest, sig) {
-        Ok(ok) => ok && !expected.is_empty(),
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&target).await;
-            return Err(format!("签名校验失败:{e}"));
-        }
-    };
+    let verified = settle_verification(
+        &target,
+        check_signature(configured_pubkey(), &digest, sig)
+            .map(|sig_ok| resolve_verified(expected, &actual_hex, sig_ok)),
+    )
+    .await
+    .map_err(|e| format!("签名校验失败:{e}"))?;
 
     Ok(DownloadedUpdate {
         path: target.to_string_lossy().into_owned(),
@@ -453,6 +493,109 @@ mod tests {
         assert!((1, 0, 0) > (0, 9, 9));
         assert!((0, 1, 2) > (0, 1, 1));
         assert!(!((0, 1, 1) > (0, 1, 1)));
+    }
+
+    // ---------------------------------------------------------- 地址协议
+
+    #[test]
+    fn http_url_rejected() {
+        // 明文 http 一律拒绝(可被中间人整包替换)
+        assert_eq!(
+            require_https("http://qidiwork.qidiai.ltd/releases/a.exe"),
+            Err("更新地址必须是 https".to_string())
+        );
+        // 大小写不敏感,但 scheme 本身必须是 https
+        assert!(require_https("HTTP://x/a.exe").is_err());
+        // 其它 scheme / 相对形态 / 空串
+        assert!(require_https("file:///c:/evil.exe").is_err());
+        assert!(require_https("ftp://x/a.exe").is_err());
+        assert!(require_https("//x/a.exe").is_err());
+        assert!(require_https("").is_err());
+        // 混淆前缀(https 出现在非 scheme 位置)不算通过
+        assert!(require_https("http://x/https://a.exe").is_err());
+    }
+
+    #[test]
+    fn https_url_accepted() {
+        assert!(require_https("https://qidiwork.qidiai.ltd/releases/a.exe").is_ok());
+        // 首尾空白与大写 scheme 容忍
+        assert!(require_https("  HTTPS://Example.ORG/a.exe  ").is_ok());
+        // 带 query 也算合法地址(文件名收敛另有处理)
+        assert!(require_https("https://x/a.exe?token=1").is_ok());
+    }
+
+    // ---------------------------------------------------------- 失败路径(删文件)
+
+    #[test]
+    fn verified_requires_matching_sha_and_signature() {
+        let hex = sha256_hex(b"payload");
+        let other = sha256_hex(b"payload-tampered");
+
+        // 摘要对 + 验签过 → true
+        assert!(resolve_verified(&hex, &hex, true));
+        // 摘要对但验签不过 → false
+        assert!(!resolve_verified(&hex, &hex, false));
+        // 摘要不匹配 → false(即便验签声称通过)
+        assert!(!resolve_verified(&hex, &other, true));
+        // 清单未给 sha256(空/空白)→ false 且不 panic、不报错
+        assert!(!resolve_verified("", &hex, true));
+        assert!(!resolve_verified("   ", &hex, true));
+        // 畸形摘要 → false
+        assert!(!resolve_verified("zz", &hex, true));
+    }
+
+    #[test]
+    fn signature_failure_deletes_downloaded_file() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pubkey_b64 = B64.encode(sk.verifying_key().to_bytes());
+        let digest = [3u8; 32];
+        // 配了公钥但签名是伪造的(另一把密钥签)
+        let forged = B64.encode(SigningKey::from_bytes(&[8u8; 32]).sign(&digest).to_bytes());
+        let verdict = check_signature(Some(&pubkey_b64), &digest, Some(&forged))
+            .map(|sig_ok| resolve_verified(&hex_of(&digest), &hex_of(&digest), sig_ok));
+        assert!(verdict.is_err(), "公钥已配置 + 签名错误必须 Err");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let target = update_dir().join(format!("settle-test-{}.exe", std::process::id()));
+        std::fs::create_dir_all(update_dir()).unwrap();
+        std::fs::write(&target, b"untrusted-bytes").unwrap();
+        assert!(target.exists());
+
+        let err = rt
+            .block_on(settle_verification(&target, verdict))
+            .expect_err("校验失败必须上抛");
+        assert!(err.contains("验签"), "错误信息应说明验签失败: {err}");
+        assert!(!target.exists(), "校验失败必须删掉已落盘的安装包");
+    }
+
+    #[test]
+    fn verification_ok_keeps_file() {
+        let hex = sha256_hex(b"payload");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let target = update_dir().join(format!("settle-ok-{}.exe", std::process::id()));
+        std::fs::create_dir_all(update_dir()).unwrap();
+        std::fs::write(&target, b"trusted-bytes").unwrap();
+
+        // 空 sha(清单未给)→ verified=false,但**不删文件、不报错**
+        let verified = rt
+            .block_on(settle_verification(
+                &target,
+                Ok(resolve_verified("", &hex, true)),
+            ))
+            .unwrap();
+        assert!(!verified);
+        assert!(target.exists(), "未验证 ≠ 失败,文件应保留");
+
+        // 摘要不匹配判定为 false(真实下载路径会在此之前已删文件并返回 Err)
+        assert!(!resolve_verified(&hex, &sha256_hex(b"other"), false));
+
+        let _ = std::fs::remove_file(&target);
     }
 
     // ---------------------------------------------------------- sha256

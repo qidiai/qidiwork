@@ -61,15 +61,25 @@ pub enum BridgeEvent {
         tool_call: serde_json::Value,
         options: serde_json::Value,
     },
-    /// A pending permission request became void: either the bridge dropped its
-    /// pending table (bridge restart / agent exit) or the turn that asked for
-    /// it has ended. The frontend drops the matching permission queue entry and
-    /// clears a stuck `busy` flag, so no zombie dialog survives.
-    /// The old `request_id` is deliberately NOT re-sent: once the connection or
-    /// the turn is gone, the kernel side id is dead too (see the
-    /// pending-interaction semantics in the kernel).
+    /// A pending permission request became void: the bridge dropped its pending
+    /// table (bridge restart / agent exit), the turn that asked for it has
+    /// ended, the session was removed, or the per-request deadline expired.
+    /// The frontend drops the matching permission queue entry and clears a
+    /// stuck `busy` flag, so no zombie dialog survives.
+    ///
+    /// `request_id` scope of validity:
+    /// - `Some(id)` (timeout only): **that single** request is void; the turn is
+    ///   still running, sibling requests stay answerable. The frontend removes
+    ///   just that entry and must NOT clear `busy`.
+    /// - `None` (bridge_restart / turn_ended / session_removed): the whole
+    ///   session's pending set is gone; no id is re-sent because once the
+    ///   connection or the turn is gone the kernel side id is dead too (see
+    ///   the pending-interaction semantics in the kernel). The frontend clears
+    ///   the session's queue.
     PermissionCancelled {
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
         reason: String,
     },
     /// agent 传输断开(崩溃/被杀)。恢复编排:`reconnect`。
@@ -450,6 +460,7 @@ impl AcpBridge {
             }
             let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
                 session_id: session_id.to_string(),
+                request_id: None, // 整会话失效:前端清空该会话队列
                 reason: "session_removed".to_string(),
             });
         }
@@ -500,6 +511,7 @@ impl AcpBridge {
             let _ = self.transport.send(resp.to_string());
             let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
                 session_id: entry.session_id.clone(),
+                request_id: None, // 整会话失效:前端清空该会话队列
                 reason: "bridge_restart".to_string(),
             });
         }
@@ -765,6 +777,7 @@ impl AcpBridge {
         for _ in 0..dropped {
             let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
                 session_id: session_id.to_string(),
+                request_id: None, // 整会话失效:前端清空该会话队列
                 reason: reason.to_string(),
             });
         }
@@ -832,6 +845,7 @@ impl AcpBridge {
             }
             let _ = event_tx.send(BridgeEvent::PermissionCancelled {
                 session_id: entry.session_id,
+                request_id: Some(request_id), // 单条失效:前端只移除该条
                 reason: "timeout".to_string(),
             });
         });
@@ -1503,11 +1517,13 @@ mod tests {
 
     /// PermissionCancelled serde shape: the frontend parses the `type` tag plus
     /// `session_id` / `reason`; the bridge_restart and turn_ended triggers share
-    /// this exact shape.
+    /// this exact shape, and `request_id` is omitted when absent (whole-session
+    /// invalidation) so the frontend keeps the "clear the session queue" path.
     #[test]
     fn permission_cancelled_serializes_to_type_tag() {
         let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
             session_id: "sess-1".to_string(),
+            request_id: None,
             reason: "bridge_restart".to_string(),
         })
         .unwrap();
@@ -1526,12 +1542,35 @@ mod tests {
     fn permission_cancelled_turn_ended_reason() {
         let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
             session_id: "sess-2".to_string(),
+            request_id: None,
             reason: "turn_ended".to_string(),
         })
         .unwrap();
         assert_eq!(v["type"], serde_json::json!("permission_cancelled"));
         assert_eq!(v["session_id"], serde_json::json!("sess-2"));
         assert_eq!(v["reason"], serde_json::json!("turn_ended"));
+        assert!(v.get("request_id").is_none(), "None 不得出现在线上: {v}");
+    }
+
+    /// The timeout trigger carries the single void request id (frontend removes
+    /// only that entry and keeps `busy`).
+    #[test]
+    fn permission_cancelled_timeout_carries_request_id() {
+        let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
+            session_id: "sess-3".to_string(),
+            request_id: Some(42),
+            reason: "timeout".to_string(),
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "permission_cancelled",
+                "session_id": "sess-3",
+                "request_id": 42,
+                "reason": "timeout"
+            })
+        );
     }
 
     fn img(data: &str, mime: &str) -> ImagePayload {
@@ -1877,16 +1916,21 @@ mod tests {
             panic!("权限请求 {request_id} 未在 500ms 内落表");
         }
 
-        /// 等 `reason="timeout"` 的 `PermissionCancelled`,返回 (session_id, reason)。
+        /// 等 `reason="timeout"` 的 `PermissionCancelled`,返回
+        /// (session_id, reason, request_id)。
         async fn wait_timeout_event(
             events: &mut broadcast::Receiver<BridgeEvent>,
-        ) -> (String, String) {
+        ) -> (String, String, Option<u64>) {
             let wait = async {
                 loop {
                     match events.recv().await {
-                        Ok(BridgeEvent::PermissionCancelled { session_id, reason }) => {
+                        Ok(BridgeEvent::PermissionCancelled {
+                            session_id,
+                            reason,
+                            request_id,
+                        }) => {
                             if reason == "timeout" {
-                                return (session_id, reason);
+                                return (session_id, reason, request_id);
                             }
                         }
                         Ok(_) => {}
@@ -1917,9 +1961,11 @@ mod tests {
                 .await
                 .expect("send frame");
 
-            let (session_id, reason) = wait_timeout_event(&mut events).await;
+            let (session_id, reason, request_id) = wait_timeout_event(&mut events).await;
             assert_eq!(session_id, "s1");
             assert_eq!(reason, "timeout");
+            // 超时事件必须精确带出失效的请求 id(前端只移除该条,不动 busy)
+            assert_eq!(request_id, Some(7));
 
             let frames = transport.sent_frames();
             assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
@@ -1974,8 +2020,9 @@ mod tests {
                 .await
                 .expect("send frame");
 
-            let (_session_id, reason) = wait_timeout_event(&mut events).await;
+            let (_session_id, reason, request_id) = wait_timeout_event(&mut events).await;
             assert_eq!(reason, "timeout");
+            assert_eq!(request_id, Some(11));
 
             let frames = transport.sent_frames();
             assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
@@ -2033,8 +2080,9 @@ mod tests {
                     .await
                     .expect("send frame");
 
-                let (_session_id, reason) = wait_timeout_event(&mut events).await;
+                let (_session_id, reason, rid) = wait_timeout_event(&mut events).await;
                 assert_eq!(reason, "timeout", "[{label}]");
+                assert_eq!(rid, Some(request_id), "[{label}] 必须带出本条请求 id");
 
                 let frames = transport.sent_frames();
                 assert_eq!(frames.len(), 1, "[{label}] 超时只回一条: {frames:?}");

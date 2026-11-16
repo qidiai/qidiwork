@@ -131,3 +131,18 @@ Compress-Archive -Path target\release\bid_export.exe,target\release\bid_import.e
   `qidiwork-setup-x.y.z.exe` / `qidiwork-cli-x.y.z-win64.zip`（都放 `prod/releases/`）；
 - 所有 CLI 命令都带 `-p qidiwork-cli`，例如 `cargo run -p qidiwork-cli --bin bid_export -- …`，
   其余参数口径不变（见 `docs/ops/bid-export-cli.md`、`bid-project.md`、`bid-import.md`）。
+## 10. CLI 拆分后的打包实测（2026-11-16 23:20）
+
+按方案 v1.1 把 6 个 CLI 拆到 `gui/src-tauri/cli`（crate `qidiwork-cli`）后，**干净重建**结果：
+
+| 项 | 值 |
+|---|---|
+| 安装包 | `QidiWork Workbench_0.1.11_x64-setup.exe`，**38,761,559 B**（较拆分前 39,321,489 B 少 0.56 MB） |
+| sha256（前 32） | `bdc5279ae76744083cc81d6aa128e1d311ea577f…` |
+| NSI 载荷 | `qidiwork.exe`（内核）+ `templatesid-engineering-blue-v1.docx`；主程序走 `MAINBINARYSRCPATH` |
+| `bid_*` 残留 | `grep -c "bid_" installer.nsi` = **0** |
+| 安装目录 | `qidiwork-gui.exe`(18.86 MB) + `qidiwork.exe`(132.5 MB) + `templates\` + `uninstall.exe`，**无任何 CLI 可执行文件** |
+| 安装态自检 | `RESOLVED_SOURCE=resource`（命中安装目录） |
+
+> 注：NSIS 模板仍会输出 `; Copy external binaries` / `; Delete external binaries` 两行**空段落头**（无任何 File/Delete 条目）。判据以"`bid_` 行数 == 0 + 安装目录无 CLI"为准，不以段落头是否存在为准。
+

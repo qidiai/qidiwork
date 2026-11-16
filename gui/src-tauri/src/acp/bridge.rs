@@ -10,6 +10,8 @@
 //! - 断连时对挂起权限回 `cancelled` 应答后再清理;
 //! - initialize 校验 `result.protocolVersion`,不匹配即失败;
 //! - 路由循环内不 await 写队列(防御性拒绝走 best-effort 后台任务);
+//! - 权限请求带 per-request 截止时间(默认 120s):到期仍无人回填即按
+//!   **拒绝**回应 agent,**绝不自动 allow**(缺口:见 `spawn_permission_timeout`);
 //! - 注意 `PROMPT_TIMEOUT` 超时 ≠ 取消:超时只发 TurnCompleted 错误事件,
 //!   agent 侧仍在跑,真正中断需配合 `session/cancel`(M4 编排)。
 
@@ -22,6 +24,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 use crate::acp::jsonrpc::{self, ACP_PROTOCOL_VERSION, ERR_METHOD_NOT_FOUND, Incoming};
 use crate::transport::{AgentTransport, ExitInfo, TransportError};
@@ -29,6 +32,10 @@ use crate::transport::{AgentTransport, ExitInfo, TransportError};
 /// 单个 RPC 的默认超时。session/prompt 的回合可能跑很久,单独放宽。
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// 单条权限请求的默认截止时间(per-request)。到期仍无人回填 → 按**拒绝**
+/// 回应 agent 并广播 `PermissionCancelled{reason:"timeout"}`,**绝不自动 allow**。
+/// 与 `PROMPT_TIMEOUT` 无关:后者只防前端无限等 `session/prompt` 应答。
+const DEFAULT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// 展示流(桥 → 前端转发任务)的 broadcast 容量。256 在长回合密集
 /// session/update 下易被追平 → Lagged 丢帧,最坏丢 TurnCompleted 使
 /// 前端 busy 永久卡住(见 useAgent.ts 头部注释)。提到 1024 降低触发
@@ -143,6 +150,12 @@ struct PermissionEntry {
     session_id: String,
     /// agent 给出的全部合法选项 id,回填时校验。
     option_ids: Vec<String>,
+    /// 该请求里 `kind` 含 `reject` 的选项 id(`reject_once` / `reject_always`)。
+    /// 超时按拒绝处理时用它回填;缺失则退化为 `cancelled`(绝不 allow)。
+    reject_option: Option<String>,
+    /// 截止时刻(落表时 = now + `permission_timeout`)。超时任务只有复核
+    /// `deadline <= now` 才会动手,避免早醒误杀仍在有效期内的请求。
+    deadline: Instant,
 }
 
 /// 在途 RPC 应答回传通道。
@@ -156,6 +169,8 @@ pub struct AcpBridge {
     pending: Arc<Mutex<HashMap<u64, PendingTx>>>,
     /// 在途权限请求:id → 登记(会话 + 合法选项)。
     permission_pending: Arc<Mutex<HashMap<u64, PermissionEntry>>>,
+    /// 单条权限请求的截止时间(默认 [`DEFAULT_PERMISSION_TIMEOUT`],测试可注入)。
+    permission_timeout: Duration,
     event_tx: broadcast::Sender<BridgeEvent>,
     sessions: Mutex<Vec<SessionRecord>>,
     /// 每会话最近一次模型状态(内核应答原样缓存;查询走 model_state)。
@@ -185,6 +200,50 @@ fn option_ids_of(params: &serde_json::Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 取权限请求里「拒绝」选项的 id,供超时按拒绝回填时使用。
+///
+/// 判定只看 `kind` 是否含 `reject`(`reject_once` / `reject_always`,以及
+/// schema 后续可能新增的 reject 变体);与 [`option_ids_of`] 同样读线上
+/// camelCase 的 `optionId`。没有 reject 选项 → `None`,超时改走 `cancelled`。
+fn reject_option_of(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("options")
+        .and_then(|o| o.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|o| {
+                let kind = o.get("kind").and_then(|k| k.as_str())?;
+                if !kind.to_ascii_lowercase().contains("reject") {
+                    return None;
+                }
+                o.get("optionId").and_then(|i| i.as_str()).map(String::from)
+            })
+        })
+}
+
+/// 构造并发送一条权限结果应答(`result.outcome.{outcome,optionId}`)。
+///
+/// 抽成自由函数是因为超时任务只持有克隆出来的 `transport`(它借不到桥:
+/// `handle_agent_request` 拿的是 `&self`,Arc 的强引用不能从 `&self` 复制)。
+fn send_permission_outcome_on(
+    transport: &dyn AgentTransport,
+    request_id: u64,
+    session_id: &str,
+    outcome: &str,
+    option_id: Option<&str>,
+) -> Result<(), String> {
+    let mut outcome_value = serde_json::json!({ "outcome": outcome });
+    if let Some(oid) = option_id {
+        outcome_value["optionId"] = serde_json::Value::String(oid.to_string());
+    }
+    let resp =
+        jsonrpc::success_response(request_id, serde_json::json!({ "outcome": outcome_value }));
+    transport
+        .send(resp.to_string())
+        .map_err(|e| format!("发送权限应答失败: {e}"))?;
+    tracing::info!(request_id, %session_id, %outcome, ?option_id, "权限已回填");
+    Ok(())
 }
 
 /// 解析 `_x.ai/usage_update` 扩展通知 params。线上键为 camelCase
@@ -267,6 +326,22 @@ impl AcpBridge {
     /// 挂到传输层:取走行接收端(唯一消费者)并启动路由循环。
     /// 返回的桥同时是事件源(`subscribe`)。
     pub fn attach(transport: Arc<dyn AgentTransport>) -> Result<Arc<Self>, TransportError> {
+        Self::attach_with_timeout(transport, DEFAULT_PERMISSION_TIMEOUT)
+    }
+
+    /// 测试注入点:权限超时可控(公开 `attach` 签名保持不变)。
+    #[cfg(test)]
+    pub(crate) fn new_with_timeout(
+        transport: Arc<dyn AgentTransport>,
+        permission_timeout: Duration,
+    ) -> Result<Arc<Self>, TransportError> {
+        Self::attach_with_timeout(transport, permission_timeout)
+    }
+
+    fn attach_with_timeout(
+        transport: Arc<dyn AgentTransport>,
+        permission_timeout: Duration,
+    ) -> Result<Arc<Self>, TransportError> {
         let line_rx = transport.take_line_receiver()?;
         let (event_tx, _) = broadcast::channel(EVENT_CAPACITY);
         let bridge = Arc::new(Self {
@@ -275,6 +350,7 @@ impl AcpBridge {
             initialized: AtomicBool::new(false),
             pending: Arc::new(Mutex::new(HashMap::new())),
             permission_pending: Arc::new(Mutex::new(HashMap::new())),
+            permission_timeout,
             event_tx,
             sessions: Mutex::new(Vec::new()),
             model_states: Mutex::new(HashMap::new()),
@@ -562,6 +638,8 @@ impl AcpBridge {
                 .unwrap_or("")
                 .to_string();
             let option_ids = option_ids_of(&params);
+            let reject_option = reject_option_of(&params);
+            let deadline = Instant::now() + self.permission_timeout;
             // known 检查、在途登记与发射同处一锁:删除后不得再弹过期审批。
             let accepted = {
                 let sessions = self
@@ -580,6 +658,8 @@ impl AcpBridge {
                             PermissionEntry {
                                 session_id: session_id.clone(),
                                 option_ids,
+                                reject_option,
+                                deadline,
                             },
                         );
                     let _ = self.event_tx.send(BridgeEvent::PermissionRequest {
@@ -600,7 +680,10 @@ impl AcpBridge {
             if !accepted {
                 tracing::warn!(%session_id, "未知会话的权限请求,拒绝");
                 self.send_best_effort(jsonrpc::error_response(id, -32602, "未知会话"));
+                return;
             }
+            // 落表成功才挂超时任务:未登记的请求已就地拒绝,无需截止时间。
+            self.spawn_permission_timeout(id, deadline);
             return;
         }
         tracing::warn!(method = %method, "agent 请求了未声明的能力,拒绝");
@@ -688,6 +771,72 @@ impl AcpBridge {
         dropped
     }
 
+    /// 为一条已落表的权限请求挂超时任务:到期仍 pending → 按**拒绝**回填
+    /// (无 reject 选项则走 `cancelled`),并广播 `PermissionCancelled{reason:"timeout"}`。
+    ///
+    /// **绝不自动 allow**。与其他三方(`resolve_permission` / `cancel_permission` /
+    /// `expire_permissions_for_session`)共用 `permission_pending` 锁:先到者移除
+    /// 条目,本任务到期加锁时查无此项即静默退出(先到者生效,后到者 no-op)。
+    /// 不保存 JoinHandle:任务自行 no-op 结束;`transport` 只持 `Weak`,
+    /// 超时任务绝不延长传输层寿命(kill_on_drop:桥弃则进程可即刻回收)。
+    fn spawn_permission_timeout(&self, request_id: u64, deadline: Instant) {
+        let pending = Arc::clone(&self.permission_pending);
+        let transport = Arc::downgrade(&self.transport);
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            // 复核 + 摘除同处一锁:期间若被回填/取消/清表,条目已不在 → 不动手。
+            let entry = {
+                let mut guard = pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let due = guard
+                    .get(&request_id)
+                    .map(|entry| entry.deadline <= Instant::now())
+                    .unwrap_or(false);
+                if due {
+                    guard.remove(&request_id)
+                } else {
+                    None
+                }
+            };
+            let Some(entry) = entry else {
+                return;
+            };
+            tracing::warn!(
+                request_id,
+                session_id = %entry.session_id,
+                "权限请求超时,按拒绝处理"
+            );
+            // 有 reject 选项 → selected(reject);否则 cancelled。两条都不是 allow。
+            let (outcome, option_id) = match entry.reject_option.as_deref() {
+                Some(reject) => ("selected", Some(reject)),
+                None => ("cancelled", None),
+            };
+            match transport.upgrade() {
+                Some(transport) => {
+                    if let Err(e) = send_permission_outcome_on(
+                        transport.as_ref(),
+                        request_id,
+                        &entry.session_id,
+                        outcome,
+                        option_id,
+                    ) {
+                        tracing::warn!(request_id, "权限超时应答发送失败(忽略): {e}");
+                    }
+                }
+                // 桥/进程已销毁:无对象可应答,只剩清表与前端通知。
+                None => {
+                    tracing::warn!(request_id, "权限超时但 transport 已弃,跳过应答");
+                }
+            }
+            let _ = event_tx.send(BridgeEvent::PermissionCancelled {
+                session_id: entry.session_id,
+                reason: "timeout".to_string(),
+            });
+        });
+    }
+
     fn send_permission_outcome(
         &self,
         request_id: u64,
@@ -695,17 +844,13 @@ impl AcpBridge {
         outcome: &str,
         option_id: Option<&str>,
     ) -> Result<(), String> {
-        let mut outcome_value = serde_json::json!({ "outcome": outcome });
-        if let Some(oid) = option_id {
-            outcome_value["optionId"] = serde_json::Value::String(oid.to_string());
-        }
-        let resp =
-            jsonrpc::success_response(request_id, serde_json::json!({ "outcome": outcome_value }));
-        self.transport
-            .send(resp.to_string())
-            .map_err(|e| format!("发送权限应答失败: {e}"))?;
-        tracing::info!(request_id, %session_id, %outcome, ?option_id, "权限已回填");
-        Ok(())
+        send_permission_outcome_on(
+            self.transport.as_ref(),
+            request_id,
+            session_id,
+            outcome,
+            option_id,
+        )
     }
 
     /// 发起一个 RPC 并等待应答(带请求级超时)。
@@ -1602,6 +1747,315 @@ mod tests {
                 assert_eq!(num_turns, 1);
             }
             other => panic!("已知会话的 usage_update 应转发上屏: {other:?}"),
+        }
+    }
+
+    /// §P:权限请求 per-request 超时 → 拒绝。
+    ///
+    /// 独立子模块:自带「记录下发帧」的 mock(既有 `MockTransport` 只吞帧,
+    /// 断言不了回给 agent 的 outcome),并统一放行测试专用的
+    /// unwrap/expect/panic 告警(与 `jsonrpc.rs` 测试模块同一风格,
+    /// 非测试代码仍受 `[lints.clippy]` 约束)。
+    mod permission_timeout {
+        #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+        use super::super::*;
+        use crate::transport::{AgentTransport, ExitInfo, TransportError};
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use tokio::sync::{broadcast, mpsc};
+        use tokio::time::{sleep, Duration};
+
+        /// 记录型 mock:喂入站行的同时收集桥下发到 agent 的帧。
+        struct RecordingTransport {
+            lines: std::sync::Mutex<Option<mpsc::Receiver<String>>>,
+            sent: std::sync::Mutex<Vec<String>>,
+        }
+
+        impl RecordingTransport {
+            fn sent_frames(&self) -> Vec<serde_json::Value> {
+                self.sent
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .map(|line| serde_json::from_str(line).expect("下发帧必须是合法 JSON"))
+                    .collect()
+            }
+        }
+
+        impl AgentTransport for RecordingTransport {
+            fn send(&self, line: String) -> Result<(), TransportError> {
+                self.sent
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(line);
+                Ok(())
+            }
+            fn take_line_receiver(&self) -> Result<mpsc::Receiver<String>, TransportError> {
+                self.lines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .ok_or(TransportError::Closed)
+            }
+            fn subscribe_exit(&self) -> broadcast::Receiver<ExitInfo> {
+                let (_tx, rx) = broadcast::channel::<ExitInfo>(1);
+                rx
+            }
+            fn is_running(&self) -> bool {
+                true
+            }
+            fn terminate(&self) {}
+            fn shutdown(
+                &self,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        /// 起一座注入短超时的桥,并登记会话 `s1`(权限请求的前提)。
+        fn boot(
+            timeout: Duration,
+        ) -> (
+            Arc<AcpBridge>,
+            Arc<RecordingTransport>,
+            mpsc::Sender<String>,
+        ) {
+            let (line_tx, line_rx) = mpsc::channel::<String>(16);
+            let transport = Arc::new(RecordingTransport {
+                lines: std::sync::Mutex::new(Some(line_rx)),
+                sent: std::sync::Mutex::new(Vec::new()),
+            });
+            let bridge = AcpBridge::new_with_timeout(transport.clone(), timeout).expect("attach");
+            bridge
+                .sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(SessionRecord {
+                    id: "s1".to_string(),
+                    cwd: PathBuf::from("."),
+                    office_task: None,
+                });
+            (bridge, transport, line_tx)
+        }
+
+        /// 线上形状的 `session/request_permission`(camelCase optionId/kind)。
+        fn permission_frame(id: u64, options: serde_json::Value) -> String {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "s1",
+                    "toolCall": {"title": "cargo test"},
+                    "options": options
+                }
+            })
+            .to_string()
+        }
+
+        fn allow_and_reject() -> serde_json::Value {
+            serde_json::json!([
+                {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject-once", "name": "Reject once", "kind": "reject_once"}
+            ])
+        }
+
+        /// 等 route_loop 把入站帧落表(1ms 轮询,不赌固定 sleep)。
+        async fn wait_pending(bridge: &AcpBridge, request_id: u64) {
+            for _ in 0..500 {
+                if bridge
+                    .permission_pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(&request_id)
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+            panic!("权限请求 {request_id} 未在 500ms 内落表");
+        }
+
+        /// 等 `reason="timeout"` 的 `PermissionCancelled`,返回 (session_id, reason)。
+        async fn wait_timeout_event(
+            events: &mut broadcast::Receiver<BridgeEvent>,
+        ) -> (String, String) {
+            let wait = async {
+                loop {
+                    match events.recv().await {
+                        Ok(BridgeEvent::PermissionCancelled { session_id, reason }) => {
+                            if reason == "timeout" {
+                                return (session_id, reason);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => panic!("事件流中断: {e}"),
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_millis(1500), wait)
+                .await
+                .expect("1.5s 内必须收到 reason=timeout 的 PermissionCancelled")
+        }
+
+        fn pending_len(bridge: &AcpBridge) -> usize {
+            bridge
+                .permission_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len()
+        }
+
+        /// P.4-1:到期 → `selected` + reject optionId,pending 清空,事件带 timeout。
+        #[tokio::test]
+        async fn permission_timeout_rejects() {
+            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
+            let mut events = bridge.subscribe();
+            line_tx
+                .send(permission_frame(7, allow_and_reject()))
+                .await
+                .expect("send frame");
+
+            let (session_id, reason) = wait_timeout_event(&mut events).await;
+            assert_eq!(session_id, "s1");
+            assert_eq!(reason, "timeout");
+
+            let frames = transport.sent_frames();
+            assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
+            assert_eq!(frames[0]["id"], serde_json::json!(7));
+            assert_eq!(frames[0]["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(
+                frames[0]["result"]["outcome"]["optionId"], "reject-once",
+                "超时只能选 reject 选项: {frames:?}"
+            );
+            assert_eq!(pending_len(&bridge), 0, "超时后条目必须移除");
+        }
+
+        /// P.4-2:先 resolve → 超时任务到点查无此项,不得有第二条应答。
+        #[tokio::test]
+        async fn permission_resolved_before_timeout_no_second_response() {
+            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
+            line_tx
+                .send(permission_frame(9, allow_and_reject()))
+                .await
+                .expect("send frame");
+            wait_pending(&bridge, 9).await;
+
+            bridge
+                .resolve_permission(9, "allow-once")
+                .expect("合法选项应回填成功");
+            // 6 倍超时窗口:sleep_until 早已到期,任务应已 no-op 退出。
+            sleep(Duration::from_millis(120)).await;
+
+            let frames = transport.sent_frames();
+            assert_eq!(frames.len(), 1, "resolve 后不得再有超时应答: {frames:?}");
+            assert_eq!(frames[0]["result"]["outcome"]["outcome"], "selected");
+            assert_eq!(frames[0]["result"]["outcome"]["optionId"], "allow-once");
+            assert_eq!(pending_len(&bridge), 0);
+            assert!(
+                bridge.cancel_permission(9).is_err(),
+                "已回填的请求不可再取消(后到者 no-op)"
+            );
+        }
+
+        /// P.4-3:无 reject 选项(只有 allow)→ 到期走 cancelled,不带 optionId。
+        #[tokio::test]
+        async fn permission_timeout_without_reject_option_cancels() {
+            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
+            let mut events = bridge.subscribe();
+            line_tx
+                .send(permission_frame(
+                    11,
+                    serde_json::json!([
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}
+                    ]),
+                ))
+                .await
+                .expect("send frame");
+
+            let (_session_id, reason) = wait_timeout_event(&mut events).await;
+            assert_eq!(reason, "timeout");
+
+            let frames = transport.sent_frames();
+            assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
+            let outcome = &frames[0]["result"]["outcome"];
+            assert_eq!(outcome["outcome"], "cancelled");
+            assert!(
+                outcome.get("optionId").is_none(),
+                "cancelled 不得携带 optionId: {outcome}"
+            );
+            assert_eq!(pending_len(&bridge), 0);
+        }
+
+        /// P.4-4:所有超时路径下发的 optionId 均不属于 allow 集合。
+        #[tokio::test]
+        async fn timeout_never_allows() {
+            let cases: [(&str, serde_json::Value); 4] = [
+                ("allow 在前", allow_and_reject()),
+                (
+                    "只有 allow",
+                    serde_json::json!([
+                        {"optionId": "allow-always", "name": "Always", "kind": "allow_always"}
+                    ]),
+                ),
+                ("空 options", serde_json::json!([])),
+                (
+                    "reject_always",
+                    serde_json::json!([
+                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "reject-always", "name": "Never", "kind": "reject_always"}
+                    ]),
+                ),
+            ];
+
+            for (idx, (label, options)) in cases.into_iter().enumerate() {
+                let allow_ids: Vec<String> = options
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter(|o| {
+                                o["kind"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_ascii_lowercase()
+                                    .contains("allow")
+                            })
+                            .filter_map(|o| o["optionId"].as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let request_id = 100 + idx as u64;
+                let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
+                let mut events = bridge.subscribe();
+                line_tx
+                    .send(permission_frame(request_id, options))
+                    .await
+                    .expect("send frame");
+
+                let (_session_id, reason) = wait_timeout_event(&mut events).await;
+                assert_eq!(reason, "timeout", "[{label}]");
+
+                let frames = transport.sent_frames();
+                assert_eq!(frames.len(), 1, "[{label}] 超时只回一条: {frames:?}");
+                let outcome = &frames[0]["result"]["outcome"];
+                let kind = outcome["outcome"].as_str().unwrap_or("");
+                assert!(
+                    kind == "selected" || kind == "cancelled",
+                    "[{label}] 非法 outcome: {outcome}"
+                );
+                if let Some(option_id) = outcome["optionId"].as_str() {
+                    assert!(
+                        !allow_ids.iter().any(|allow| allow == option_id),
+                        "[{label}] 超时不得选择 allow 选项({option_id}): {outcome}"
+                    );
+                }
+                assert_eq!(pending_len(&bridge), 0, "[{label}] 条目必须移除");
+
+                // 任务已退出:静置一个超时窗口,仍不得出现第二条应答。
+                sleep(Duration::from_millis(60)).await;
+                assert_eq!(transport.sent_frames().len(), 1, "[{label}] 不得二次应答");
+            }
         }
     }
 }

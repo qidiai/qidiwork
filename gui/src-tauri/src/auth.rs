@@ -37,6 +37,13 @@ fn client_id() -> String {
         .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string())
 }
 
+/// 内核默认 issuer 是 auth.x.ai,与 GUI 的 api.qidiai.ltd scope 不一致;
+/// spawn 内核前注入 GUI 解析好的 OAuth 配置,保证登录/退出/续期同一 scope。
+pub fn inject_oauth_env(cmd: &mut tokio::process::Command) {
+    cmd.env("QIDI_OAUTH2_ISSUER", issuer());
+    cmd.env("QIDI_OAUTH2_CLIENT_ID", client_id());
+}
+
 /// grok_home:与内核一致,`$QIDI_HOME` 优先,否则 `~/.qidi`。
 fn grok_home(home: &Path) -> PathBuf {
     std::env::var_os("QIDI_HOME")
@@ -298,15 +305,16 @@ async fn run_device_login(app: AppHandle, program: String, home: PathBuf) {
         },
     );
 
-    let mut child = match Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .args(["login", "--device-auth"])
         .current_dir(&home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    inject_oauth_env(&mut command);
+    let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
             let _ = app.emit(
@@ -408,10 +416,13 @@ async fn run_device_login(app: AppHandle, program: String, home: PathBuf) {
 pub async fn auth_logout(app: AppHandle) -> Result<AuthStatus, String> {
     let program = resolve_program(&app);
     let home = app.path().home_dir().ok().ok_or("无法解析主目录")?;
-    let out = Command::new(&program)
+    let mut command = Command::new(&program);
+    command
         .arg("logout")
         .current_dir(&home)
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null());
+    inject_oauth_env(&mut command);
+    let out = command
         .output()
         .await
         .map_err(|e| format!("无法启动内核: {e}"))?;

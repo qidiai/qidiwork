@@ -120,6 +120,8 @@ impl AgentProcess {
         if let Some(dir) = &cfg.cwd {
             command.current_dir(dir);
         }
+        // 内核默认 issuer 与 GUI scope 不一致,spawn 前统一注入 GUI 侧 OAuth 配置。
+        crate::auth::inject_oauth_env(&mut command);
 
         let mut child = command.spawn().map_err(TransportError::Io)?;
         let pid = child.id();

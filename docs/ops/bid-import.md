@@ -30,7 +30,7 @@ cargo run --bin bid_import -- --input 旧稿.docx --out 新稿.md --assets ./素
 | `BidTitle1`（后续） | `## 章标题` |
 | `BidTitle2` / `Heading2` / `w:val="2"` | `### 节` |
 | `BidTitle3` / `Heading3` / `w:val="3"` | `#### 小节` |
-| `BidTitle4` | `#####` |
+| `BidTitle4` | `####`（与 `BidTitle3` 同级：五级及以下标题在往返中降为四级） |
 | `BidCaption` 紧跟在图片后 | 作为该图的图注 `![图注](assets/img-n.png)` |
 | `BidCaption` 其它位置 / `BidBody` / 无样式段落 | 普通段落 |
 | `<w:tbl>` | GFM 表格（首行表头） |
@@ -39,6 +39,7 @@ cargo run --bin bid_import -- --input 旧稿.docx --out 新稿.md --assets ./素
 
 ## 已知限制
 
+- **五级及以下标题在往返中降为四级**：Markdown 侧只识别 `#`～`####`，`BidTitle4` 按 `####` 输出，回灌时不会出现可见的 `##### 文本` 段落。
 - 只做**结构**迁移：粗体/斜体/字体/颜色/字号不保留（导出时由模板统一定版式）。
 - 合并单元格（`gridSpan` / `vMerge`）按原单元格逐个输出，会丢合并语义。
 - 图片按文档出现顺序编号，文件名不与原包内名对应。

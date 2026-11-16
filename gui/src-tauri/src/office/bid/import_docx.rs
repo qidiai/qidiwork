@@ -6,7 +6,8 @@
 //!   （不整串正则硬切），`word/_rels/document.xml.rels` 建 `rId → media target` 映射。
 //! - 样式映射（`w:pStyle@w:val`，大小写与空格不敏感）：
 //!   - `BidTitle1`：**首个** → `# `（书名），后续 → `## `（章）；`1` / `Heading1` / `Title` 同逻辑
-//!   - `BidTitle2/3/4` → `###` / `####` / `#####`
+//!   - `BidTitle2/3/4` → `###` / `####` / `####`（最高四级：markdown 侧不识别 H5+，
+//!     `BidTitle4` 与 `BidTitle3` 同级，避免回灌出现可见的 `##### 文本` 段落）
 //!   - 内置 `2` / `Heading2` → `##`；`3` → `###`；`4` → `####`
 //!   - `BidCaption`（及 `Caption` / `题注` / `图注`）：上一块是图片则升级为该图图注
 //!     `![图注](…)`，否则按普通段落输出
@@ -414,7 +415,8 @@ fn heading_level(style: &str) -> Option<u8> {
         "bidtitle1" | "1" | "heading1" | "title" | "标题" => Some(1),
         "bidtitle2" => Some(3),
         "bidtitle3" => Some(4),
-        "bidtitle4" => Some(5),
+        // 往返安全：markdown 侧只认 `#..####`，BidTitle4 与 BidTitle3 同级，不输出 H5+
+        "bidtitle4" => Some(4),
         "2" | "heading2" | "标题2" => Some(2),
         "3" | "heading3" | "标题3" => Some(3),
         "4" | "heading4" | "标题4" => Some(4),
@@ -556,10 +558,10 @@ impl<'a> Converter<'a> {
         Ok(())
     }
 
-    /// 首个一级标题作书名（`#`），其后降为章（`##`）
+    /// 首个一级标题作书名（`#`），其后降为章（`##`）；输出最高四级（markdown 侧不认 H5+）
     fn resolve_level(&mut self, level: u8) -> u8 {
         if level != 1 {
-            return level;
+            return level.min(4);
         }
         if self.title_seen {
             2
@@ -779,40 +781,72 @@ mod tests {
         (path, dir.join("assets"))
     }
 
-    /// 1. 导入自家导出的 md-demo.docx：章 ≥3 / 图 =5 / 表 ≥1，且写出图片文件
+    /// 1. 回环：自产 docx（1 章 + 1 段 + 1 张 2×2 表 + 1 图）→ 导入，统计与链接正确
     #[test]
     fn imports_our_export() {
-        let docx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/bid-export/out/md-demo.docx");
-        assert!(docx.is_file(), "缺少真实样本 {}", docx.display());
-        let dir = std::env::temp_dir().join(format!("qidi-bid-c-import-demo-{}", std::process::id()));
+        use crate::office::bid::fill;
+        use crate::office::bid::model::{
+            BidExportRequest, Block, CaptionMode, Chapter, FigureBlock, FigureItem, FigureLayout,
+        };
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let template = root.join("resources/templates/bid-engineering-blue-v1.docx");
+        let image = root.join("../tests/bid-export/assets/image3.png");
+        assert!(template.is_file(), "缺少模板 {}", template.display());
+        assert!(image.is_file(), "缺少图片 {}", image.display());
+
+        let dir = std::env::temp_dir().join(format!(
+            "qidi-bid-c-import-roundtrip-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let docx = dir.join("roundtrip.docx");
         let assets = dir.join("assets");
 
+        // 自产样本：不依赖 tests/bid-export/out 下的预置产物（干净环境也能跑）
+        let req = BidExportRequest {
+            title: "C-fix 回环样本".to_string(),
+            chapters: vec![Chapter {
+                title: "第一章 回环".to_string(),
+                blocks: vec![
+                    Block::Paragraph {
+                        text: "回环段落".to_string(),
+                    },
+                    Block::Table {
+                        header: vec!["项".to_string(), "值".to_string()],
+                        rows: vec![vec!["甲".to_string(), "乙".to_string()]],
+                    },
+                    Block::Figure(FigureBlock {
+                        layout: FigureLayout::Single,
+                        items: vec![FigureItem {
+                            path: image.to_string_lossy().to_string(),
+                            caption: Some("图1-1 回环图".to_string()),
+                        }],
+                        caption: String::new(),
+                        caption_mode: CaptionMode::default(),
+                        ai_generated: false,
+                    }),
+                ],
+            }],
+            output_path: docx.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+        fill::export(&req, &template, &docx).unwrap();
+        assert!(docx.is_file(), "导出失败 {}", docx.display());
+
         let (md, stats) = import_docx(&docx, &assets).unwrap();
-        assert!(stats.chapters >= 3, "chapters={} md={md}", stats.chapters);
-        assert_eq!(stats.images, 5, "images={} md={md}", stats.images);
-        assert!(stats.tables >= 1, "tables={}", stats.tables);
-        assert!(stats.headings > stats.chapters);
+        assert_eq!(stats.chapters, 1, "chapters={} md={md}", stats.chapters);
+        assert_eq!(stats.tables, 1, "tables={} md={md}", stats.tables);
+        assert_eq!(stats.images, 1, "images={} md={md}", stats.images);
+        assert!(md.starts_with("# C-fix 回环样本"), "{md}");
+        assert!(md.contains("\n\n## 第一章 回环"), "{md}");
+        assert!(md.contains("| 项 | 值 |"), "{md}");
+        assert!(md.contains("| --- | --- |"), "{md}");
+        assert!(md.contains("![图1-1 回环图](assets/img-1.png)"), "{md}");
+        assert!(assets.join("img-1.png").is_file());
 
-        // 标题 / 章 / 表格 / 图片链接
-        assert!(md.starts_with("# "), "首块应为书名：{md}");
-        assert!(md.contains("\n\n## 第一章 工程概况"), "{md}");
-        assert!(md.contains("| 工序节点 | 施工方法及控制参数 | 质量控制要点 |"), "{md}");
-        assert!(md.contains("| --- | --- | --- |"), "{md}");
-        assert!(md.contains("![图3-1 施工现场总平面布置图](assets/img-1.png)"), "{md}");
-        // 三栏图桌：3 条图行在同一块内（单换行相连，导出侧可还原 three_up）
-        assert!(
-            md.contains("(assets/img-2.png)\n![图3-3 路基整平作业面](assets/img-3.png)\n![图3-4 排水管道安装作业面](assets/img-4.png)"),
-            "{md}"
-        );
-        // 尾注：宽图图注
-        assert!(md.contains("![图3-5 施工总进度横道图](assets/img-5.png)"), "{md}");
-
-        // 图片字节确实落盘
-        for n in 1..=5 {
-            let p = assets.join(format!("img-{n}.png"));
-            assert!(p.is_file(), "缺图片 {}", p.display());
-            assert!(std::fs::metadata(&p).unwrap().len() > 0);
-        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 2. 内置 Word 样式 `w:val="1"`：首个 → `#`，后续 → `##`
@@ -822,6 +856,7 @@ mod tests {
             "<w:p><w:pPr><w:pStyle w:val=\"1\"/></w:pPr><w:r><w:t>某县高标准农田施工组织设计</w:t></w:r></w:p>",
             "<w:p><w:pPr><w:pStyle w:val=\"1\"/></w:pPr><w:r><w:t>第一章 工程概况</w:t></w:r></w:p>",
             "<w:p><w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr><w:r><w:t>第一节 编制依据</w:t></w:r></w:p>",
+            "<w:p><w:pPr><w:pStyle w:val=\"BidTitle4\"/></w:pPr><w:r><w:t>五级降四级</w:t></w:r></w:p>",
         );
         let (docx, assets) = fixture("builtin", body);
         let (md, stats) = import_docx(&docx, &assets).unwrap();
@@ -829,7 +864,10 @@ mod tests {
         assert!(md.starts_with("# 某县高标准农田施工组织设计"), "{md}");
         assert!(md.contains("\n\n## 第一章 工程概况"), "{md}");
         assert!(md.contains("\n\n## 第一节 编制依据"), "{md}");
-        assert_eq!(stats.headings, 3);
+        // P1-4：BidTitle4 与 BidTitle3 同级，最高 `####`（markdown 侧不认 H5+）
+        assert!(md.contains("\n\n#### 五级降四级"), "{md}");
+        assert!(!md.contains("#####"), "不应输出 H5：{md}");
+        assert_eq!(stats.headings, 4);
         assert_eq!(stats.chapters, 2, "两个 ## 即两章：{md}");
     }
 
@@ -852,6 +890,24 @@ mod tests {
         assert!(md.contains("| c | d |"), "{md}");
         assert_eq!(stats.tables, 1);
         assert_eq!(stats.paragraphs, 0);
+    }
+
+    /// 3b. 单元格含 `|` → 输出 `\|`（不转义会把 GFM 表格列切错）
+    #[test]
+    fn table_cell_pipe_escaped() {
+        let body = concat!(
+            "<w:tbl>",
+            "<w:tr><w:tc><w:p><w:r><w:t>a|b</w:t></w:r></w:p></w:tc>",
+            "<w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr>",
+            "<w:tr><w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc>",
+            "<w:tc><w:p><w:r><w:t>e</w:t></w:r></w:p></w:tc></w:tr>",
+            "</w:tbl>",
+        );
+        let (docx, assets) = fixture("pipe", body);
+        let (md, _) = import_docx(&docx, &assets).unwrap();
+
+        assert!(md.contains("| a\\|b | c |"), "{md}");
+        assert!(!md.contains("| a|b |"), "单元格未转义：{md}");
     }
 
     /// 4. 不存在的路径 → Err

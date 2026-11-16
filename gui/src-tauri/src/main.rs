@@ -1,6 +1,8 @@
 // QidiWork GUI 二进制壳:逻辑全部在 lib(qidiwork_gui)。
 // `--mock-agent` 分支:传输层测试/手动联调入口,绝不进入 Tauri 装配。
 // `--self-check` 分支:安装态模板解析自检,只读打印后退出,同样不进入 Tauri 装配。
+// 注意:EXIT=0 仅表示"任一路径命中"(可能由 CARGO_MANIFEST_DIR 开发态回退兜底),
+// 安装态验收必须额外看到 `RESOLVED_SOURCE=resource`,只看 EXIT=0 无效。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
@@ -64,10 +66,23 @@ fn self_check() -> i32 {
     match probe_resolve(DEFAULT_STYLE_ID, exe_dir.as_deref()) {
         Ok(path) => {
             println!("RESOLVED={}", path.display());
+            // 区分来源:exe 同级(安装态 resource) vs 仓库内(开发态回退)。
+            let source = if exe_dir
+                .as_deref()
+                .map_or(false, |dir| path.starts_with(dir))
+            {
+                "resource"
+            } else if path.starts_with(env!("CARGO_MANIFEST_DIR")) {
+                "dev"
+            } else {
+                "none"
+            };
+            println!("RESOLVED_SOURCE={source}");
             0
         }
         Err(err) => {
             println!("RESOLVED_ERR={err}");
+            println!("RESOLVED_SOURCE=none");
             1
         }
     }

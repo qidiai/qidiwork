@@ -48,7 +48,7 @@ pub fn resolve_template_path(app: &tauri::AppHandle, style_id: &str) -> Result<P
 /// `--self-check` 只读探测入口：把 `resolve_from` 暴露给 bin crate。
 ///
 /// 无副作用（只做 `is_file` 探测，不读内容、不写盘、不改状态），
-/// 仅供 `qidiwork.exe --self-check` 在安装态/开发态打印模板解析结果。
+/// 仅供 `qidiwork-gui.exe --self-check` 在安装态/开发态打印模板解析结果。
 pub fn probe_resolve(style_id: &str, resource_dir: Option<&Path>) -> Result<PathBuf, String> {
     resolve_from(style_id, resource_dir)
 }

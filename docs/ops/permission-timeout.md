@@ -31,8 +31,11 @@ agent 通过 ACP `session/request_permission` 请求用户审批时，桥层为*
 4. 日志：`tracing::warn!(request_id, session_id, "权限请求超时，按拒绝处理")`。
 
 **安全不变量**：超时路径只会落到 reject 选项或 `cancelled`，任何情况下都不会
-选择 `allow_once` / `allow_always`。前端只要看到 `reason == "timeout"` 的
-`permission_cancelled` 即清掉该队列项并解除 `busy`。
+选择 `allow_once` / `allow_always`。
+
+**前端清场语义（2026-11-17 修正）**：超时事件带 `request_id`，前端只移除**该条**权限项，
+且**不解除**会话 `busy`（回合仍在跑，兄弟请求可能还没答）；只有不带 `request_id` 的
+`permission_cancelled`（`turn_ended` / `bridge_restart` / `session_removed`）才清整会话并解 `busy`。
 
 ## 与 30 分钟 `PROMPT_TIMEOUT` 的区别
 

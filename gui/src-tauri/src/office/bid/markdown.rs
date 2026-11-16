@@ -11,6 +11,8 @@
 //! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`，`{ai}` → `ai_generated`，
 //!   可组合为 `{wide,ai}`，标记内逗号分隔并容忍空格）；连续 3 行图片（中间无空行）
 //!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`；任一张带 `{ai}` → 整组 `ai_generated`）。
+//! - 围栏 ```` ```gantt [标题] ```` … ```` ``` ````（P1-5 §2）→ [`Block::Gantt`]：行格式
+//!   `开始..结束 | 工序名`；空行忽略，格式不符 / 未闭合 / 无工序各有独立 Err 文案。
 //! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
 //!   以 `>`/`-`/`*` 开头的行不做列表语义，按普通段落文本保留。
 //!
@@ -25,7 +27,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::model::{Block, CaptionMode, Chapter, FigureBlock, FigureItem, FigureLayout};
+use super::model::{
+    Block, CaptionMode, Chapter, FigureBlock, FigureItem, FigureLayout, GanttBlock, GanttTask,
+};
 use super::{BidError, BidResult};
 
 /// 解析 Markdown → (文档标题, 章节)；图片路径按 base_dir 解析成绝对路径并校验存在。
@@ -57,6 +61,14 @@ pub fn parse_markdown_with(
         if text.is_empty() {
             p.flush_para();
             i += 1;
+            continue;
+        }
+        // 横道图围栏（P1-5 §2）：```gantt [标题] … ``` → Block::Gantt
+        if let Some(info) = text.strip_prefix("```gantt") {
+            let (gantt, next) = parse_gantt_fence(&lines, i, info)?;
+            p.flush_para();
+            p.push_block(Block::Gantt(gantt));
+            i = next;
             continue;
         }
         // 图片：先吃掉整段连续图片行（空行即中断）。
@@ -332,6 +344,54 @@ impl MdParser<'_> {
         self.push_block(Block::Table { header, rows });
         Ok(Some(i))
     }
+}
+
+/// 横道图围栏（P1-5 §2）：```` ```gantt [标题] ```` 起、```` ``` ```` 止；
+/// 返回 `(横道图块, 下一行下标)`。
+///
+/// - 首行 ```` ```gantt ```` 之后的文本 = 标题（可空 → 导出时不加图注）；
+/// - 行格式 `开始..结束 | 工序名`，空行忽略，格式不符 → `Err("横道图行格式错误: {line}")`；
+/// - 未闭合 → `Err("横道图代码块未闭合")`；无任何工序 → `Err("横道图至少需要一个工序")`。
+fn parse_gantt_fence(lines: &[&str], start: usize, info: &str) -> BidResult<(GanttBlock, usize)> {
+    let title = info.trim().to_string();
+    let mut tasks: Vec<GanttTask> = Vec::new();
+    let mut i = start + 1;
+    let mut closed = false;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if line.starts_with("```") {
+            closed = true;
+            i += 1;
+            break;
+        }
+        if !line.is_empty() {
+            tasks.push(parse_gantt_task(line)?);
+        }
+        i += 1;
+    }
+    if !closed {
+        return Err(BidError::new("横道图代码块未闭合"));
+    }
+    if tasks.is_empty() {
+        return Err(BidError::new("横道图至少需要一个工序"));
+    }
+    Ok((GanttBlock { title, tasks }, i))
+}
+
+/// 单工序行：`开始..结束 | 工序名`（日期格式/合法性由 `model::validate` 兜底）
+fn parse_gantt_task(line: &str) -> BidResult<GanttTask> {
+    let bad = || BidError::new(format!("横道图行格式错误: {line}"));
+    let (range, name) = line.split_once('|').ok_or_else(bad)?;
+    let (start, end) = range.split_once("..").ok_or_else(bad)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(bad());
+    }
+    Ok(GanttTask {
+        name: name.to_string(),
+        start: start.trim().to_string(),
+        end: end.trim().to_string(),
+    })
 }
 
 /// 整行图片：`![图注](路径)` + 可选 `{wide}` / `{ai}` / `{wide,ai}` 后缀。
@@ -798,6 +858,90 @@ mod tests {
         assert_eq!(figs[0].layout, FigureLayout::ThreeUp);
         assert_eq!(figs[0].items.len(), 3);
         assert!(figs[0].ai_generated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn gantt_of(chapter: &Chapter) -> &GanttBlock {
+        chapter
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Gantt(g) => Some(g),
+                _ => None,
+            })
+            .expect("未解析出横道图块")
+    }
+
+    /// P1-5 §2：围栏首行文本 = 标题，`开始..结束 | 工序名` 逐行成任务，空行忽略
+    #[test]
+    fn parses_gantt_fence() {
+        let dir = tmp_dir("gantt");
+        let src = "# 标题\n\n## 施工进度\n\n\
+                   ```gantt 图4-1 施工进度横道图\n\
+                   2026-12-01..2026-12-10 | 塘底清淤\n\
+                   \n\
+                   2026-12-05..2026-12-20 | 管网敷设\n\
+                   2026-12-15..2026-12-25 | 路基整平\n\
+                   ```\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        let g = gantt_of(&chapters[0]);
+        assert_eq!(g.title, "图4-1 施工进度横道图");
+        let got: Vec<(String, String, String)> = g
+            .tasks
+            .iter()
+            .map(|t| (t.name.clone(), t.start.clone(), t.end.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("塘底清淤".to_string(), "2026-12-01".to_string(), "2026-12-10".to_string()),
+                ("管网敷设".to_string(), "2026-12-05".to_string(), "2026-12-20".to_string()),
+                ("路基整平".to_string(), "2026-12-15".to_string(), "2026-12-25".to_string()),
+            ]
+        );
+        assert_eq!(chapters[0].title, "第一章 施工进度");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1-5 §2：围栏无收尾 ```` ``` ```` → Err 且含"横道图代码块未闭合"
+    #[test]
+    fn gantt_unclosed_fence_rejected() {
+        let dir = tmp_dir("gantt-unclosed");
+        let src = "# 标题\n\n## 施工进度\n\n```gantt\n2026-12-01..2026-12-10 | 塘底清淤\n";
+        let err = parse_markdown(src, &dir).unwrap_err();
+        assert!(
+            err.to_string().contains("横道图代码块未闭合"),
+            "错误信息不符: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1-5 §2：缺 `|` 或 `..`（含工序名为空）→ Err 且含"横道图行格式错误: <行（已 trim）>"
+    #[test]
+    fn gantt_bad_line_rejected() {
+        let dir = tmp_dir("gantt-bad-line");
+        for bad in ["2026-12-01..2026-12-10", "2026-12-01 2026-12-10 | 塘底清淤", "2026-12-01..2026-12-10 | "] {
+            let src = format!("# 标题\n\n## 施工进度\n\n```gantt\n{bad}\n```\n");
+            let err = parse_markdown(&src, &dir).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("横道图行格式错误: {}", bad.trim())),
+                "bad={bad} 错误信息不符: {err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P1-5 §2：围栏内只有空行 → Err 且含"横道图至少需要一个工序"
+    #[test]
+    fn gantt_empty_tasks_rejected() {
+        let dir = tmp_dir("gantt-empty");
+        let src = "# 标题\n\n## 施工进度\n\n```gantt 图4-1\n\n\n```\n";
+        let err = parse_markdown(src, &dir).unwrap_err();
+        assert!(
+            err.to_string().contains("横道图至少需要一个工序"),
+            "错误信息不符: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

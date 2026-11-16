@@ -74,7 +74,8 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 - 已知取舍②（编号）：H4 先于本章任何 H3 出现时，节号自动补 1，产出 `N.1.K`（不会出现 `N.0.K`）。
 - `demo.md` 实测产物：`BidTitle1=4`（文档标题 1 + 3 章）、`BidTitle2=3`（3 个 H3）、
   `BidTitle3≥1`（H4 子节）、带 `BidTableHeader` 的 `<w:tbl>` 1 张、
-  `<w:drawing` 5 处（单图 1 + 三栏 3 + 宽图 1）。
+  `<w:drawing` 5 处（单图 1 + 三栏 3 + 宽图 1）、横道图 `<w:tbl>` 1 张（含 `#4877AC` 底纹 7 格，
+  无 `BidTableHeader`，故仍计入 `tables=1`）。
 
 ### Markdown 语法速查
 
@@ -89,15 +90,37 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 - `![图注](路径)` 单行 → 单图 `single`（无图注可写 `![](...)`）。
 - `![图注](路径){wide}` → 宽图 `wide`（内容区全宽 18.6cm）。
 - 连续 3 行图片（行间无空行）→ 三栏组图 `three_up` + 逐图图注。
+- 围栏 ```` ```gantt [标题] ```` … ```` ``` ```` → 原生表格横道图（P1-5，无图片、无新依赖）：
+  每行一个工序，写作 `开始..结束 | 工序名`（`YYYY-MM-DD`，含首含尾），空行忽略，
+  围栏首行 ```` ```gantt ```` 之后的文本即图注（留空则不加图注）；
+  时间桶默认 7 天/桶，跨度 > 112 天改 14 天/桶，> 16 桶 → `ERROR ... 横道图跨度过大（>16 个时间桶）` + exit 2。
 - `**粗体**` / 链接 / `-` `>` 列表符号 → 不解析，按纯文本原样保留。
 
 编号规则：中文数字仅 1–10（`一…十`），11 起用阿拉伯数字；章/节序号按出现顺序递增。
+
+横道图写法与产物（P1-5，规格 `docs/施工规格-P1-5-gantt-2026-11-16.md`）：
+
+````
+```gantt 图4-1 施工进度横道图
+2026-12-01..2026-12-10 | 塘底清淤
+2026-12-05..2026-12-20 | 管网敷设
+2026-12-15..2026-12-25 | 路基整平
+```
+````
+
+- 表头行 `工序` + 各桶起始日 `MM-DD`；任务覆盖的桶填 `#4877AC` 底纹（判定
+  `task_start < bucket_end && task_end >= bucket_start`），其余桶留空。
+- 表格复用 `tblStyle=BidTable`；**所有单元格（含表头行）一律 `BidTableBody`，不用 `BidTableHeader`**，
+  因此业务表计数 `doc.tables` / `check.sh tables` 不受横道图影响。
+- 日期用纯整数 civil-from-days 换算（不引日期库）；`start > end` / 日期不存在 →
+  `ERROR 导出失败: 横道图日期非法: <start>..<end>`；跨度过大见上条。
+- `demo.md` 里的横道图为 3 工序 / 25 天跨度 → 4 个 7 天桶，导出件含 7 格底纹（覆盖桶数）。
 
 ## 请求 JSON 示例
 
 顶层字段对应 `office::bid::model::BidExportRequest`：`title`、`chapters[]`、
 可选 `output_path`（可省略，被 `--out` 覆盖）、`style_id`、`figure_width_cm`。
-`chapters[].blocks[]` 用内部标签 `type` 区分**四种**块：
+`chapters[].blocks[]` 用内部标签 `type` 区分**五种**块（`paragraph` / `heading` / `table` / `figure` / `gantt`）：
 
 ```json
 {
@@ -136,6 +159,8 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 要点：
 
 - `type`：`paragraph` / `heading` / `table` / `figure`（`snake_case`）。
+- `type: "gantt"`（P1-5）：`{ "type": "gantt", "title": "图4-1 施工进度横道图", "tasks": [{ "name": "塘底清淤", "start": "2026-12-01", "end": "2026-12-10" }] }`；
+  `title` 可省略（空则不加图注），`tasks` 至少 1 条，日期 `YYYY-MM-DD` 且 `start <= end`。
 - `heading.level` 仅 **3 或 4**（H3→`BidTitle2`、H4→`BidTitle3`；H2 是章标题，不进 `heading`）。
 - `figure.layout`：`single` / `wide` / `three_up`；`three_up` 不足三张时补空单元格，不拉伸、不报错。
 - `figure.caption_mode`：`per_image`（逐图图注，默认）/ `per_group`（整组一条图注）。
@@ -168,4 +193,4 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
   `docs/ops/wps-render-verify.md`。
 - 输出目录不存在会自动创建；`--out` 相对路径按当前工作目录解析。
 - 默认模板可用 `--template` 覆盖，换模板后 13 项 Bid 样式的 check 依然生效（模板漂移会直接报错）。
-- 回归：`bash ../tests/bid-export/golden.sh` 跑 4 份 golden 夹具，期望 `GOLDEN OK (4/4)`。
+- 回归：`bash ../tests/bid-export/golden.sh` 跑 4 份 golden 夹具 + `md/demo.md`，期望 `GOLDEN OK (5/5)`。

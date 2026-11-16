@@ -179,6 +179,22 @@ pub struct FigureBlock {
     #[serde(default)] pub ai_generated: bool,
 }
 
+/// 横道图单工序（P1-5）：`start`/`end` 为 `YYYY-MM-DD`（含首含尾）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GanttTask {
+    pub name: String,
+    pub start: String,
+    pub end: String,
+}
+
+/// 横道图块（P1-5）：`title` 可空（空则导出时不加图注）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GanttBlock {
+    #[serde(default)]
+    pub title: String,
+    pub tasks: Vec<GanttTask>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
@@ -186,6 +202,68 @@ pub enum Block {
     Heading { level: u8, text: String },            // ← P1-1：章内小节标题（渲染 BidTitle{level-1}）
     Table { header: Vec<String>, rows: Vec<Vec<String>> },
     Figure(FigureBlock),                            // ← 新形态（newtype 变体，内部标签 serde 可处理）
+    Gantt(GanttBlock),                              // ← P1-5：原生表格横道图
+}
+
+// ---------------------------------------------------------------------------
+// 日期换算（P1-5 §0：不引日期库，civil-from-days 纯整数算法）
+// ---------------------------------------------------------------------------
+
+/// `YYYY-MM-DD` → 距 1970-01-01 的天数；格式非法/日期不存在（如 2 月 30 日）→ `None`
+pub fn days_from_ymd(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    if !b[..4].iter().all(u8::is_ascii_digit)
+        || !b[5..7].iter().all(u8::is_ascii_digit)
+        || !b[8..].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let year = s[..4].parse::<i64>().ok()?;
+    let month = s[5..7].parse::<u32>().ok()?;
+    let day = s[8..].parse::<u32>().ok()?;
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
+/// 距 1970-01-01 的天数 → `(年, 月, 日)`（civil-from-days，Howard Hinnant）
+pub fn ymd_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    const DAYS: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if month == 2 && is_leap(year) {
+        return 29;
+    }
+    DAYS[month as usize - 1]
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (month as i64 + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,6 +306,26 @@ impl BidExportRequest {
                         for (ri, row) in rows.iter().enumerate() {
                             if row.len() != header.len() {
                                 return Err(BidError::new(format!("表格第 {} 行列数不符", ri + 1)));
+                            }
+                        }
+                    }
+                    // P1-5 §1：至少一个工序；工序名非空；日期可解析且 start <= end
+                    Block::Gantt(gantt) => {
+                        if gantt.tasks.is_empty() {
+                            return Err(BidError::new("横道图至少需要一个工序"));
+                        }
+                        for task in &gantt.tasks {
+                            if task.name.trim().is_empty() {
+                                return Err(BidError::new("横道图工序名不能为空"));
+                            }
+                            match (days_from_ymd(&task.start), days_from_ymd(&task.end)) {
+                                (Some(s), Some(e)) if s <= e => {}
+                                _ => {
+                                    return Err(BidError::new(format!(
+                                        "横道图日期非法: {}..{}",
+                                        task.start, task.end
+                                    )));
+                                }
                             }
                         }
                     }
@@ -387,5 +485,73 @@ mod tests {
             err.to_string().contains("图注不能为空"),
             "错误信息不符: {err}"
         );
+    }
+
+    fn gantt_chapter(tasks: Vec<GanttTask>) -> Chapter {
+        Chapter {
+            title: "c".to_string(),
+            blocks: vec![Block::Gantt(GanttBlock { title: String::new(), tasks })],
+        }
+    }
+
+    fn task(name: &str, start: &str, end: &str) -> GanttTask {
+        GanttTask {
+            name: name.to_string(),
+            start: start.to_string(),
+            end: end.to_string(),
+        }
+    }
+
+    /// P1-5：tasks 为空 → Err 且含"横道图至少需要一个工序"
+    #[test]
+    fn gantt_empty_tasks_rejected() {
+        let err = req_with(gantt_chapter(Vec::new())).validate().unwrap_err();
+        assert!(
+            err.to_string().contains("横道图至少需要一个工序"),
+            "错误信息不符: {err}"
+        );
+    }
+
+    /// P1-5：start > end / 日期不存在 → Err 且含"横道图日期非法"
+    #[test]
+    fn gantt_bad_dates_rejected() {
+        for (start, end) in [
+            ("2026-12-20", "2026-12-01"), // 逆序
+            ("2026-02-30", "2026-03-01"), // 2 月无 30 日
+            ("2026-1-1", "2026-01-02"),   // 格式不符
+            ("2026/01/01", "2026-01-02"), // 分隔符不符
+        ] {
+            let err = req_with(gantt_chapter(vec![task("开挖", start, end)]))
+                .validate()
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("横道图日期非法"),
+                "{start}..{end} 错误信息不符: {err}"
+            );
+        }
+        // 同日 start == end 合法
+        req_with(gantt_chapter(vec![task("开挖", "2026-12-01", "2026-12-01")]))
+            .validate()
+            .unwrap();
+    }
+
+    /// P1-5：日期换算互逆（civil-from-days 纯整数算法），跨闰年与 1970 前均可
+    #[test]
+    fn date_conversion_roundtrip() {
+        for (days, ymd) in [
+            (0i64, (1970i64, 1u32, 1u32)),
+            (20_454, (2026, 1, 1)),
+            (20_639, (2026, 7, 5)),
+            (20_788, (2026, 12, 1)),
+            (-1, (1969, 12, 31)),
+        ] {
+            assert_eq!(ymd_from_days(days), ymd, "days={days}");
+            let (y, m, d) = ymd;
+            let s = format!("{y:04}-{m:02}-{d:02}");
+            assert_eq!(days_from_ymd(&s), Some(days), "{s}");
+        }
+        // 2026-12-01 → 2026-12-25 相隔 24 天（含首含尾 span = 25）
+        let span = days_from_ymd("2026-12-25").unwrap() - days_from_ymd("2026-12-01").unwrap() + 1;
+        assert_eq!(span, 25);
     }
 }

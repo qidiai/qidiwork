@@ -12,8 +12,8 @@ use std::path::Path;
 
 use super::docx::{drawing_run, emu_from_cm, escape_xml, image_size_px, DocxPackage};
 use super::model::{
-    BidExportRequest, Block, CaptionMode, DocStyle, FigureBlock, FigureItem, FigureLayout,
-    FillStats,
+    days_from_ymd, ymd_from_days, BidExportRequest, Block, CaptionMode, DocStyle, FigureBlock,
+    FigureItem, FigureLayout, FillStats, GanttBlock,
 };
 use super::template::{apply_edits, content, find, index_sdt, SdtRange};
 use super::template_gen::{
@@ -37,6 +37,15 @@ const EMPTY_FIGURE_CELL: &str = "<w:tc><w:tcPr><w:tcW w:w=\"3515\" w:type=\"dxa\
 
 /// 内容区宽（twips）：A4 宽 11906 - 2×680 页边距 = 10546
 const CONTENT_WIDTH_TWIPS: u32 = 10546;
+
+/// 横道图（P1-5 §3）：跨度 ≤ 112 天用 7 天/桶，否则 14 天/桶；桶数上限 16
+const GANTT_BUCKET_DAYS: i64 = 7;
+const GANTT_BUCKET_DAYS_WIDE: i64 = 14;
+const GANTT_MAX_BUCKETS: i64 = 16;
+/// 横道图首列（工序名）宽
+const GANTT_NAME_WIDTH: u32 = 2600;
+/// 覆盖桶底纹色（与 BidTableHeader 底色同值；不新增样式）
+const GANTT_BAR_FILL: &str = "4877AC";
 
 /// 锚点查找（缺失即报错，供 export 主流程与章内渲染共用）
 fn anchor<'a>(ranges: &'a [SdtRange], tag: &str) -> BidResult<&'a SdtRange> {
@@ -81,6 +90,8 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
                 Block::Paragraph { .. } => stats.paragraphs += 1,
                 Block::Heading { .. } => {}          // P1-1：小节标题不计入 paragraphs
                 Block::Table { .. } => stats.tables += 1,
+                // P1-5：横道图表不落 BidTableHeader，不计入 tables（与 verify doc.tables 同口径）
+                Block::Gantt(_) => {}
                 Block::Figure(fig) => stats.figures += fig.items.len(),
             }
             let (block_xml, captions) =
@@ -173,8 +184,126 @@ fn render_block(
             0,
         )),
         Block::Table { header, rows } => Ok((render_table(header, rows, style)?, 0)),
+        Block::Gantt(gantt) => render_gantt(gantt),
         Block::Figure(fig) => render_figure(pkg, fig_no, fig, style, figure_width_cm),
     }
+}
+
+/// 横道图渲染（P1-5 §3）：全局 `min_start`/`max_end` → 时间桶（7 天，跨度 > 112 天改 14 天）
+/// → 原生表格（`tblStyle=BidTable`，复用 `table.xml`/`table_row.xml`）。
+///
+/// 硬约束：**所有单元格（含表头行）一律 `BidTableBody`**，表头行也不用 `BidTableHeader`，
+/// 因此业务表计数（`doc.tables` 按 `BidTableHeader` 切块）不受影响；行片段的
+/// `{{CANTS_SPLIT}}` 固定 `<w:cantSplit/>`、`{{HEADER_FLAG}}` 为空。
+///
+/// 覆盖判定：任务覆盖某桶 ⇔ `task_start < bucket_end && task_end >= bucket_start`。
+/// 标题非空 → 表格后追加一段 `BidCaption`；返回 (块 xml, 图注段数)。
+fn render_gantt(gantt: &GanttBlock) -> BidResult<(String, usize)> {
+    let empty_err = || BidError::new("横道图至少需要一个工序");
+    if gantt.tasks.is_empty() {
+        return Err(empty_err());
+    }
+    // 日期 → 天数（validate 已校验；此处仍兜底，避免直接调用时 panic）
+    let mut spans: Vec<(i64, i64)> = Vec::with_capacity(gantt.tasks.len());
+    for task in &gantt.tasks {
+        match (days_from_ymd(&task.start), days_from_ymd(&task.end)) {
+            (Some(s), Some(e)) if s <= e => spans.push((s, e)),
+            _ => {
+                return Err(BidError::new(format!(
+                    "横道图日期非法: {}..{}",
+                    task.start, task.end
+                )));
+            }
+        }
+    }
+    let min_start = spans.iter().map(|(s, _)| *s).min().ok_or_else(empty_err)?;
+    let max_end = spans.iter().map(|(_, e)| *e).max().ok_or_else(empty_err)?;
+    let span = max_end - min_start + 1;
+    let bucket_days = if span <= 112 { GANTT_BUCKET_DAYS } else { GANTT_BUCKET_DAYS_WIDE };
+    let buckets = (span + bucket_days - 1) / bucket_days;
+    if buckets > GANTT_MAX_BUCKETS {
+        return Err(BidError::new("横道图跨度过大（>16 个时间桶）"));
+    }
+    let cols = buckets as usize + 1;
+
+    // 列宽：首列 2600 twips，其余均分余宽（整除余数给首列，与 render_table 同约定）
+    let rest = CONTENT_WIDTH_TWIPS - GANTT_NAME_WIDTH;
+    let base = rest / buckets as u32;
+    let rem = rest % buckets as u32;
+    let mut widths: Vec<u32> = Vec::with_capacity(cols);
+    widths.push(GANTT_NAME_WIDTH + rem);
+    widths.extend(std::iter::repeat_n(base, buckets as usize));
+    let grid: String = widths
+        .iter()
+        .map(|w| format!("<w:gridCol w:w=\"{w}\"/>"))
+        .collect();
+
+    // 表头行：`工序` + 各桶起始日 `MM-DD`（桶按自然日切，从 min_start 起算）
+    let mut header: Vec<String> = Vec::with_capacity(cols);
+    header.push("工序".to_string());
+    for b in 0..buckets {
+        let (_, month, day) = ymd_from_days(min_start + b * bucket_days);
+        header.push(format!("{month:02}-{day:02}"));
+    }
+    let mut rows_xml = render_gantt_row(&widths, &header, None);
+
+    // 正文行：工序名 + 每桶一格（覆盖则加底纹、无文本）
+    for (idx, task) in gantt.tasks.iter().enumerate() {
+        let (task_start, task_end) = spans[idx];
+        let mut fills: Vec<bool> = Vec::with_capacity(cols);
+        fills.push(false);
+        for b in 0..buckets {
+            let bucket_start = min_start + b * bucket_days;
+            let bucket_end = bucket_start + bucket_days;
+            fills.push(task_start < bucket_end && task_end >= bucket_start);
+        }
+        let mut cells: Vec<String> = Vec::with_capacity(cols);
+        cells.push(task.name.trim().to_string());
+        cells.extend(std::iter::repeat_n(String::new(), buckets as usize));
+        rows_xml.push_str(&render_gantt_row(&widths, &cells, Some(&fills)));
+    }
+
+    let mut out = TABLE_XML
+        .replace("{{GRID}}", &grid)
+        .replace("{{ROWS}}", &rows_xml);
+    let title = gantt.title.trim();
+    if title.is_empty() {
+        return Ok((out, 0));
+    }
+    out.push_str(&CAPTION_XML.replace("{{TEXT}}", &escape_xml(title)));
+    Ok((out, 1))
+}
+
+/// 横道图单行（P1-5 §3.5）：复用 `table_row.xml`，`{{CANTS_SPLIT}}`=`<w:cantSplit/>`、
+/// `{{HEADER_FLAG}}`=空；`fills` 为 `None`（表头行）或每列是否加 `4877AC` 底纹。
+/// 文本为空时不输出 run（bar 格只有空段落，与 §3.4 片段一致）。
+fn render_gantt_row(widths: &[u32], texts: &[String], fills: Option<&[bool]>) -> String {
+    let mut cells_xml = String::new();
+    for (i, text) in texts.iter().enumerate() {
+        let w = widths.get(i).copied().unwrap_or(0);
+        let shd = match fills {
+            Some(f) if f.get(i).copied().unwrap_or(false) => format!(
+                "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"{GANTT_BAR_FILL}\"/>"
+            ),
+            _ => String::new(),
+        };
+        let run = if text.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "<w:r><w:t xml:space=\"preserve\">{}</w:t></w:r>",
+                escape_xml(text)
+            )
+        };
+        cells_xml.push_str(&format!(
+            "<w:tc><w:tcPr><w:tcW w:w=\"{w}\" w:type=\"dxa\"/>{shd}</w:tcPr>\
+             <w:p><w:pPr><w:pStyle w:val=\"BidTableBody\"/></w:pPr>{run}</w:p></w:tc>"
+        ));
+    }
+    TABLE_ROW_XML
+        .replace("{{CANTS_SPLIT}}", "<w:cantSplit/>")
+        .replace("{{HEADER_FLAG}}", "")
+        .replace("{{CELLS}}", &cells_xml)
 }
 
 /// 表格渲染（§6.4 + §5.5 table.xml / table_row.xml）
@@ -360,7 +489,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use super::super::model::Chapter;
+    use super::super::model::{Chapter, GanttTask};
     use super::super::verify::{self, Expect};
     use std::collections::BTreeMap;
 
@@ -872,5 +1001,119 @@ mod tests {
         assert!(!tbl.contains("<w:cantSplit/>"), "cant_split=false 全表不得含: {tbl}");
         let tbl_on = render_table(&["h".to_string()], &[vec!["b".to_string()]], &DocStyle::default()).unwrap();
         assert!(tbl_on.contains("<w:cantSplit/>"), "cant_split=true 全表须含: {tbl_on}");
+    }
+
+    // -----------------------------------------------------------------------
+    // P1-5 横道图（3 条）
+    // -----------------------------------------------------------------------
+
+    fn gantt_task(name: &str, start: &str, end: &str) -> GanttTask {
+        GanttTask {
+            name: name.to_string(),
+            start: start.to_string(),
+            end: end.to_string(),
+        }
+    }
+
+    fn gantt_req(tasks: Vec<GanttTask>, title: &str, out: &Path) -> BidExportRequest {
+        BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Gantt(GanttBlock {
+                    title: title.to_string(),
+                    tasks,
+                })],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        }
+    }
+
+    /// P1-5 §5：3 工序 → 一张 BidTable 表（无 BidTableHeader/不影响 doc.tables）、
+    /// 底纹次数 = 覆盖桶数（≥ 工序数）、单元格全 BidTableBody、表头为桶起始日 MM-DD。
+    #[test]
+    fn gantt_renders_native_table() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p15-gantt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("gantt.docx");
+        let req = gantt_req(
+            vec![
+                gantt_task("塘底清淤", "2026-12-01", "2026-12-10"),
+                gantt_task("管网敷设", "2026-12-05", "2026-12-20"),
+                gantt_task("路基整平", "2026-12-15", "2026-12-25"),
+            ],
+            "",
+            &out,
+        );
+
+        let (stats, _) = export(&req, Path::new(TEMPLATE), &out).unwrap();
+        assert_eq!(stats.tables, 0, "横道图表不计入 tables");
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        // span = 25 天 → 7 天/桶 → 4 桶（12-01/12-08/12-15/12-22）
+        assert_eq!(doc.matches("<w:gridCol").count(), 5, "1 工序列 + 4 桶: {doc}");
+        for label in ["工序", "12-01", "12-08", "12-15", "12-22"] {
+            assert!(doc.contains(label), "表头缺 {label}: {doc}");
+        }
+        // 覆盖桶：清淤 2 + 管网 3 + 整平 2 = 7
+        assert_eq!(
+            doc.matches(r#"w:fill="4877AC""#).count(),
+            7,
+            "底纹格数应等于覆盖桶数: {doc}"
+        );
+        assert!(
+            doc.matches(r#"w:fill="4877AC""#).count() >= 3,
+            "底纹格数应 ≥ 工序数: {doc}"
+        );
+        // 业务表口径：无 BidTableHeader（doc.tables 计数不受影响）；单元格全 BidTableBody
+        assert!(!doc.contains("BidTableHeader"), "横道图不得用 BidTableHeader: {doc}");
+        assert_eq!(
+            doc.matches(r#"w:pStyle w:val="BidTableBody""#).count(),
+            20,
+            "4 行 × 5 列全用 BidTableBody: {doc}"
+        );
+        assert_eq!(doc.matches("BidCaption").count(), 0, "标题为空不加图注: {doc}");
+        assert_eq!(doc.matches("<w:cantSplit/>").count(), 4, "每行都 cantSplit: {doc}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P1-5 §3.2：跨度 > 112 天 → 14 天/桶（2026-01-01..06-30 共 181 天 → 13 桶）
+    #[test]
+    fn gantt_wide_span_uses_14_day_buckets() {
+        let block = GanttBlock {
+            title: "图4-1 施工进度横道图".to_string(),
+            tasks: vec![gantt_task("全工序", "2026-01-01", "2026-06-30")],
+        };
+        let (xml, captions) = render_gantt(&block).unwrap();
+        assert_eq!(captions, 1, "非空标题 → 1 段图注");
+        assert_eq!(xml.matches("<w:gridCol").count(), 14, "1 + 13 桶: {xml}");
+        for label in ["01-01", "01-15", "06-18"] {
+            assert!(xml.contains(label), "14 天桶表头缺 {label}: {xml}");
+        }
+        assert!(!xml.contains("01-08"), "14 天桶不应出现 7 天步长的 01-08: {xml}");
+        assert!(xml.contains("BidCaption"), "非空标题须追加图注段: {xml}");
+    }
+
+    /// P1-5 §3.2：桶数上限 16（224 天恰好 16 桶可导出，225 天 → 17 桶一律报错）
+    #[test]
+    fn gantt_span_too_large_rejected() {
+        let ok = GanttBlock {
+            title: String::new(),
+            tasks: vec![gantt_task("工序", "2026-01-01", "2026-08-12")], // span 224 → 16 桶
+        };
+        let (xml, _) = render_gantt(&ok).unwrap();
+        assert_eq!(xml.matches("<w:gridCol").count(), 17, "16 桶 + 工序列: {xml}");
+
+        let over = GanttBlock {
+            title: String::new(),
+            tasks: vec![gantt_task("工序", "2026-01-01", "2026-08-13")], // span 225 → 17 桶
+        };
+        let err = render_gantt(&over).unwrap_err();
+        assert!(
+            err.to_string().contains("横道图跨度过大（>16 个时间桶）"),
+            "错误信息不符: {err}"
+        );
     }
 }

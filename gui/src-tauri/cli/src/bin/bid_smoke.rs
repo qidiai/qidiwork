@@ -14,6 +14,7 @@ use std::process::ExitCode;
 
 use qidiwork_gui::office::bid::fill;
 use qidiwork_gui::office::bid::model::{Block, BidExportRequest};
+use qidiwork_gui::office::bid::paths::{DEFAULT_STYLE_ID, resolve_for_exe};
 use qidiwork_gui::office::bid::verify::{self, Expect};
 
 /// fixture 期望值口径（§7.1）
@@ -84,9 +85,9 @@ fn run() -> Result<(), String> {
     }
     fixture.req.output_path = out_abs.to_string_lossy().to_string();
 
-    // 模板
-    let template = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("resources/templates/bid-engineering-blue-v1.docx");
+    // 模板：exe 同级 `templates/`（source=`resource`）→ lib 的 `resources/templates`（source=`dev`）。
+    // 解析逻辑与宏都留在 lib（`paths::resolve_for_exe`）：本 crate 是 `src-tauri/cli`，宏在此展开会指错目录。
+    let (template, template_source) = resolve_for_exe(DEFAULT_STYLE_ID)?;
 
     // 导出 + 校验
     let (_stats, bytes) = fill::export(&fixture.req, &template, &out_abs)
@@ -106,9 +107,10 @@ fn run() -> Result<(), String> {
 
     if report.ok() {
         println!(
-            "EXPORT OK path={} bytes={}",
+            "EXPORT OK path={} bytes={} template_source={}",
             out_abs.display(),
-            bytes
+            bytes,
+            template_source
         );
         Ok(())
     } else {

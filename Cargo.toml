@@ -2,6 +2,9 @@
 
 [workspace]
 resolver = "2"
+# gui/ 是独立 workspace(Tauri 依赖树内存敏感,见 gui/src-tauri/Cargo.toml 首段说明);
+# exclude 防止将来 path 依赖把 GUI 反向拉进本工作区。
+exclude = ["gui"]
 members = [
     "crates/codegen/ptyctl",
     "crates/codegen/ptyctl-cli",

@@ -45,6 +45,37 @@ pub fn resolve_template_path(app: &tauri::AppHandle, style_id: &str) -> Result<P
     resolve_from(style_id, app.path().resource_dir().ok().as_deref())
 }
 
+/// lib 的开发态模板目录（`CARGO_MANIFEST_DIR/resources/templates`）。
+///
+/// 宏在本 lib 内展开，`CARGO_MANIFEST_DIR` 恒为 `gui/src-tauri`；
+/// 独立 crate `qidiwork-cli`（`src-tauri/cli`）内的宏会指向该目录，故 CLI 侧一律走本函数/`resolve_for_exe`。
+pub fn dev_templates_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/templates")
+}
+
+/// CLI 用解析：先 `current_exe` 同级 `templates/<id>.docx`（source=`resource`，安装/分发态），
+/// 再本 lib 的 `resources/templates/<id>.docx`（source=`dev`，开发态）。
+///
+/// `source` 供 CLI 摘要打印（如 `"template_source":"resource"`），便于判定命中的是哪一支。
+pub fn resolve_for_exe(style_id: &str) -> Result<(PathBuf, &'static str), String> {
+    validate_style_id(style_id)?;
+    let name = format!("{style_id}.docx");
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    if let Some(dir) = exe_dir {
+        let candidate = dir.join("templates").join(&name);
+        if candidate.is_file() {
+            return Ok((candidate, "resource"));
+        }
+    }
+    let candidate = dev_templates_dir().join(&name);
+    if candidate.is_file() {
+        return Ok((candidate, "dev"));
+    }
+    Err(format!("模板未找到: {name}"))
+}
+
 /// `--self-check` 只读探测入口：把 `resolve_from` 暴露给 bin crate。
 ///
 /// 无副作用（只做 `is_file` 探测，不读内容、不写盘、不改状态），

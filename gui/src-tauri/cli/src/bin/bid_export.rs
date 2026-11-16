@@ -14,8 +14,9 @@
 //! → `(文档标题, 章节)` → 同上导出 + 24 项校验（`--md` 与 `--input` 互斥）。
 //!
 //! 输出约定（供脚本消费）：
-//! - 成功：一行 JSON 摘要 `{"path":…,"bytes":…,"chapters":…,"paragraphs":…,"tables":…,"figures":…}`
-//!   + `EXPORT OK`，exit 0
+//! - 成功：一行 JSON 摘要 `{"path":…,"bytes":…,"chapters":…,"paragraphs":…,"tables":…,"figures":…,"template_source":…}`
+//!   + `EXPORT OK`，exit 0（`template_source` 取值：`resource` = exe 同级 `templates/`、
+//!   `dev` = lib 仓库内 `resources/templates`、`arg` = `--template` 显式指定）
 //! - `--pages`（M1）：24 项 check 通过后再用本机 WPS 实测页数（`office::bid::pages::measure`），
 //!   摘要里多一个 `"pages":N`，并在摘要行之后、`EXPORT OK` 之前打印 `PAGES=<n>`；
 //!   测量失败只打 `WARN 页数测量失败: …`（stderr），不改退出码
@@ -30,6 +31,7 @@ use qidiwork_gui::office::bid::fill;
 use qidiwork_gui::office::bid::markdown;
 use qidiwork_gui::office::bid::model::{BidExportRequest, Block};
 use qidiwork_gui::office::bid::pages;
+use qidiwork_gui::office::bid::paths::{DEFAULT_STYLE_ID, resolve_for_exe};
 use qidiwork_gui::office::bid::verify::{self, VerifyReport};
 
 const USAGE: &str =
@@ -47,6 +49,8 @@ enum Cmd {
         input: PathBuf,
         out: PathBuf,
         template: PathBuf,
+        /// 模板命中来源：`resource` / `dev` / `arg`
+        template_source: &'static str,
         /// `--pages`：导出后追加 WPS 实测页数
         pages: bool,
     },
@@ -55,6 +59,8 @@ enum Cmd {
         md: PathBuf,
         out: PathBuf,
         template: PathBuf,
+        /// 模板命中来源：`resource` / `dev` / `arg`
+        template_source: &'static str,
         number: bool,
         /// `--pages`：导出后追加 WPS 实测页数
         pages: bool,
@@ -70,24 +76,29 @@ fn main() {
             input,
             out,
             template,
+            template_source,
             pages,
-        }) => run_export(&input, &out, &template, pages),
+        }) => run_export(&input, &out, &template, template_source, pages),
         Ok(Cmd::ExportMd {
             md,
             out,
             template,
+            template_source,
             number,
             pages,
-        }) => run_export_md(&md, &out, &template, number, pages),
+        }) => run_export_md(&md, &out, &template, template_source, number, pages),
         Ok(Cmd::CheckOnly { docx }) => run_check_only(&docx),
         Err(msg) => error(&msg),
     }
 }
 
-/// 默认模板：编译期 crate 目录下的 bid-engineering-blue-v1.docx
-fn default_template() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("resources/templates/bid-engineering-blue-v1.docx")
+/// 默认模板：先 exe 同级 `templates/`（source=`resource`），再 lib 的 `resources/templates`
+/// （source=`dev`）。
+///
+/// 解析逻辑与编译期 crate 目录宏都留在 lib（`paths::resolve_for_exe`）：本 crate
+/// 是 `src-tauri/cli`，宏在此处展开会指向错误目录，故本文件不得出现该宏。
+fn default_template() -> Result<(PathBuf, &'static str), String> {
+    resolve_for_exe(DEFAULT_STYLE_ID)
 }
 
 /// `ERROR <原因>` + exit 2
@@ -144,12 +155,17 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
     if no_number && md.is_none() {
         return Err(format!("--no-number 仅与 --md 同时使用\n{USAGE}"));
     }
-    let template = template.unwrap_or_else(default_template);
+    // `--template` 显式指定优先（source=`arg`）；否则走 lib 的 exe/dev 双支解析
+    let (template, template_source) = match template {
+        Some(explicit) => (explicit, "arg"),
+        None => default_template()?,
+    };
     match (md, input, out) {
         (Some(md), _, Some(out)) => Ok(Cmd::ExportMd {
             md,
             out,
             template,
+            template_source,
             number: !no_number,
             pages,
         }),
@@ -157,6 +173,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             input,
             out,
             template,
+            template_source,
             pages,
         }),
         // 缺参分两种情况报，便于脚本精确匹配（仍附 USAGE 便于人工排障）
@@ -207,7 +224,13 @@ fn failed_names(report: &VerifyReport) -> String {
 }
 
 /// 导出：请求 JSON → docx → 结构校验
-fn run_export(input: &Path, out: &Path, template: &Path, pages: bool) -> ! {
+fn run_export(
+    input: &Path,
+    out: &Path,
+    template: &Path,
+    template_source: &'static str,
+    pages: bool,
+) -> ! {
     let text = match std::fs::read_to_string(input) {
         Ok(t) => t,
         Err(e) => error(&format!("读请求文件失败 {}: {e}", input.display())),
@@ -219,11 +242,18 @@ fn run_export(input: &Path, out: &Path, template: &Path, pages: bool) -> ! {
 
     let base = input.parent().map(Path::to_path_buf).unwrap_or_default();
     resolve_figure_paths(&mut req, &base);
-    export_and_verify(req, out, template, pages)
+    export_and_verify(req, out, template, template_source, pages)
 }
 
 /// 导出：Markdown → `parse_markdown_with(src, md 父目录, !no_number)` → 同上导出 + 校验
-fn run_export_md(md: &Path, out: &Path, template: &Path, number: bool, pages: bool) -> ! {
+fn run_export_md(
+    md: &Path,
+    out: &Path,
+    template: &Path,
+    template_source: &'static str,
+    number: bool,
+    pages: bool,
+) -> ! {
     let md_abs = match absolute(md) {
         Ok(p) => p,
         Err(e) => error(&e),
@@ -245,14 +275,20 @@ fn run_export_md(md: &Path, out: &Path, template: &Path, number: bool, pages: bo
         style_id: None,
         figure_width_cm: None,
     };
-    export_and_verify(req, out, template, pages)
+    export_and_verify(req, out, template, template_source, pages)
 }
 
 /// 导出 + 24 项结构校验 + 摘要输出（`--input` / `--md` 共用的收尾）
 ///
 /// `with_pages`：校验通过后再用本机 WPS 实测页数（`pages::measure`）；
 /// 测量失败只打 `WARN`，不影响摘要与退出码。
-fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path, with_pages: bool) -> ! {
+fn export_and_verify(
+    mut req: BidExportRequest,
+    out: &Path,
+    template: &Path,
+    template_source: &'static str,
+    with_pages: bool,
+) -> ! {
     let out_abs = match absolute(out) {
         Ok(p) => p,
         Err(e) => error(&e),
@@ -293,6 +329,7 @@ fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path, wit
         paragraphs: stats.paragraphs,
         tables: stats.tables,
         figures: stats.figures,
+        template_source,
         pages: measured,
     };
     match serde_json::to_string(&summary) {
@@ -307,7 +344,8 @@ fn export_and_verify(mut req: BidExportRequest, out: &Path, template: &Path, wit
     exit(0)
 }
 
-/// 摘要行（字段顺序与原 `BidExportResult` 一致，`--pages` 命中才追加 `pages`）
+/// 摘要行（字段顺序与原 `BidExportResult` 一致，追加 `template_source`；
+/// `--pages` 命中才追加 `pages`）
 #[derive(serde::Serialize)]
 struct ExportSummary {
     path: String,
@@ -316,6 +354,8 @@ struct ExportSummary {
     paragraphs: usize,
     tables: usize,
     figures: usize,
+    /// `resource`（exe 同级 templates/）/ `dev`（仓库内 resources/templates）/ `arg`（--template）
+    template_source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pages: Option<u32>,
 }

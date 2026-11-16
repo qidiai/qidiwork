@@ -7,10 +7,13 @@ description = "QidiWork 办公工作台 —— QIDI Code 的原生 GUI 办公界
 edition = "2024"
 rust-version = "1.85"
 
-# 独立 workspace:主工程(G:\qidiwork\Cargo.toml 已 exclude 本目录)内存敏感,
-# 并入 Tauri 依赖树会显著拖慢主工程 cargo check(docs/操作手册.md 5.1)。
+# 独立 workspace:本目录(qidiwork-gui)+ cli/(qidiwork-cli)自成一区;
+# 主工程 G:\qidiwork\Cargo.toml 的 [workspace] 已 exclude = ["gui"],
+# 避免 Tauri 依赖树显著拖慢主工程 cargo check(docs/操作手册.md 5.1)。
 # cf-acp-lib 等主工程 crate 通过 path 依赖引入(M2 起),跨 workspace 解析不受影响。
+# 根包自动是本 workspace 成员,members 只列子 crate(不写 ".")。
 [workspace]
+members = ["cli"]
 
 # 显式声明主二进制(消除与 src/bin/*.rs 自动发现 bin 的产物歧义)
 [[bin]]

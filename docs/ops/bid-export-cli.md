@@ -68,6 +68,10 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 - 图片相对路径按 **Markdown 文件所在目录** 解析；路径不存在 → `ERROR Markdown 解析失败: 图片不存在: <path>` + exit 2。
 - 解析实现：`parse_markdown_with(src, base_dir, !no_number)`；除内容来源外，
   与 `--input` **完全一致**——同样导出、跑 24 项 check、打印 JSON 摘要 + `EXPORT OK`。
+- 已知取舍①（图片路径）：`![..](路径)` 接受**绝对路径**与 `../` 相对路径，即可读出
+  Markdown 文件所在目录之外的文件——属**有意放开**（出稿常复用上级素材目录），不是路径穿越漏洞；
+  仍要求目标文件真实存在，否则 `ERROR Markdown 解析失败: 图片不存在: <path>`。
+- 已知取舍②（编号）：H4 先于本章任何 H3 出现时，节号自动补 1，产出 `N.1.K`（不会出现 `N.0.K`）。
 - `demo.md` 实测产物：`BidTitle1=4`（文档标题 1 + 3 章）、`BidTitle2=3`（3 个 H3）、
   `BidTitle3≥1`（H4 子节）、带 `BidTableHeader` 的 `<w:tbl>` 1 张、
   `<w:drawing` 5 处（单图 1 + 三栏 3 + 宽图 1）。

@@ -7,6 +7,7 @@
 //!   `##### ` 及以上不识别为标题，整行按普通段落文本保留。
 //! - 空行分隔的普通文本 → 一个 [`Block::Paragraph`]，段内换行以空格连接后 trim。
 //! - GFM 表格（`| a | b |` 紧跟 `| --- | --- |`）→ [`Block::Table`]，单元格 trim。
+//!   而是"表头 + 分隔行"却列数不一致（含数据行列数不符）→ `Err("表格第 N 行列数不符")`，N 从表头算 1。
 //! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`）；连续 3 行图片（中间无空行）
 //!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`）。
 //! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
@@ -14,7 +15,9 @@
 //!
 //! 编号（[`parse_markdown`] 默认开，[`parse_markdown_with`] 可关）：章标题未匹配
 //! `^第.+章` 且未匹配 `^\d+[.．、]` 时加 `第{中文数字}章 ` 前缀；`###`/`####` 未匹配
-//! `^\d+(\.\d+)*` 时加 `{章}.{节}` / `{章}.{节}.{子节} ` 前缀；已编号的原样保留，但计数照常推进。
+//! `^\d+(\.\d+)*` 时加 `{章}.{节}` / `{章}.{节}.{子节} ` 前缀；已编号的原样保留，
+//! 但计数照常推进——显式 `第N章` / `N.M` 还会**同步**计数器，后续自动号从 M+1 接续。
+//! H4 先于 H3 出现时把节号补为 1，产出 `N.1.K` 而非 `N.0.K`。
 //!
 //! 已知取舍：首个 `##` 之前的内容（H1 与导语）在模型中没有归属章节，直接忽略；
 //! 图片相对路径按 `base_dir` 拼接，必须是存在的文件，否则 `Err("图片不存在: {路径}")`。
@@ -143,10 +146,14 @@ impl MdParser<'_> {
     }
 
     fn start_chapter(&mut self, text: &str) {
-        self.chapter_no += 1;
+        let raw = text.trim();
+        // 显式章号（`第N章`，N 为 1–10 中文或阿拉伯数字）同步计数器，后续自动章号接续
+        self.chapter_no = match explicit_chapter_number(raw) {
+            Some(n) => n,
+            None => self.chapter_no + 1,
+        };
         self.sec_no = 0;
         self.sub_no = 0;
-        let raw = text.trim();
         let title = if raw.is_empty() {
             String::new()
         } else if self.number && !matches_chapter_number(raw) {
@@ -161,13 +168,21 @@ impl MdParser<'_> {
     }
 
     fn push_heading(&mut self, level: u8, text: &str) {
+        let raw = text.trim();
         if level == 3 {
             self.sec_no += 1;
             self.sub_no = 0;
+            // 显式节号 `N.M` 同步计数器（下一自动号 = M+1）
+            if let Some(m) = explicit_section_number(raw) {
+                self.sec_no = m;
+            }
         } else {
+            // H4 先于任何 H3 出现：节号补 1，避免产出 `N.0.K`
+            if self.sec_no == 0 {
+                self.sec_no = 1;
+            }
             self.sub_no += 1;
         }
-        let raw = text.trim();
         let text = if raw.is_empty() {
             String::new()
         } else if self.number && !matches_section_number(raw) {
@@ -226,15 +241,25 @@ impl MdParser<'_> {
     }
 
     /// 尝试在 `start` 处解析 GFM 表格；返回下一行下标，`None` = 不是表格（走段落）。
+    ///
+    /// 判定：本行以 `|` 开头，且下一行也以 `|` 开头、每个单元格都是分隔单元格。
+    /// 一旦判定为表格，列数不一致（表头/分隔行/数据行）就是**硬错误**，不再静默降级成段落。
     fn try_table(&mut self, lines: &[&str], start: usize) -> BidResult<Option<usize>> {
         let head_line = lines[start].trim();
         if !head_line.starts_with('|') || start + 1 >= lines.len() {
             return Ok(None);
         }
-        let header = split_cells(head_line);
-        let sep = split_cells(lines[start + 1]);
-        if header.is_empty() || header.len() != sep.len() || !sep.iter().all(|c| is_sep_cell(c)) {
+        let sep_line = lines[start + 1].trim();
+        if !sep_line.starts_with('|') {
+            return Ok(None); // 下一行根本不是分隔行 → 普通段落
+        }
+        let sep = split_cells(sep_line);
+        if sep.is_empty() || !sep.iter().all(|c| is_sep_cell(c)) {
             return Ok(None);
+        }
+        let header = split_cells(head_line);
+        if header.len() != sep.len() {
+            return Err(BidError::new("表格第 1 行列数不符"));
         }
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut i = start + 2;
@@ -245,7 +270,8 @@ impl MdParser<'_> {
             }
             let cells = split_cells(line);
             if cells.len() != header.len() {
-                return Err(BidError::new(format!("表格第 {} 行列数不符", rows.len() + 1)));
+                // 表头 = 第 1 行、分隔行 = 第 2 行
+                return Err(BidError::new(format!("表格第 {} 行列数不符", rows.len() + 3)));
             }
             rows.push(cells);
             i += 1;
@@ -346,6 +372,41 @@ fn cn_number(n: usize) -> String {
         Some(s) if n > 0 => (*s).to_string(),
         _ => n.to_string(),
     }
+}
+
+/// 10 → 1（中文数字只认 1–10；其余 `None`）。
+fn cn_to_number(s: &str) -> Option<usize> {
+    const CN: [&str; 10] = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+    CN.iter().position(|c| *c == s).map(|i| i + 1)
+}
+
+/// 前导十进制数字 → (值, 占用字节数)。
+fn leading_usize(text: &str) -> Option<(usize, usize)> {
+    let digits: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let n = digits.parse::<usize>().ok()?;
+    Some((n, digits.len()))
+}
+
+/// `^第(.+)章` → 章序号（中文 1–10 或阿拉伯数字）；用于同步 `chapter_no`。
+fn explicit_chapter_number(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('第')?;
+    let idx = rest.find('章')?;
+    if idx == 0 {
+        return None; // "第章" 不算
+    }
+    let mid = &rest[..idx];
+    mid.parse::<usize>().ok().or_else(|| cn_to_number(mid))
+}
+
+/// `^(\d+)\.(\d+)` → 第二个数字 M（`．` 全角句点同样接受）；用于同步 `sec_no`。
+fn explicit_section_number(text: &str) -> Option<usize> {
+    let (_, used) = leading_usize(text)?;
+    let rest = &text[used..];
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix('．'))?;
+    leading_usize(rest).map(|(n, _)| n)
 }
 
 /// 章标题是否已编号：`^第.+章` 或 `^\d+[.．、]`。
@@ -542,6 +603,70 @@ mod tests {
             err.to_string().contains("图片不存在"),
             "错误信息不符: {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 后直接 H4（无 H3）→ 节号补 1，产出 1.1.1 而非 1.0.1
+    #[test]
+    fn h4_without_h3_gets_one_based_section() {
+        let dir = tmp_dir("h4-first");
+        let src = "# 标题\n\n## 工程概况\n\n#### 建设内容\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        assert_eq!(
+            headings(&chapters[0]),
+            vec![(4u8, "1.1.1 建设内容".to_string())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 显式 `### 1.5` → sec_no 同步为 5，下一个未编号 H3 为 1.6
+    #[test]
+    fn explicit_section_number_syncs_counter() {
+        let dir = tmp_dir("sec-sync");
+        let src = "# 标题\n\n## 工程概况\n\n### 1.5 已有\n\n### 新增\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        assert_eq!(
+            headings(&chapters[0]),
+            vec![
+                (3u8, "1.5 已有".to_string()),
+                (3u8, "1.6 新增".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 表头 3 列、分隔行 2 列 → Err 含"表格第 1 行列数不符"（不静默降级为段落）
+    #[test]
+    fn table_column_mismatch_rejected() {
+        let dir = tmp_dir("table-bad");
+        let src = "# 标题\n\n## 主要材料\n\n\
+                   | 材料 | 数量 | 单价 |\n\
+                   | --- | --- |\n\
+                   | 水泥 | 10 | 400 |\n";
+        let err = parse_markdown(src, &dir).unwrap_err();
+        assert!(
+            err.to_string().contains("表格第 1 行列数不符"),
+            "错误信息不符: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `{wide}` 后缀 → FigureLayout::Wide
+    #[test]
+    fn wide_image_parsed() {
+        let dir = tmp_dir("wide");
+        let src = format!("# 标题\n\n## 示意图\n\n![图1]({IMAGE}){{wide}}\n");
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let fig = chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .expect("未解析出图块");
+        assert_eq!(fig.layout, FigureLayout::Wide);
+        assert_eq!(fig.items[0].caption.as_deref(), Some("图1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -142,7 +142,14 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             out,
             template,
         }),
-        _ => Err(format!("缺少 --input 或 --md，或缺 --out\n{USAGE}")),
+        // 缺参分两种情况报，便于脚本精确匹配（仍附 USAGE 便于人工排障）
+        (md, input, _) => {
+            if md.is_none() && input.is_none() {
+                Err(format!("需要 --input 或 --md\n{USAGE}"))
+            } else {
+                Err(format!("缺少 --out\n{USAGE}"))
+            }
+        }
     }
 }
 

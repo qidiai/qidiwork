@@ -183,7 +183,7 @@ pub struct FigureBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Paragraph { text: String },
-    Heading { level: u8, text: String },            // ← P1-1：章内小节标题（渲染 BidTitle{level}）
+    Heading { level: u8, text: String },            // ← P1-1：章内小节标题（渲染 BidTitle{level-1}）
     Table { header: Vec<String>, rows: Vec<Vec<String>> },
     Figure(FigureBlock),                            // ← 新形态（newtype 变体，内部标签 serde 可处理）
 }

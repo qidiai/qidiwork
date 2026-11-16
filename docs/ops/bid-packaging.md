@@ -137,12 +137,14 @@ Compress-Archive -Path target\release\bid_export.exe,target\release\bid_import.e
 
 | 项 | 值 |
 |---|---|
-| 安装包 | `QidiWork Workbench_0.1.11_x64-setup.exe`，**38,761,559 B**（较拆分前 39,321,489 B 少 0.56 MB） |
-| sha256（前 32） | `bdc5279ae76744083cc81d6aa128e1d311ea577f…` |
-| NSI 载荷 | `qidiwork.exe`（内核）+ `templatesid-engineering-blue-v1.docx`；主程序走 `MAINBINARYSRCPATH` |
+| 安装包 | `QidiWork Workbench_0.1.11_x64-setup.exe`，**38,763,896 B**（拆分后两次干净重建：38,761,559 / 38,763,896，差异仅时间戳；较拆分前 39,321,489 B 少约 0.56 MB） |
+| sha256（当前） | `70bd74f21a98df758265b5619ea2ae2f3f3df3d9…`（23:20 那次为 `bdc5279a…`，已被重建覆盖） |
+| NSI 载荷 | 主程序（`MAINBINARYSRCPATH`）+ `qidiwork.exe`（内核）+ `templates/bid-engineering-blue-v1.docx` |
 | `bid_*` 残留 | `grep -c "bid_" installer.nsi` = **0** |
-| 安装目录 | `qidiwork-gui.exe`(18.86 MB) + `qidiwork.exe`(132.5 MB) + `templates\` + `uninstall.exe`，**无任何 CLI 可执行文件** |
+| 安装目录 | `qidiwork-gui.exe`(18.86 MB) + `qidiwork.exe`(132.5 MB) + `templates/` + `uninstall.exe`，**无任何 CLI 可执行文件** |
 | 安装态自检 | `RESOLVED_SOURCE=resource`（命中安装目录） |
+
+> 归档：`prod/releases/qidiwork-setup-0.1.11-r3.exe`（38,763,896 B）+ 同名 sha256 记录；CLI 侧归档 `qidiwork-cli-0.1.11-win64.zip`（4,243,334 B，6 个 exe，sha256 `41af8b72…`）。
 
 > 注：NSIS 模板仍会输出 `; Copy external binaries` / `; Delete external binaries` 两行**空段落头**（无任何 File/Delete 条目）。判据以"`bid_` 行数 == 0 + 安装目录无 CLI"为准，不以段落头是否存在为准。
 

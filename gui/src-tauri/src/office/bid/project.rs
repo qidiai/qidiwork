@@ -12,9 +12,10 @@
 //! - `chapters` 为空或缺省 → 取 `chapters/*.md` 按**文件名升序**；显式列出则按列表顺序。
 //! - 每个 md 按 [`parse_markdown_with`] 解析：**各文件自己的 H1 忽略**（书名取自 manifest），
 //!   其 H2 各自成章；所有文件的章节按顺序拼接。
-//! - `number = true` 时合并后再统一编号（各文件先按 `number = false` 解析，避免每个文件
-//!   各自从"第一章"重来）；重号口径与 `markdown.rs` 一致：`第N章` / `N.M` / `N.M.K`，
-//!   已编号的原样保留并同步计数器。
+//! - 图片相对路径一律按**项目根目录**（`dir`）解析——契约把 `assets/` 放在项目根，
+//!   所以章节里写 `![图注](assets/x.png)`，与 md 文件自身所在目录无关。
+//! - `number = true` 时合并后再统一重号（各文件先按 `number = false` 解析，避免每个文件
+//!   各自从"第一章"重来），调用 [`renumber`]，口径与 `markdown.rs` 完全一致。
 //!
 //! 错误文案：`章节文件不存在: {p}` / `项目清单缺失: bid.project.json` / `章节目录为空: chapters/`。
 
@@ -22,8 +23,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::markdown::parse_markdown_with;
-use super::model::{BidExportRequest, Block, Chapter};
+use super::markdown::{parse_markdown_with, renumber};
+use super::model::{BidExportRequest, Chapter};
+use super::paths::{resolve_from, DEFAULT_STYLE_ID};
 use super::{BidError, BidResult};
 
 /// 项目清单文件名
@@ -99,7 +101,7 @@ pub fn build_request(dir: &Path, number: bool) -> BidResult<BidExportRequest> {
 
     let mut chapters: Vec<Chapter> = Vec::new();
     for path in &paths {
-        let mut parsed = parse_chapter(&manifest.title, path)?;
+        let mut parsed = parse_chapter(&manifest.title, dir, path)?;
         chapters.append(&mut parsed);
     }
     if number {
@@ -133,7 +135,7 @@ pub fn validate_project(dir: &Path) -> BidResult<Vec<String>> {
     let mut problems: Vec<String> = Vec::new();
     let mut chapters: Vec<Chapter> = Vec::new();
     for path in &paths {
-        match parse_chapter(&manifest.title, path) {
+        match parse_chapter(&manifest.title, dir, path) {
             Ok(mut parsed) => chapters.append(&mut parsed),
             Err(e) => push_unique(&mut problems, e.0),
         }
@@ -219,14 +221,14 @@ fn list_chapters_dir(dir: &Path) -> BidResult<Vec<PathBuf>> {
     Ok(files.into_iter().map(|(_, p)| p).collect())
 }
 
-/// 解析单个章节文件：图片路径按该文件所在目录解析；文件自身 H1 被预置书名屏蔽掉。
-fn parse_chapter(title: &str, path: &Path) -> BidResult<Vec<Chapter>> {
+/// 解析单个章节文件：图片相对路径按**项目根**解析（契约把 `assets/` 放在项目根，
+/// 与 `chapters/` 平级，故 md 里写 `assets/x.png`）；文件自身 H1 被预置书名屏蔽掉。
+fn parse_chapter(title: &str, base_dir: &Path, path: &Path) -> BidResult<Vec<Chapter>> {
     let src = std::fs::read_to_string(path).map_err(|_| {
         BidError::new(format!("章节文件不存在: {}", path.display()))
     })?;
-    let base = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let src = with_doc_title(title, &src);
-    let (_title, chapters) = parse_markdown_with(&src, &base, false)
+    let (_title, chapters) = parse_markdown_with(&src, base_dir, false)
         .map_err(|e| BidError::new(format!("章节解析失败 {}: {e}", path.display())))?;
     Ok(chapters)
 }
@@ -243,112 +245,16 @@ fn push_unique(problems: &mut Vec<String>, msg: String) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 合并后统一重号（口径对齐 markdown.rs；该模块的编号函数为私有，故在此复刻最小集）
-// ---------------------------------------------------------------------------
-
-/// 合并后统一重号：章号连续，`N.M` / `N.M.K` 随本章序号走；已编号的原样保留并同步计数器。
-fn renumber(chapters: &mut [Chapter]) {
-    let mut chapter_no = 0usize;
-    for chapter in chapters.iter_mut() {
-        let raw = chapter.title.trim().to_string();
-        chapter_no = explicit_chapter_number(&raw).unwrap_or(chapter_no + 1);
-        chapter.title = if raw.is_empty() || matches_chapter_number(&raw) {
-            raw
-        } else {
-            format!("第{}章 {}", cn_number(chapter_no), raw)
-        };
-
-        let mut sec_no = 0usize;
-        let mut sub_no = 0usize;
-        for block in chapter.blocks.iter_mut() {
-            let Block::Heading { level, text } = block else {
-                continue;
-            };
-            let raw = text.trim().to_string();
-            if *level == 3 {
-                sec_no += 1;
-                sub_no = 0;
-                if let Some(m) = explicit_section_number(&raw) {
-                    sec_no = m;
-                }
-            } else {
-                if sec_no == 0 {
-                    sec_no = 1; // H4 先于 H3：节号补 1，避免 N.0.K
-                }
-                sub_no += 1;
-            }
-            *text = if raw.is_empty() || matches_section_number(&raw) {
-                raw
-            } else if *level == 3 {
-                format!("{chapter_no}.{sec_no} {raw}")
-            } else {
-                format!("{chapter_no}.{sec_no}.{sub_no} {raw}")
-            };
-        }
-    }
-}
-
-/// 1..=10 → 一…十；其余用阿拉伯数字。
-fn cn_number(n: usize) -> String {
-    const CN: [&str; 10] = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
-    match CN.get(n.wrapping_sub(1)) {
-        Some(s) if n > 0 => (*s).to_string(),
-        _ => n.to_string(),
-    }
-}
-
-/// 10 → 1（中文数字只认 1–10；其余 `None`）。
-fn cn_to_number(s: &str) -> Option<usize> {
-    const CN: [&str; 10] = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
-    CN.iter().position(|c| *c == s).map(|i| i + 1)
-}
-
-/// 前导十进制数字 → (值, 占用字节数)。
-fn leading_usize(text: &str) -> Option<(usize, usize)> {
-    let digits: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
-    }
-    Some((digits.parse::<usize>().ok()?, digits.len()))
-}
-
-/// `^第(.+)章` → 章序号（中文 1–10 或阿拉伯数字）。
-fn explicit_chapter_number(text: &str) -> Option<usize> {
-    let rest = text.strip_prefix('第')?;
-    let idx = rest.find('章')?;
-    if idx == 0 {
-        return None; // "第章" 不算
-    }
-    let mid = &rest[..idx];
-    mid.parse::<usize>().ok().or_else(|| cn_to_number(mid))
-}
-
-/// `^(\d+)\.(\d+)` → 第二个数字（`．` 全角句点同样接受）。
-fn explicit_section_number(text: &str) -> Option<usize> {
-    let (_, used) = leading_usize(text)?;
-    let rest = &text[used..];
-    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix('．'))?;
-    leading_usize(rest).map(|(n, _)| n)
-}
-
-/// 章标题是否已编号：`^第.+章` 或 `^\d+[.．、]`。
-fn matches_chapter_number(text: &str) -> bool {
-    if let Some(rest) = text.strip_prefix('第') {
-        let mut chars = rest.chars();
-        if let Some(first) = chars.next() {
-            if first != '章' && chars.any(|c| c == '章') {
-                return true;
-            }
-        }
-    }
-    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
-    digits > 0 && matches!(text.chars().nth(digits), Some('.' | '．' | '、'))
-}
-
-/// 节/子节标题是否已编号：以 ASCII 数字开头即视为已编号。
-fn matches_section_number(text: &str) -> bool {
-    text.chars().next().is_some_and(|c| c.is_ascii_digit())
+/// 解析模板真身：清单 `style_id` 决定用哪套样式（缺省 / 空白 → [`DEFAULT_STYLE_ID`]）。
+///
+/// 固定走 `resolve_from(style_id, None)`（无安装态概念，落到 dev 回退
+/// `resources/templates/`）；非法 id / 文件缺失均为 `Err`，CLI 映射成 `ERROR …` exit 2。
+pub fn resolve_template(style_id: Option<&str>) -> BidResult<PathBuf> {
+    let style_id = style_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_STYLE_ID);
+    resolve_from(style_id, None).map_err(BidError::new)
 }
 
 // ---------------------------------------------------------------------------
@@ -374,9 +280,14 @@ mod tests {
 
     /// 写清单（`chapters` 为空 → 走目录扫描分支）
     fn write_manifest(dir: &Path, chapters: Vec<String>) {
+        write_manifest_full(dir, None, chapters);
+    }
+
+    /// 写清单（显式指定 `style_id`）
+    fn write_manifest_full(dir: &Path, style_id: Option<String>, chapters: Vec<String>) {
         let manifest = ProjectManifest {
             title: TITLE.to_string(),
-            style_id: None,
+            style_id,
             figure_width_cm: None,
             chapters,
         };
@@ -485,6 +396,54 @@ mod tests {
             "问题信息不符: {}",
             problems[0]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 健康项目（图片放项目根 `assets/`，md 写 `assets/…`）→ `validate_project` 空 vec
+    #[test]
+    fn healthy_project_has_no_problems() {
+        let dir = tmp_project("healthy");
+        write_manifest(&dir, vec!["chapters/01-概述.md".to_string()]);
+        std::fs::create_dir_all(dir.join(ASSETS_DIR)).unwrap();
+        std::fs::copy(asset_png(), dir.join(ASSETS_DIR).join("image3.png")).unwrap();
+        write_chapter(
+            &dir,
+            "01-概述.md",
+            "## 工程概况\n\n### 项目简介\n\n![施工现场平面布置](assets/image3.png)\n\n正文。\n",
+        );
+
+        let problems = validate_project(&dir).unwrap();
+        assert!(problems.is_empty(), "健康项目不应有问题: {problems:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 清单 `style_id` 生效：`build_request` 原样透传，`resolve_template` 按它取模板
+    /// （不存在的 id → Err）；缺省（`None`）回落到默认模板。
+    #[test]
+    fn build_uses_manifest_style_id() {
+        let dir = tmp_project("style-id");
+        write_manifest_full(
+            &dir,
+            Some("no-such-style-v9".to_string()),
+            vec!["chapters/01-概述.md".to_string()],
+        );
+        write_chapter(&dir, "01-概述.md", "## 工程概况\n\n正文。\n");
+
+        let req = build_request(&dir, true).unwrap();
+        assert_eq!(
+            req.style_id.as_deref(),
+            Some("no-such-style-v9"),
+            "清单 style_id 应透传到请求"
+        );
+
+        let err = resolve_template(req.style_id.as_deref()).unwrap_err();
+        assert!(
+            err.to_string().contains("模板未找到"),
+            "不存在的 style_id 应报模板缺失: {err}"
+        );
+
+        // 缺省 / 空白 → 默认模板仍可解析
+        assert!(resolve_template(None).is_ok(), "None 应回落到默认模板");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

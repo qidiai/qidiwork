@@ -8,7 +8,7 @@
 适合多人分章协作（一人一章一个 md）与批量出稿；退出码机器可读，失败会点名不合格的 check。
 
 CLI 位置：`gui/src-tauri/src/bin/bid_project.rs`（`cargo run --bin bid_project`）。
-默认模板：`gui/src-tauri/resources/templates/bid-engineering-blue-v1.docx`。
+默认模板：`gui/src-tauri/resources/templates/bid-engineering-blue-v1.docx`（清单 `style_id` 可换）。
 （只导出单份 md 时仍可用 `bid_export --md`，见 `docs/ops/bid-export-cli.md`。）
 
 ## 目录结构
@@ -38,11 +38,16 @@ CLI 位置：`gui/src-tauri/src/bin/bid_project.rs`（`cargo run --bin bid_proje
 - `title`：书名。**各 md 文件自己的 H1 一律忽略**，书名只认这里。
 - `chapters` 为 `[]` 或缺省 → 取 `chapters/*.md` **按文件名升序**（推荐 `01-`/`02-` 前缀）；
   显式列成 `["chapters/02-施工部署.md", "chapters/01-概述.md"]` 则**以列表顺序为准**。
-- `style_id` / `figure_width_cm`：透传给导出层，`null` 用默认（工程蓝 / 15.5cm）。
+- `style_id`：`build` 用它选模板 `gui/src-tauri/resources/templates/<style_id>.docx`；
+  `null` / 缺省 → `bid-engineering-blue-v1`（工程蓝）。id 非法或模板不存在 →
+  `ERROR 模板解析失败: 模板未找到: <style_id>.docx` exit 2。
+- `figure_width_cm`：透传给导出层，`null` 用默认 15.5cm。
 
 Markdown 口径与 `bid_export --md` 完全一致（见 P1-1 规格 §1）：`##` 成章、`###`/`####` 成小节、
 GFM 表格、整行 `![图注](路径)` 成图（连写 3 行合成三栏图桌、`{wide}` 后缀为通栏图）。
-图片相对路径按**该 md 文件所在目录**解析，所以 `chapters/01-概述.md` 里写的是 `assets/image3.png`。
+图片相对路径一律按**项目根目录**（`<proj>/`）解析——`assets/` 与 `chapters/` 平级，
+所以 `chapters/01-概述.md` 里写 `![施工现场平面布置](assets/image3.png)`，
+指向 `<proj>/assets/image3.png`（写成 `chapters/assets/…` 会找不到图）。
 
 ## 三个子命令
 
@@ -113,7 +118,8 @@ cargo run --quiet --bin bid_project -- check "$PROJ"
 | `ERROR 项目已存在` | 目标目录已有清单 | 换目录；确需重建先自行备份并删除清单 |
 | `ERROR 章节目录为空: chapters/` | 清单 `chapters=[]` 且 `chapters/` 无 `.md` | 往 `chapters/` 放 `01-….md`，或在清单里显式列出 |
 | `ERROR 章节文件不存在: …` | 清单里列的文件不在盘上 | 改清单或补文件 |
-| `ERROR 章节解析失败 …: 图片不存在: …` | md 引用的图片缺失（相对 md 所在目录） | 图片放进 `assets/`，md 写 `assets/xxx.png` |
+| `ERROR 章节解析失败 …: 图片不存在: …` | md 引用的图片缺失（相对**项目根目录**解析） | 图片放进 `<proj>/assets/`，md 写 `assets/xxx.png` |
+| `ERROR 模板解析失败: 模板未找到: …` | 清单 `style_id` 指向的模板不存在 / id 非法 | 改成 `null` 用默认工程蓝，或把 `<style_id>.docx` 放进 `resources/templates/` |
 | `ERROR 章节解析失败 …: 表格第 N 行列数不符` | GFM 表格列数不一致 | 补齐竖线单元格（每行列数一致） |
 | `PROJECT FAIL 至少需要一章` | 所有 md 都没有 `##` 小节 | 章文件里至少一个 `##` |
 | `PROJECT FAIL 图注不能为空` | 图片行 `![…]()` 图注为空且单图无组图注 | 给图注补字 |

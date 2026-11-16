@@ -6,7 +6,8 @@
 //! - `bid_project check <dir>`
 //!
 //! `new`：建 `bid.project.json` + `chapters/01-概述.md` + `assets/`；清单已存在 → `ERROR 项目已存在`。
-//! `build`：`project::build_request` 合并章节 → `fill::export` 出 docx（默认 `<dir>/out.docx`）
+//! `build`：`project::build_request` 合并章节 → 按清单 `style_id` 取模板（缺省
+//! `bid-engineering-blue-v1`）`fill::export` 出 docx（默认 `<dir>/out.docx`）
 //! → `verify::verify(&out, None)` 24 项结构校验 → 一行 JSON 摘要 + `BUILD OK`。
 //! `check`：`project::validate_project` → `PROJECT OK` / `PROJECT FAIL <问题,逗号分隔>`。
 //!
@@ -125,12 +126,6 @@ fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
     }
 }
 
-/// 默认模板：编译期 crate 目录下的 bid-engineering-blue-v1.docx
-fn default_template() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("resources/templates/bid-engineering-blue-v1.docx")
-}
-
 /// 相对路径补成基于 CWD 的绝对路径（不做 canonicalize：目标文件可能尚不存在）
 fn absolute(path: &Path) -> Result<PathBuf, String> {
     if path.is_absolute() {
@@ -190,7 +185,13 @@ fn run_build(dir: &Path, out: Option<&Path>, number: bool) -> ! {
     }
     req.output_path = out_abs.to_string_lossy().to_string();
 
-    let (stats, bytes) = match fill::export(&req, &default_template(), &out_abs) {
+    // 模板按清单 `style_id` 取（缺省 → DEFAULT_STYLE_ID；不存在/非法 → ERROR exit 2）
+    let template = match project::resolve_template(req.style_id.as_deref()) {
+        Ok(p) => p,
+        Err(e) => error(&format!("模板解析失败: {e}")),
+    };
+
+    let (stats, bytes) = match fill::export(&req, &template, &out_abs) {
         Ok(v) => v,
         Err(e) => error(&format!("导出失败: {e}")),
     };

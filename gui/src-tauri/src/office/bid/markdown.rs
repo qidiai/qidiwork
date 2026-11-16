@@ -109,6 +109,56 @@ pub fn parse_markdown_with(
     Ok((title, p.chapters))
 }
 
+// ---------------------------------------------------------------------------
+// 合并后统一重号（P1-2：多文件合并后整体编号，`project::build_request` 调用）
+// ---------------------------------------------------------------------------
+
+/// 合并后统一重号：章号连续，`N.M` / `N.M.K` 随本章序号走；已编号的原样保留并同步计数器。
+///
+/// 口径与 [`parse_markdown_with`]（`number = true`）完全一致，区别只是作用在**已解析好**的
+/// 章节序列上：各 md 先用 `number = false` 解析，合并完成后整体过一次，避免每个文件各自
+/// 从「第一章」重来。显式 `第N章` / `N.M` 会同步计数器，后续自动号从 N+1 接续。
+pub fn renumber(chapters: &mut [Chapter]) {
+    let mut chapter_no = 0usize;
+    for chapter in chapters.iter_mut() {
+        let raw = chapter.title.trim().to_string();
+        chapter_no = explicit_chapter_number(&raw).unwrap_or(chapter_no + 1);
+        chapter.title = if raw.is_empty() || matches_chapter_number(&raw) {
+            raw
+        } else {
+            format!("第{}章 {}", cn_number(chapter_no), raw)
+        };
+
+        let mut sec_no = 0usize;
+        let mut sub_no = 0usize;
+        for block in chapter.blocks.iter_mut() {
+            let Block::Heading { level, text } = block else {
+                continue;
+            };
+            let raw = text.trim().to_string();
+            if *level == 3 {
+                sec_no += 1;
+                sub_no = 0;
+                if let Some(m) = explicit_section_number(&raw) {
+                    sec_no = m;
+                }
+            } else {
+                if sec_no == 0 {
+                    sec_no = 1; // H4 先于 H3：节号补 1，避免 N.0.K
+                }
+                sub_no += 1;
+            }
+            *text = if raw.is_empty() || matches_section_number(&raw) {
+                raw
+            } else if *level == 3 {
+                format!("{chapter_no}.{sec_no} {raw}")
+            } else {
+                format!("{chapter_no}.{sec_no}.{sub_no} {raw}")
+            };
+        }
+    }
+}
+
 /// 解析中的可变状态。
 struct MdParser<'a> {
     base_dir: &'a Path,

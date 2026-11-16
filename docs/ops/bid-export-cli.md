@@ -47,7 +47,7 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 
 顶层字段对应 `office::bid::model::BidExportRequest`：`title`、`chapters[]`、
 可选 `output_path`（可省略，被 `--out` 覆盖）、`style_id`、`figure_width_cm`。
-`chapters[].blocks[]` 用内部标签 `type` 区分三种块：
+`chapters[].blocks[]` 用内部标签 `type` 区分**四种**块：
 
 ```json
 {
@@ -85,7 +85,8 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 
 要点：
 
-- `type`：`paragraph` / `table` / `figure`（`snake_case`）。
+- `type`：`paragraph` / `heading` / `table` / `figure`（`snake_case`）。
+- `heading.level` 仅 **3 或 4**（H3→`BidTitle2`、H4→`BidTitle3`；H2 是章标题，不进 `heading`）。
 - `figure.layout`：`single` / `wide` / `three_up`；`three_up` 不足三张时补空单元格，不拉伸、不报错。
 - `figure.caption_mode`：`per_image`（逐图图注，默认）/ `per_group`（整组一条图注）。
 - `figure.items[].path` 支持相对路径（按**请求 JSON 所在目录**解析，与 `bid_smoke` 同口径）与绝对路径。
@@ -97,10 +98,11 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 | 退出码 | 含义 | 输出 |
 | --- | --- | --- |
 | `0` | 导出成功且 24 项 check 全过；或 `--check-only` 全过 | 一行 JSON 摘要 + `EXPORT OK` / `{"checks":N,"ok":true}` + `CHECK OK` |
-| `1` | 已产出 docx，但结构校验有 `ok=false` | `CHECK FAIL <失败 check 名,逗号分隔>` |
+| `1` | 结构校验有 `ok=false`（导出后自检或 `--check-only` 均同） | 先打印 `{"checks":N,"ok":false}`，再打印 `CHECK FAIL <失败 check 名,逗号分隔>` |
 | `2` | 参数错误 / 读盘失败 / JSON 解析失败 / 导出或校验异常 | `ERROR <原因>`（stderr） |
 
 `--check-only` 传入不存在的文件属于读盘错误 → exit 2（不是 1）。
+四个旗标（`--input/--out/--template/--check-only`）后缺值 → `ERROR 缺少 <flag> 的值` + exit 2。
 
 ## 注意事项
 

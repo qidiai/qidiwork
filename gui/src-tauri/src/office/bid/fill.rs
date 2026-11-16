@@ -123,10 +123,9 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
         let hdr = pkg.text("word/header1.xml")?;
         pkg.set_text("word/header1.xml", hdr.replace("{{DOC_TITLE}}", &escape_xml(&req.title)));
     }
-    // 9) 保存前重写 core.xml（P0c §2：暗标元数据清空；包内无该部件则跳过，不新建）
-    if pkg.contains("docProps/core.xml") {
-        pkg.set_text("docProps/core.xml", core_xml(&req.title));
-    }
+    // 9) 保存前重写 core.xml（P0c §2：暗标元数据清空）；模板缺该部件时按同规格新建，
+    //    否则 doc.metadata_anonymous 会因 core.xml 缺失而必然失败
+    pkg.set_text("docProps/core.xml", core_xml(&req.title));
     // 10) 父目录不存在先创建，再保存
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -749,6 +748,104 @@ mod tests {
         assert!(
             core.contains("<dc:title>暗标元数据测试标题</dc:title>"),
             "core.xml title 未写入本次标题: {core}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P0c：标题含 <&> → core.xml 里写的是转义形态 &lt;&amp;&gt;（不得裸写 XML 元字符）
+    #[test]
+    fn metadata_title_is_escaped() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p0c-meta-esc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("meta-esc.docx");
+        let req = BidExportRequest {
+            title: "<&>".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Paragraph { text: "b".to_string() }],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let core = pkg.text("docProps/core.xml").unwrap();
+        assert!(
+            core.contains("<dc:title>&lt;&amp;&gt;</dc:title>"),
+            "core.xml title 未转义: {core}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P0c：导出件 core.xml 不含时间戳/修订号（dcterms:created / dcterms:modified / cp:revision）
+    #[test]
+    fn metadata_has_no_timestamp_or_revision() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p0c-meta-ts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("meta-ts.docx");
+        let req = BidExportRequest {
+            title: "暗标时间戳测试".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Paragraph { text: "b".to_string() }],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let core = pkg.text("docProps/core.xml").unwrap();
+        for needle in ["dcterms:created", "dcterms:modified", "cp:revision"] {
+            assert!(!core.contains(needle), "core.xml 泄漏 {needle}: {core}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P0c：模板包内没有 docProps/core.xml 时，导出须新建同规格 core.xml（creator 为空）
+    #[test]
+    fn missing_core_xml_gets_created() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p0c-meta-mk-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 1) 由模板派生一个「无 core.xml」的模板
+        let mut tpl = DocxPackage::open(Path::new(TEMPLATE)).unwrap();
+        assert!(tpl.contains("docProps/core.xml"), "模板本身应含 core.xml");
+        tpl.entries.remove("docProps/core.xml");
+        let bare_tpl = dir.join("tpl-no-core.docx");
+        tpl.save(&bare_tpl).unwrap();
+        assert!(!DocxPackage::open(&bare_tpl).unwrap().contains("docProps/core.xml"));
+
+        // 2) 用它导出 → 新包必须补出 core.xml
+        let out = dir.join("meta-mk.docx");
+        let req = BidExportRequest {
+            title: "补建元数据".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Paragraph { text: "b".to_string() }],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+        export(&req, &bare_tpl, &out).unwrap();
+
+        let pkg = DocxPackage::open(&out).unwrap();
+        assert!(pkg.contains("docProps/core.xml"), "导出件缺少补建的 core.xml");
+        let core = pkg.text("docProps/core.xml").unwrap();
+        assert!(
+            core.contains("<dc:creator></dc:creator>"),
+            "补建的 core.xml creator 未置空: {core}"
+        );
+        assert!(
+            core.contains("<cp:lastModifiedBy></cp:lastModifiedBy>"),
+            "补建的 core.xml 缺空 lastModifiedBy: {core}"
+        );
+        assert!(
+            core.contains("<dc:title>补建元数据</dc:title>"),
+            "补建的 core.xml title 不正确: {core}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

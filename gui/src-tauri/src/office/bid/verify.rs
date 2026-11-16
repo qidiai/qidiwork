@@ -368,25 +368,39 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     ));
 
     // #24 doc.metadata_anonymous（P0c §0.1）：core.xml 不得含 qidiwork / Bid Template v1，
-    //     且 dc:creator 为空（暗标身份/工具名泄漏防护；包内无 core.xml → 该 check 不通过）
+    //     dc:creator 与 cp:lastModifiedBy 必须为空（`<x></x>` 与 `<x/>` 两种形态都算空），
+    //     且不得含时间戳/修订号（dcterms:created / dcterms:modified / cp:revision）；
+    //     包内无 core.xml → 该 check 不通过
     let core = if pkg.contains("docProps/core.xml") {
         pkg.text("docProps/core.xml")?
     } else {
         String::new()
     };
-    let creator_empty = core.contains("<dc:creator></dc:creator>");
+    let creator_empty = empty_element(&core, "dc:creator");
+    let last_modified_empty = empty_element(&core, "cp:lastModifiedBy");
     let leaked: Vec<&str> = ["qidiwork", "Bid Template v1"]
         .iter()
         .copied()
         .filter(|n| core.contains(n))
         .collect();
+    let stamps: Vec<&str> = ["dcterms:created", "dcterms:modified", "cp:revision"]
+        .iter()
+        .copied()
+        .filter(|n| core.contains(n))
+        .collect();
+    let ok = creator_empty && last_modified_empty && leaked.is_empty() && stamps.is_empty();
     checks.push(Check {
         name: "doc.metadata_anonymous".to_string(),
-        ok: creator_empty && leaked.is_empty(),
-        detail: if creator_empty && leaked.is_empty() {
-            "core.xml 无 qidiwork/Bid Template v1 残留且 creator 为空".to_string()
+        ok,
+        detail: if ok {
+            "core.xml 无 qidiwork/Bid Template v1 残留，creator/lastModifiedBy 为空，无时间戳与修订号"
+                .to_string()
         } else {
-            format!("core.xml 残留: {}；creator 为空: {}", leaked.join("、"), creator_empty)
+            format!(
+                "core.xml 残留: {}；creator 为空: {creator_empty}；lastModifiedBy 为空: {last_modified_empty}；时间戳/修订号: {}",
+                leaked.join("、"),
+                if stamps.is_empty() { "无".to_string() } else { stamps.join("、") }
+            )
         },
     });
 
@@ -563,6 +577,43 @@ fn count_check(
         ok: got == want,
         detail: format!("计数 {got}，期望 {want}"),
     }
+}
+
+/// 元素 `tag`（可带命名空间前缀，如 `dc:creator`）是否全部为空内容：
+/// `<tag></tag>`、`<tag/>`、`<tag />`、`<tag>  </tag>` 都算空。
+/// 元素出现至少一次且每次都是空 → true；元素不存在或存在任一非空内容 → false。
+fn empty_element(xml: &str, tag: &str) -> bool {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut found = false;
+    let mut from = 0usize;
+    while let Some(at) = xml[from..].find(&open) {
+        let after = from + at + open.len();
+        // 前缀必须紧跟 `>`、`/` 或空白，避免 <dc:creatorX 误命中
+        match xml[after..].chars().next() {
+            Some(c) if c == '>' || c == '/' || c.is_whitespace() => {}
+            _ => {
+                from = after;
+                continue;
+            }
+        }
+        let Some(gt) = xml[after..].find('>').map(|p| after + p) else {
+            return false; // 标签未闭合
+        };
+        found = true;
+        if xml[after..gt].trim_end().ends_with('/') {
+            from = gt + 1; // 自闭合 → 空
+            continue;
+        }
+        let Some(close_at) = xml[gt..].find(&close).map(|p| gt + p) else {
+            return false; // 有开标签无闭标签
+        };
+        if !xml[gt + 1..close_at].trim().is_empty() {
+            return false; // 有文本内容
+        }
+        from = close_at + close.len();
+    }
+    found
 }
 
 /// 按 `<w:tbl>` 切块，返回含 `needle` 的表块（`</w:tbl>` 止；3up 图桌不含 BidTableHeader，自然排除）
@@ -879,7 +930,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 反向篡改：导出件 core.xml 的 creator 改回 qidiwork → doc.metadata_anonymous 必须 ok=false
+    /// 反向篡改 #24：core.xml 的 creator / lastModifiedBy 泄漏、写入时间戳或修订号，
+    /// 都必须让 doc.metadata_anonymous ok=false；`<x></x>` 与 `<x/>` 两种空形态都算空。
     #[test]
     fn metadata_leak_fails() {
         let dir = std::env::temp_dir().join(format!("qidi-bid-verify-meta-{}", std::process::id()));
@@ -887,20 +939,58 @@ mod tests {
         let out = dir.join("meta.docx");
         export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
 
-        let mut pkg = DocxPackage::open(&out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
         let core = pkg.text("docProps/core.xml").unwrap();
         assert!(
             core.contains("<dc:creator></dc:creator>"),
             "导出器未清空 creator: {core}"
         );
-        pkg.set_text(
-            "docProps/core.xml",
-            core.replace("<dc:creator></dc:creator>", "<dc:creator>qidiwork</dc:creator>"),
-        );
-        let tampered = dir.join("tampered.docx");
-        pkg.save(&tampered).unwrap();
 
-        let report = verify(&tampered, None).unwrap();
+        // 用例：core.xml 全文替换串 + 期望 ok
+        let core_head = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" \
+xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\">\
+<dc:title>t</dc:title>";
+        let cases: [(&str, &str, bool); 6] = [
+            // 成对空标签 → 通过
+            ("成对空标签", "<dc:creator></dc:creator><cp:lastModifiedBy></cp:lastModifiedBy>", true),
+            // 自闭合空标签 → 通过
+            ("自闭合空标签", "<dc:creator/><cp:lastModifiedBy />", true),
+            // creator 泄漏工具名
+            ("creator 泄漏", "<dc:creator>qidiwork</dc:creator><cp:lastModifiedBy/>", false),
+            // lastModifiedBy 泄漏工具名
+            ("lastModifiedBy 泄漏", "<dc:creator/><cp:lastModifiedBy>qidiwork</cp:lastModifiedBy>", false),
+            // 时间戳泄漏
+            (
+                "dcterms:created 泄漏",
+                "<dc:creator/><cp:lastModifiedBy/><dcterms:created xsi:type=\"dcterms:W3CDTF\">2026-01-01T00:00:00Z</dcterms:created>",
+                false,
+            ),
+            // 修订号泄漏
+            ("cp:revision 泄漏", "<dc:creator/><cp:lastModifiedBy/><cp:revision>7</cp:revision>", false),
+        ];
+        for (label, body, want_ok) in cases {
+            let mut tampered_pkg = DocxPackage { entries: pkg.entries.clone() };
+            tampered_pkg.set_text("docProps/core.xml", format!("{core_head}{body}</cp:coreProperties>"));
+            let tampered = dir.join(format!("tampered-{}.docx", label.replace(':', "-")));
+            tampered_pkg.save(&tampered).unwrap();
+
+            let report = verify(&tampered, None).unwrap();
+            let got = check(&report, "doc.metadata_anonymous");
+            assert_eq!(got.ok, want_ok, "{label}: {got:?}");
+        }
+
+        // 时间戳/修订号两处都漏的合并场景也须失败
+        let mut both = DocxPackage { entries: pkg.entries.clone() };
+        both.set_text(
+            "docProps/core.xml",
+            format!(
+                "{core_head}<dc:creator/><cp:lastModifiedBy/><dcterms:modified>2026-01-01T00:00:00Z</dcterms:modified><cp:revision>9</cp:revision></cp:coreProperties>"
+            ),
+        );
+        let both_path = dir.join("tampered-both.docx");
+        both.save(&both_path).unwrap();
+        let report = verify(&both_path, None).unwrap();
         assert!(
             !check(&report, "doc.metadata_anonymous").ok,
             "{:?}",

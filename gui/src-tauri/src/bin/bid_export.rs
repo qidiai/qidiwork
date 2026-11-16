@@ -67,7 +67,15 @@ fn error(msg: &str) -> ! {
     exit(EXIT_ERROR)
 }
 
-/// 参数解析：`--input`/`--out`/`--template` 任意顺序；`--check-only` 单独使用
+/// 取 `--flag` 后面紧跟的值；缺值直接报错（不静默回落/不落到「缺 --input 或 --out」）
+fn flag_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
+    args.next()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("缺少 {flag} 的值\n{USAGE}"))
+}
+
+/// 参数解析：`--input`/`--out`/`--template` 任意顺序；`--check-only` 单独使用；
+/// 任何 flag 缺值都报「缺少 <flag> 的值」并 exit 2
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
     let mut input: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
@@ -75,10 +83,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
     let mut check_only: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--input" => input = args.next().map(PathBuf::from),
-            "--out" => out = args.next().map(PathBuf::from),
-            "--template" => template = args.next().map(PathBuf::from),
-            "--check-only" => check_only = args.next().map(PathBuf::from),
+            "--input" => input = Some(flag_value(&mut args, "--input")?),
+            "--out" => out = Some(flag_value(&mut args, "--out")?),
+            "--template" => template = Some(flag_value(&mut args, "--template")?),
+            "--check-only" => check_only = Some(flag_value(&mut args, "--check-only")?),
             other => return Err(format!("未知参数 {other}\n{USAGE}")),
         }
     }

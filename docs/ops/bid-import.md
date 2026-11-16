@@ -8,10 +8,10 @@
 cd G:/qidiwork/gui/src-tauri
 
 # 默认把图片抽到 <md 同目录>/assets/
-cargo run --bin bid_import -- --input 旧稿.docx --out 新稿.md
+cargo run -p qidiwork-cli --bin bid_import -- --input 旧稿.docx --out 新稿.md
 
 # 指定素材目录
-cargo run --bin bid_import -- --input 旧稿.docx --out 新稿.md --assets ./素材
+cargo run -p qidiwork-cli --bin bid_import -- --input 旧稿.docx --out 新稿.md --assets ./素材
 ```
 
 成功输出一行 JSON 摘要 + `IMPORT OK`：

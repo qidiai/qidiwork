@@ -6,7 +6,7 @@ FAIL=0
 run() { # name chapters figures captions tables paragraphs
   local name=$1 ch=$2 fig=$3 cap=$4 tbl=$5 par=$6
   echo "== $name"
-  cargo run --quiet --bin bid_smoke -- \
+  cargo run -q -p qidiwork-cli --bin bid_smoke -- \
     --fixture "../tests/bid-export/golden/$name.json" \
     --out     "../tests/bid-export/out/$name.docx" || FAIL=1
   bash ../tests/bid-export/check.sh "out/$name.docx" "$ch" "$fig" "$cap" "$tbl" "$par" || FAIL=1
@@ -20,7 +20,7 @@ run g4-supervision  8 6 2 1 24
 
 # ===== md 内容入口（P1-1 D3）：demo.md → md-demo.docx =====
 echo "== md-demo"
-cargo run --quiet --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo.docx || FAIL=1
+cargo run -q -p qidiwork-cli --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo.docx || FAIL=1
 bash ../tests/bid-export/check.sh "out/md-demo.docx" 3 5 5 1 6 || FAIL=1
 # BidTitle2 期望 3、BidTitle3 期望 2
 MD_DOCX=../tests/bid-export/out/md-demo.docx

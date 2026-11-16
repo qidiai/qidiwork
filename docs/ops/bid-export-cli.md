@@ -7,8 +7,11 @@
 并在写盘后立刻跑 24 项结构校验（样式 / 页边距 / 目录 / 章节 / 表格 / 图注 / 暗标元数据等）。
 适合 CI、批量出稿和人工排障：退出码机器可读，失败会点名不合格的 check。
 
-CLI 位置：`gui/src-tauri/src/bin/bid_export.rs`（`cargo run --bin bid_export`）。
+CLI 位置：`gui/src-tauri/cli/src/bin/bid_export.rs`（crate `qidiwork-cli`，`cargo run -p qidiwork-cli --bin bid_export`）。
 默认模板：`gui/src-tauri/resources/templates/bid-engineering-blue-v1.docx`。
+
+> CLI 已独立为 `qidiwork-cli` crate（`gui/src-tauri/cli`），GUI 安装包不再携带 CLI 二进制；
+> CLI 产物单独分发，见 `docs/ops/bid-packaging.md`「CLI 独立分发」。
 
 ## 用法
 
@@ -53,13 +56,13 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 
 ```bash
 # 示例夹具：1 H1 + 3 H2（含自带「第二章」）+ H3/H4 + 6 段 + 3 列表格 + 单图/三栏/宽图
-cargo run --quiet --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo.docx
+cargo run -p qidiwork-cli --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo.docx
 
 # 关掉自动编号：标题原样保留（已带编号的仍原样）
-cargo run --quiet --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo-nonum.docx --no-number
+cargo run -p qidiwork-cli --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo-nonum.docx --no-number
 
 # 换模板 / 自定义稿子
-cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out ./out/标书.docx --template ./tpl/某业主模板.docx
+cargo run -p qidiwork-cli --bin bid_export -- --md ./稿件/施工组织设计.md --out ./out/标书.docx --template ./tpl/某业主模板.docx
 ```
 
 口径：
@@ -130,10 +133,10 @@ cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out 
 脚本写法照 `gui/tests/bid-export/render-wps.ps1`（先 `Get-Process wps` 判断是否已有实例，
 只在自己拉起实例时才 `Quit()`，不会关掉用户正开着的窗口）。
 
-独立 CLI（`gui/src-tauri/src/bin/bid_pages.rs`）：
+独立 CLI（`gui/src-tauri/cli/src/bin/bid_pages.rs`）：
 
 ```bash
-cargo run --quiet --bin bid_pages -- ../tests/bid-export/out/md-demo.docx
+cargo run -p qidiwork-cli --bin bid_pages -- ../tests/bid-export/out/md-demo.docx
 ```
 
 ```json
@@ -144,7 +147,7 @@ PAGES OK
 导出时顺带实测（`--pages`，`--input` / `--md` 两条路径都支持）：
 
 ```bash
-cargo run --quiet --bin bid_export -- \
+cargo run -p qidiwork-cli --bin bid_export -- \
     --md ../tests/bid-export/md/demo.md \
     --out ../tests/bid-export/out/md-demo.docx \
     --pages

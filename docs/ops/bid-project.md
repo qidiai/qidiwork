@@ -7,7 +7,7 @@
 并立刻跑 24 项结构校验（样式 / 页边距 / 目录 / 章节 / 表格 / 图注 / 暗标元数据等）。
 适合多人分章协作（一人一章一个 md）与批量出稿；退出码机器可读，失败会点名不合格的 check。
 
-CLI 位置：`gui/src-tauri/src/bin/bid_project.rs`（`cargo run --bin bid_project`）。
+CLI 位置：`gui/src-tauri/cli/src/bin/bid_project.rs`（crate `qidiwork-cli`，`cargo run -p qidiwork-cli --bin bid_project`）。
 默认模板：`gui/src-tauri/resources/templates/bid-engineering-blue-v1.docx`（清单 `style_id` 可换）。
 （只导出单份 md 时仍可用 `bid_export --md`，见 `docs/ops/bid-export-cli.md`。）
 
@@ -83,7 +83,7 @@ cd gui/src-tauri
 PROJ="G:/qidicode/target/tmp/bid-p0a/proj-demo"
 
 # 1) 建项目
-cargo run --quiet --bin bid_project -- new "$PROJ" --title "某县2026年度高标准农田建设项目施工组织设计"
+cargo run -p qidiwork-cli --bin bid_project -- new "$PROJ" --title "某县2026年度高标准农田建设项目施工组织设计"
 # {"dir":"…/proj-demo","manifest":"…/proj-demo\bid.project.json"}
 # NEW OK
 
@@ -101,12 +101,12 @@ cat > "$PROJ/chapters/02-施工部署.md" <<'EOF'
 EOF
 
 # 3) 导出（输出 …/proj-demo/out.docx）
-cargo run --quiet --bin bid_project -- build "$PROJ"
+cargo run -p qidiwork-cli --bin bid_project -- build "$PROJ"
 # {"path":"…/proj-demo\out.docx","bytes":4899,"chapters":3,"paragraphs":3,"tables":0,"figures":0}
 # BUILD OK
 
 # 4) 体检（不产出文件）
-cargo run --quiet --bin bid_project -- check "$PROJ"
+cargo run -p qidiwork-cli --bin bid_project -- check "$PROJ"
 # PROJECT OK
 ```
 

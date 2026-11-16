@@ -42,7 +42,10 @@ npm run tauri build
 Start-Process -FilePath setup.exe -ArgumentList '/S','/D=G:\...\install3' -Wait
 ```
 
-安装目录内容：`qidiwork-gui.exe`(18.86 MB) / `qidiwork.exe`(132.5 MB) / `bid_export.exe`(1.9 MB) / `templates\…docx` / `uninstall.exe`。
+安装目录内容：`qidiwork-gui.exe`(18.86 MB) / `qidiwork.exe`(132.5 MB) / `templates\…docx` / `uninstall.exe`。
+
+> 该次实测为**拆分前**构建，当时还多一个 `bid_export.exe`(1.9 MB)；CLI 拆 crate 后新包清单 = 上述 4 项，
+> **不含任何 `bid_*.exe`**（见 §9）。
 
 运行 `install3\qidiwork-gui.exe --self-check`（原始输出）：
 
@@ -90,10 +93,41 @@ Start-Process -FilePath "src-tauri\target\release\bundle\nsis\QidiWork Workbench
 
 | 项 | 结论 |
 |---|---|
-| 阻断：安装包含未声明的 `bid_export.exe`，文档清单未列 | **已复核并定性**：干净重建（删 `nsis/`+`bundle/`）两次均复现，**不是陈旧产物**；显式 `"externalBin": []` 也无效 → 是 Tauri 对本包多 bin 的自动处理。文档已补该文件并注明"安装目录内无效"。彻底修法（把 CLI 移到独立 crate）列为待办 |
+| 阻断：安装包含未声明的 `bid_export.exe`，文档清单未列 | **已按方案 v1.1 拆 crate 根治**（提交见 git log）：6 个 CLI bin 迁至独立 crate `qidiwork-cli`（`gui/src-tauri/cli`），GUI 包只剩主 bin，见 §9。原定性记录：干净重建（删 `nsis/`+`bundle/`）两次均复现，**不是陈旧产物**；显式 `"externalBin": []` 也无效 → 属 Tauri 对同包多 bin 的自动处理，只能从结构上消除 |
 | 重要：`EXIT=0` 不区分命中来源 | 已加 `RESOLVED_SOURCE=resource|dev|none`，并在文档写明验收必须命中 `resource` |
 | 重要：内核 `../../target/release/qidiwork.exe` 按固定路径取件、无校验 | 未修；已记录风险（发布前需先构建内核并核对版本） |
 | 重要：`prod/releases` 里 0.1.11 是修复前的坏包且是唯一归档 | 已归档修复后包 `qidiwork-setup-0.1.11-r2.exe`（39,321,489 B，sha256 `966ce00f…`）；旧包保留但标注为 pre-fix |
 | 重要：`paths.rs` 注释写 `qidiwork.exe` | 已改为 `qidiwork-gui.exe` |
 
 **审计未验证项**：安装副本内的实际导出、Program Files（UAC）安装、代码签名。
+
+## 9. CLI 独立分发（拆 crate 后）
+
+6 个标书 CLI（`bid_export` / `bid_import` / `bid_pages` / `bid_project` / `bid_smoke` / `gen_bid_template`）
+已迁到独立 crate **`qidiwork-cli`**（`gui/src-tauri/cli`，是 `gui/src-tauri` 工作区的成员 `cli`）。
+从此**安装目录只保留 GUI**：`qidiwork-gui.exe` + 内核 `qidiwork.exe` + `templates\` + `uninstall.exe`，
+不再出现任何 `bid_*.exe`。
+
+CLI 单独构建、单独分发：
+
+```powershell
+cd G:\qidiwork\gui\src-tauri
+cargo build -p qidiwork-cli --release     # 产物落在 gui/src-tauri/target/release/
+```
+
+产物：`gui/src-tauri/target/release/{bid_export,bid_import,bid_pages,bid_project,bid_smoke,gen_bid_template}.exe`
+（与 GUI 共用一个 target 目录，互不干扰）。打成 zip：
+
+```powershell
+Compress-Archive -Path target\release\bid_export.exe,target\release\bid_import.exe,`
+  target\release\bid_pages.exe,target\release\bid_project.exe,`
+  target\release\bid_smoke.exe,target\release\gen_bid_template.exe `
+  -DestinationPath ..\..\prod\releases\qidiwork-cli-0.1.11-win64.zip -Force
+```
+
+- 想让 CLI 在**非源码树**环境里也能找到默认模板（解析结果 `source=resource`），把
+  `templates\bid-engineering-blue-v1.docx` 一并放进 zip，解出后与 exe 同级；
+- 版本号与 GUI 同步（当前 `0.1.11`），但两者**独立发版、独立归档**：
+  `qidiwork-setup-x.y.z.exe` / `qidiwork-cli-x.y.z-win64.zip`（都放 `prod/releases/`）；
+- 所有 CLI 命令都带 `-p qidiwork-cli`，例如 `cargo run -p qidiwork-cli --bin bid_export -- …`，
+  其余参数口径不变（见 `docs/ops/bid-export-cli.md`、`bid-project.md`、`bid-import.md`）。

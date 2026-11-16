@@ -3,6 +3,7 @@ import WorkspaceSidebar from "./components/WorkspaceSidebar.vue";
 import MainTabs from "./components/MainTabs.vue";
 import ArtifactPanel from "./components/ArtifactPanel.vue";
 import StatusBar from "./components/StatusBar.vue";
+import BidExportModal from "./components/BidExportModal.vue";
 import PermissionDialog from "./components/PermissionDialog.vue";
 import OnboardingView from "./components/OnboardingView.vue";
 import { computed, onMounted, ref } from "vue";
@@ -25,6 +26,9 @@ function preventFileNavigation(event: DragEvent): void {
 // 首次启动引导门控(K3 修正 1):onboarding 未完成前不 initAgent/autoConnect,
 // 避免未登录态拉起无效内核进程。
 const showOnboarding = ref(false);
+
+// 导出标书弹窗(P1-3):后端入口是 bid_export_md 命令(Markdown → docx)。
+const showBidExport = ref(false);
 
 // 连接内核(登记簿有会话时自动续接):免去每次手动「恢复会话」。
 // ChatView 的 onMounted 先于父组件执行,事件监听此时已绑定。
@@ -68,6 +72,10 @@ const gridColumns = computed(() => {
       <MainTabs />
       <ArtifactPanel v-show="!activePreview" />
     </div>
+    <button class="bid-export-fab" title="把 Markdown 标书导出为 docx" @click="showBidExport = true">
+      📄 导出标书
+    </button>
+    <BidExportModal v-if="showBidExport" @close="showBidExport = false" />
     <StatusBar />
     <PermissionDialog />
     <OnboardingView v-if="showOnboarding" @done="onOnboardingDone" />
@@ -86,5 +94,26 @@ const gridColumns = computed(() => {
   display: grid;
   flex: 1;
   min-height: 0;
+}
+
+/* 导出标书入口(P1-3):悬浮在状态栏上方,不参与 app-main 的网格布局 */
+.bid-export-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 46px;
+  z-index: 60;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+.bid-export-fab:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 </style>

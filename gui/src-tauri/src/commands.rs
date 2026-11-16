@@ -1142,3 +1142,58 @@ pub async fn bid_check_docx(path: String) -> Result<crate::office::bid::verify::
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
 }
+/// Markdown → docx 导出(P1-3 前端「导出标书」弹窗)。
+///
+/// 与 CLI `bid-export --md` 同一终点:读 md → 以 md 父目录为图片基准解析
+/// → 走应用资源目录里的默认模板(`DEFAULT_STYLE_ID`)填充导出。
+/// `number`:是否自动编号(B.2 的 `--no-number` 复选框取反),None 视为开。
+#[tauri::command]
+pub async fn bid_export_md(
+    app: AppHandle,
+    md_path: String,
+    out_path: String,
+    number: Option<bool>,
+) -> Result<crate::office::bid::model::BidExportResult, String> {
+    if md_path.trim().is_empty() {
+        return Err("Markdown 路径为空".to_string());
+    }
+    if out_path.trim().is_empty() {
+        return Err("输出路径为空".to_string());
+    }
+    let src = std::fs::read_to_string(&md_path)
+        .map_err(|e| format!("读 Markdown 文件失败 {md_path}: {e}"))?;
+    // 图片相对路径按 Markdown 文件所在目录解析(规格 P1-1 §1)
+    let md = PathBuf::from(&md_path);
+    let base_dir = md.parent().map(Path::to_path_buf).unwrap_or_default();
+    let (title, chapters) =
+        office::bid::markdown::parse_markdown_with(&src, &base_dir, number.unwrap_or(true))
+            .map_err(|e| e.to_string())?;
+    let tpl = office::bid::paths::resolve_template_path(&app, office::bid::paths::DEFAULT_STYLE_ID)?;
+    let out = PathBuf::from(&out_path);
+    let out_display = out.display().to_string();
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let req = crate::office::bid::model::BidExportRequest {
+        title,
+        chapters,
+        output_path: out_path.clone(),
+        style_id: None,
+        figure_width_cm: None,
+    };
+    let (stats, bytes) = tauri::async_runtime::spawn_blocking(move || {
+        office::bid::fill::export(&req, &tpl, &out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(crate::office::bid::model::BidExportResult {
+        path: out_display,
+        bytes,
+        chapters: stats.chapters,
+        paragraphs: stats.paragraphs,
+        tables: stats.tables,
+        figures: stats.figures,
+    })
+}
+

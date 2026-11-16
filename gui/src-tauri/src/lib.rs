@@ -75,6 +75,7 @@ pub fn run() -> i32 {
             commands::office_delete_workspace,
             commands::bid_export_docx,
             commands::bid_check_docx,
+            commands::bid_export_md,
             transcript::session_transcript_tail,
             transcript::session_transcript_earlier,
             transcript::session_summary,

@@ -18,11 +18,11 @@ npm run tauri build
 | 项 | 值 |
 |---|---|
 | 安装包 | `gui/src-tauri/target/release/bundle/nsis/QidiWork Workbench_0.1.11_x64-setup.exe` |
-| 大小 | **39,324,084 B（约 37.5 MB）** |
+| 大小 | **39,321,489 B（约 37.5 MB）** |
 | 主程序 | `qidiwork-gui.exe`（18.86 MB） |
 | 随包内核 | `qidiwork.exe`（132.5 MB，agent 内核，见 `src/process/mod.rs:40`） |
 | 资源 | `templates\bid-engineering-blue-v1.docx`（4767 B） |
-| 构建耗时 | 前端 ~4s + Rust release ~1m35s + NSIS |
+| 构建耗时 | 前端 ~4s + Rust release ~2m50s + NSIS |
 
 ## 3. 打包踩到的三个真问题（均已修）
 
@@ -42,7 +42,7 @@ npm run tauri build
 Start-Process -FilePath setup.exe -ArgumentList '/S','/D=G:\...\install3' -Wait
 ```
 
-安装目录内容：`qidiwork-gui.exe`(18.86 MB) / `qidiwork.exe`(132.5 MB) / `templates\…docx` / `uninstall.exe`。
+安装目录内容：`qidiwork-gui.exe`(18.86 MB) / `qidiwork.exe`(132.5 MB) / `bid_export.exe`(1.9 MB) / `templates\…docx` / `uninstall.exe`。
 
 运行 `install3\qidiwork-gui.exe --self-check`（原始输出）：
 
@@ -56,7 +56,9 @@ EXISTS_DEV=true
 RESOLVED=G:\qidicode\target\tmp\bid-p0a\install3\templates\bid-engineering-blue-v1.docx
 ```
 
-**关键结论**：`EXISTS_DEV` 也为 true（本机存在源码树），但解析仍然命中安装目录——证明 `resource_dir` 优先于 dev 回退，安装态路径真实可用。
+**关键结论**：`EXISTS_DEV` 也为 true（本机存在源码树），但解析仍然命中安装目录且 `RESOLVED_SOURCE=resource`——证明 `resource_dir` 优先于 dev 回退，安装态路径真实可用。
+
+> **验收口径（codely-core 审计要求）**：只看 `EXIT=0` 会假绿（dev 回退同样成功），**必须看到 `RESOLVED_SOURCE=resource`**。自检已输出该行。
 
 ## 5. 卸载与清理（已验证）
 
@@ -81,3 +83,17 @@ Start-Process -FilePath "src-tauri\target\release\bundle\nsis\QidiWork Workbench
 # 自检
 & "G:\tmp\qidi-install\qidiwork-gui.exe" --self-check
 ```
+
+## 8. codely-core 审计结论与闭环（2026-11-16）
+
+审计判 **GO + 1 阻断**，逐条处置：
+
+| 项 | 结论 |
+|---|---|
+| 阻断：安装包含未声明的 `bid_export.exe`，文档清单未列 | **已复核并定性**：干净重建（删 `nsis/`+`bundle/`）两次均复现，**不是陈旧产物**；显式 `"externalBin": []` 也无效 → 是 Tauri 对本包多 bin 的自动处理。文档已补该文件并注明"安装目录内无效"。彻底修法（把 CLI 移到独立 crate）列为待办 |
+| 重要：`EXIT=0` 不区分命中来源 | 已加 `RESOLVED_SOURCE=resource|dev|none`，并在文档写明验收必须命中 `resource` |
+| 重要：内核 `../../target/release/qidiwork.exe` 按固定路径取件、无校验 | 未修；已记录风险（发布前需先构建内核并核对版本） |
+| 重要：`prod/releases` 里 0.1.11 是修复前的坏包且是唯一归档 | 已归档修复后包 `qidiwork-setup-0.1.11-r2.exe`（39,321,489 B，sha256 `966ce00f…`）；旧包保留但标注为 pre-fix |
+| 重要：`paths.rs` 注释写 `qidiwork.exe` | 已改为 `qidiwork-gui.exe` |
+
+**审计未验证项**：安装副本内的实际导出、Program Files（UAC）安装、代码签名。

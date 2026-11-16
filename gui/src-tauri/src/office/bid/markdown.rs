@@ -1,0 +1,547 @@
+//! 标书内容入口（P1-1 D2）：Markdown → `(文档标题, 章节)`。
+//!
+//! 契约见 `docs/施工规格-P1-1-2026-11-16.md` §1（唯一真值）：
+//!
+//! - 首个 `# ` 是文档标题；其后的 H1 忽略；全程无 H1 → `Err("缺少文档标题（# 标题）")`。
+//! - `## ` → 新 [`Chapter`]；`### `/`#### ` → [`Block::Heading`]（level 3/4）；
+//!   `##### ` 及以上不识别为标题，整行按普通段落文本保留。
+//! - 空行分隔的普通文本 → 一个 [`Block::Paragraph`]，段内换行以空格连接后 trim。
+//! - GFM 表格（`| a | b |` 紧跟 `| --- | --- |`）→ [`Block::Table`]，单元格 trim。
+//! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`）；连续 3 行图片（中间无空行）
+//!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`）。
+//! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
+//!   以 `>`/`-`/`*` 开头的行不做列表语义，按普通段落文本保留。
+//!
+//! 编号（[`parse_markdown`] 默认开，[`parse_markdown_with`] 可关）：章标题未匹配
+//! `^第.+章` 且未匹配 `^\d+[.．、]` 时加 `第{中文数字}章 ` 前缀；`###`/`####` 未匹配
+//! `^\d+(\.\d+)*` 时加 `{章}.{节}` / `{章}.{节}.{子节} ` 前缀；已编号的原样保留，但计数照常推进。
+//!
+//! 已知取舍：首个 `##` 之前的内容（H1 与导语）在模型中没有归属章节，直接忽略；
+//! 图片相对路径按 `base_dir` 拼接，必须是存在的文件，否则 `Err("图片不存在: {路径}")`。
+
+use std::path::{Path, PathBuf};
+
+use super::model::{Block, CaptionMode, Chapter, FigureBlock, FigureItem, FigureLayout};
+use super::{BidError, BidResult};
+
+/// 解析 Markdown → (文档标题, 章节)；图片路径按 base_dir 解析成绝对路径并校验存在。
+pub fn parse_markdown(src: &str, base_dir: &Path) -> BidResult<(String, Vec<Chapter>)> {
+    parse_markdown_with(src, base_dir, true)
+}
+
+/// 同 [`parse_markdown`]，`number = false` 时不做章节自动编号（`--no-number`）。
+pub fn parse_markdown_with(
+    src: &str,
+    base_dir: &Path,
+    number: bool,
+) -> BidResult<(String, Vec<Chapter>)> {
+    let lines: Vec<&str> = src.trim_start_matches('\u{feff}').lines().collect();
+    let mut p = MdParser {
+        base_dir,
+        number,
+        title: None,
+        chapters: Vec::new(),
+        para: Vec::new(),
+        chapter_no: 0,
+        sec_no: 0,
+        sub_no: 0,
+    };
+
+    let mut i = 0;
+    while i < lines.len() {
+        let text = lines[i].trim();
+        if text.is_empty() {
+            p.flush_para();
+            i += 1;
+            continue;
+        }
+        // 图片：先吃掉整段连续图片行（空行即中断）。
+        if parse_image_line(text).is_some() {
+            let mut run = Vec::new();
+            while i < lines.len() {
+                match parse_image_line(lines[i].trim()) {
+                    Some(spec) => {
+                        run.push(spec);
+                        i += 1;
+                    }
+                    None => break,
+                }
+            }
+            p.flush_para();
+            p.push_image_run(&run)?;
+            continue;
+        }
+        if let Some((level, heading)) = parse_heading(text) {
+            match level {
+                1 => {
+                    if p.title.is_none() && !heading.is_empty() {
+                        p.title = Some(heading.to_string());
+                    }
+                }
+                2 => {
+                    p.flush_para();
+                    p.start_chapter(heading);
+                }
+                3 | 4 => {
+                    p.flush_para();
+                    p.push_heading(level as u8, heading);
+                }
+                _ => p.para.push(text.to_string()), // H5+ 不作标题
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(next) = p.try_table(&lines, i)? {
+            i = next;
+            continue;
+        }
+        p.para.push(text.to_string());
+        i += 1;
+    }
+    p.flush_para();
+
+    let title = p
+        .title
+        .ok_or_else(|| BidError::new("缺少文档标题（# 标题）"))?;
+    Ok((title, p.chapters))
+}
+
+/// 解析中的可变状态。
+struct MdParser<'a> {
+    base_dir: &'a Path,
+    number: bool,
+    title: Option<String>,
+    chapters: Vec<Chapter>,
+    para: Vec<String>,
+    /// 已出现过的 H2 数（= 当前章序号，1 起）
+    chapter_no: usize,
+    /// 本章内 H3 序号
+    sec_no: usize,
+    /// 本节内 H4 序号
+    sub_no: usize,
+}
+
+impl MdParser<'_> {
+    /// 段落缓冲落盘：段内换行以空格连接后 trim；空段不产出块。
+    fn flush_para(&mut self) {
+        if self.para.is_empty() {
+            return;
+        }
+        let text = self.para.join(" ");
+        let text = text.trim().to_string();
+        self.para.clear();
+        if !text.is_empty() {
+            self.push_block(Block::Paragraph { text });
+        }
+    }
+
+    /// 块归属当前章；首个 H2 之前的内容忽略（见模块文档"已知取舍"）。
+    fn push_block(&mut self, block: Block) {
+        if let Some(chapter) = self.chapters.last_mut() {
+            chapter.blocks.push(block);
+        }
+    }
+
+    fn start_chapter(&mut self, text: &str) {
+        self.chapter_no += 1;
+        self.sec_no = 0;
+        self.sub_no = 0;
+        let raw = text.trim();
+        let title = if raw.is_empty() {
+            String::new()
+        } else if self.number && !matches_chapter_number(raw) {
+            format!("第{}章 {}", cn_number(self.chapter_no), raw)
+        } else {
+            raw.to_string()
+        };
+        self.chapters.push(Chapter {
+            title,
+            blocks: Vec::new(),
+        });
+    }
+
+    fn push_heading(&mut self, level: u8, text: &str) {
+        if level == 3 {
+            self.sec_no += 1;
+            self.sub_no = 0;
+        } else {
+            self.sub_no += 1;
+        }
+        let raw = text.trim();
+        let text = if raw.is_empty() {
+            String::new()
+        } else if self.number && !matches_section_number(raw) {
+            match level {
+                3 => format!("{}.{} {}", self.chapter_no, self.sec_no, raw),
+                _ => format!("{}.{}.{} {}", self.chapter_no, self.sec_no, self.sub_no, raw),
+            }
+        } else {
+            raw.to_string()
+        };
+        self.push_block(Block::Heading { level, text });
+    }
+
+    /// 图片序列 → 图块：每 3 张一组 `three_up`（逐图图注），余下的逐张 Single/Wide。
+    fn push_image_run(&mut self, run: &[ImageSpec]) -> BidResult<()> {
+        let mut idx = 0;
+        while idx < run.len() {
+            if run.len() - idx >= 3 {
+                let mut items = Vec::with_capacity(3);
+                for spec in &run[idx..idx + 3] {
+                    items.push(FigureItem {
+                        path: resolve_image(self.base_dir, &spec.path)?,
+                        caption: caption_of(&spec.caption),
+                    });
+                }
+                self.push_block(Block::Figure(FigureBlock {
+                    layout: FigureLayout::ThreeUp,
+                    items,
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    ai_generated: false,
+                }));
+                idx += 3;
+            } else {
+                let spec = &run[idx];
+                let layout = if spec.wide {
+                    FigureLayout::Wide
+                } else {
+                    FigureLayout::Single
+                };
+                let item = FigureItem {
+                    path: resolve_image(self.base_dir, &spec.path)?,
+                    caption: caption_of(&spec.caption),
+                };
+                self.push_block(Block::Figure(FigureBlock {
+                    layout,
+                    items: vec![item],
+                    caption: String::new(),
+                    caption_mode: CaptionMode::PerImage,
+                    ai_generated: false,
+                }));
+                idx += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// 尝试在 `start` 处解析 GFM 表格；返回下一行下标，`None` = 不是表格（走段落）。
+    fn try_table(&mut self, lines: &[&str], start: usize) -> BidResult<Option<usize>> {
+        let head_line = lines[start].trim();
+        if !head_line.starts_with('|') || start + 1 >= lines.len() {
+            return Ok(None);
+        }
+        let header = split_cells(head_line);
+        let sep = split_cells(lines[start + 1]);
+        if header.is_empty() || header.len() != sep.len() || !sep.iter().all(|c| is_sep_cell(c)) {
+            return Ok(None);
+        }
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut i = start + 2;
+        while i < lines.len() {
+            let line = lines[i].trim();
+            if line.is_empty() || !line.starts_with('|') {
+                break;
+            }
+            let cells = split_cells(line);
+            if cells.len() != header.len() {
+                return Err(BidError::new(format!("表格第 {} 行列数不符", rows.len() + 1)));
+            }
+            rows.push(cells);
+            i += 1;
+        }
+        self.flush_para();
+        self.push_block(Block::Table { header, rows });
+        Ok(Some(i))
+    }
+}
+
+/// 整行图片：`![图注](路径)` + 可选 `{wide}` 后缀。
+struct ImageSpec {
+    caption: String,
+    path: String,
+    wide: bool,
+}
+
+fn parse_image_line(line: &str) -> Option<ImageSpec> {
+    let rest = line.trim().strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let caption = &rest[..close];
+    let after = &rest[close + 2..];
+    let rparen = after.rfind(')')?;
+    let path = after[..rparen].trim();
+    let tail = after[rparen + 1..].trim();
+    let wide = match tail {
+        "" => false,
+        "{wide}" => true,
+        _ => return None, // 行尾还有别的内容 → 不是整行图片
+    };
+    if path.is_empty() {
+        return None;
+    }
+    Some(ImageSpec {
+        caption: caption.trim().to_string(),
+        path: path.to_string(),
+        wide,
+    })
+}
+
+/// `#..######` + 必需的一个空格（`#` 独占一行也算标题）。
+fn parse_heading(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = &line[hashes..];
+    if rest.is_empty() {
+        return Some((hashes, ""));
+    }
+    let rest = rest.strip_prefix(' ').or_else(|| rest.strip_prefix('\t'))?;
+    Some((hashes, rest.trim()))
+}
+
+/// `| a | b |` → ["a", "b"]（首尾竖线可省，单元格 trim）。
+fn split_cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// GFM 分隔行单元格：`---` / `:---` / `---:` / `:---:`（至少 3 个短横）。
+fn is_sep_cell(cell: &str) -> bool {
+    let t = cell.trim();
+    let t = t.strip_prefix(':').unwrap_or(t);
+    let t = t.strip_suffix(':').unwrap_or(t);
+    t.chars().count() >= 3 && t.chars().all(|c| c == '-')
+}
+
+/// 图片路径：相对 → `base_dir` 拼接；必须存在。
+fn resolve_image(base_dir: &Path, raw: &str) -> BidResult<String> {
+    let path = Path::new(raw);
+    let abs: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    if !abs.is_file() {
+        return Err(BidError::new(format!("图片不存在: {raw}")));
+    }
+    Ok(abs.to_string_lossy().into_owned())
+}
+
+fn caption_of(caption: &str) -> Option<String> {
+    let c = caption.trim();
+    if c.is_empty() {
+        None
+    } else {
+        Some(c.to_string())
+    }
+}
+
+/// 1..=10 → 一…十；其余用阿拉伯数字。
+fn cn_number(n: usize) -> String {
+    const CN: [&str; 10] = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+    match CN.get(n.wrapping_sub(1)) {
+        Some(s) if n > 0 => (*s).to_string(),
+        _ => n.to_string(),
+    }
+}
+
+/// 章标题是否已编号：`^第.+章` 或 `^\d+[.．、]`。
+fn matches_chapter_number(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix('第') {
+        let mut chars = rest.chars();
+        // `.+` 至少一个字符，其后必须出现 `章`（"第章"不算）
+        if let Some(first) = chars.next() {
+            if first != '章' && chars.any(|c| c == '章') {
+                return true;
+            }
+        }
+    }
+    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
+    digits > 0 && matches!(text.chars().nth(digits), Some('.' | '．' | '、'))
+}
+
+/// 节/子节标题是否已编号：`^\d+(\.\d+)*`。
+///
+/// 字面实现——`(\.\d+)*` 可匹配空串，故等价于"以 ASCII 数字开头"。
+/// 这样 `1.1 概述`、`1.1概述`、`1 概述` 都按已编号原样保留，不会被二次加前缀。
+fn matches_section_number(text: &str) -> bool {
+    text.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+// ---------------------------------------------------------------------------
+// 单测（D2：7 条，图片经临时目录复制，不依赖仓库真实路径写法）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+
+    const IMAGE: &str = "img.png";
+
+    fn asset_png() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/bid-export/assets/image3.png")
+    }
+
+    /// 临时目录 + 复制一张真 PNG（解析器只校验存在性，但仍用真图，避免假文件）。
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p11-md-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(asset_png(), dir.join(IMAGE)).unwrap();
+        dir
+    }
+
+    fn headings(chapter: &Chapter) -> Vec<(u8, String)> {
+        chapter
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Heading { level, text } => Some((*level, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 1 个 H1 + 3 个 H2 → 标题正确、3 章、自动编号 第一章/第二章/第三章
+    #[test]
+    fn parses_title_and_chapters() {
+        let dir = tmp_dir("title");
+        let src = "# 槐林镇2026年度和美乡村建设项目施工组织设计\n\n\
+                   ## 工程概况\n\n本工程为省级中心村建设项目。\n\n\
+                   ## 施工部署\n\n先地下后地上。\n\n\
+                   ## 质量保证\n\n三检制。\n";
+        let (title, chapters) = parse_markdown(src, &dir).unwrap();
+        assert_eq!(title, "槐林镇2026年度和美乡村建设项目施工组织设计");
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(chapters[0].title, "第一章 工程概况");
+        assert_eq!(chapters[1].title, "第二章 施工部署");
+        assert_eq!(chapters[2].title, "第三章 质量保证");
+        assert_eq!(
+            chapters[0].blocks.len(),
+            1,
+            "导语与空行不得产出多余块: {:?}",
+            chapters[0].blocks
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 自带"第一章 已有" → 原样保留，下一章仍按序号递增为"第二章"
+    #[test]
+    fn keeps_existing_numbering() {
+        let dir = tmp_dir("keep");
+        let src = "# 标题\n\n## 第一章 已有章节\n\n正文一。\n\n## 新增章节\n\n正文二。\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].title, "第一章 已有章节");
+        assert_eq!(chapters[1].title, "第二章 新增章节");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H3/H4 → Block::Heading level 3/4，编号 1.1 / 1.1.1
+    #[test]
+    fn parses_heading_levels() {
+        let dir = tmp_dir("levels");
+        let src = "# 标题\n\n## 工程概况\n\n### 项目简介\n\n#### 建设内容\n\n正文。\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(
+            headings(&chapters[0]),
+            vec![
+                (3u8, "1.1 项目简介".to_string()),
+                (4u8, "1.1.1 建设内容".to_string()),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GFM 表格：3 列 2 行数据 → Block::Table 的 header/rows 正确
+    #[test]
+    fn parses_gfm_table() {
+        let dir = tmp_dir("table");
+        let src = "# 标题\n\n## 主要材料\n\n\
+                   | 材料 | 数量 | 单价 |\n\
+                   | --- | :---: | ---: |\n\
+                   | 水泥 | 10 | 400 |\n\
+                   | 中砂 | 20 | 100 |\n";
+        let (_, chapters) = parse_markdown(src, &dir).unwrap();
+        let table = chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Table { header, rows } => Some((header, rows)),
+                _ => None,
+            })
+            .expect("未解析出表格");
+        assert_eq!(table.0.len(), 3);
+        assert_eq!(table.0.join(","), "材料,数量,单价");
+        assert_eq!(table.1.len(), 2);
+        assert_eq!(table.1[0].join(","), "水泥,10,400");
+        assert_eq!(table.1[1].join(","), "中砂,20,100");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 单图 `![图1](img.png)` → Single + caption（路径解析为绝对且存在）
+    #[test]
+    fn parses_single_image() {
+        let dir = tmp_dir("single");
+        let src = format!("# 标题\n\n## 示意图\n\n![图1]({IMAGE})\n");
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let fig = chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .expect("未解析出图块");
+        assert_eq!(fig.layout, FigureLayout::Single);
+        assert_eq!(fig.caption_mode, CaptionMode::PerImage);
+        assert_eq!(fig.items.len(), 1);
+        assert_eq!(fig.items[0].caption.as_deref(), Some("图1"));
+        assert!(Path::new(&fig.items[0].path).is_absolute(), "{}", fig.items[0].path);
+        assert!(Path::new(&fig.items[0].path).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 连续 3 行图片（无空行）→ 一个 three_up + 3 个逐图图注
+    #[test]
+    fn parses_three_up_images() {
+        let dir = tmp_dir("threeup");
+        let src = format!(
+            "# 标题\n\n## 三栏\n\n![图一]({IMAGE})\n![图二]({IMAGE})\n![图三]({IMAGE})\n"
+        );
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let figs: Vec<&FigureBlock> = chapters[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(figs.len(), 1, "3 行图片应合成 1 个图块");
+        assert_eq!(figs[0].layout, FigureLayout::ThreeUp);
+        assert_eq!(figs[0].caption_mode, CaptionMode::PerImage);
+        assert_eq!(figs[0].items.len(), 3);
+        let caps: Vec<Option<&str>> = figs[0].items.iter().map(|i| i.caption.as_deref()).collect();
+        assert_eq!(caps, vec![Some("图一"), Some("图二"), Some("图三")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 图片路径不存在 → Err 含"图片不存在"
+    #[test]
+    fn missing_image_rejected() {
+        let dir = tmp_dir("missing");
+        let src = "# 标题\n\n## 示意图\n\n![图1](not-exist.png)\n";
+        let err = parse_markdown(src, &dir).unwrap_err();
+        assert!(
+            err.to_string().contains("图片不存在"),
+            "错误信息不符: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

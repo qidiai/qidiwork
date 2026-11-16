@@ -2,7 +2,8 @@
 
 ## 用途
 
-把一份请求 JSON（`BidExportRequest`）灌进工程蓝标书模板，产出可直接交付的 `.docx`，
+把一份请求 JSON（`BidExportRequest`）或一份 Markdown 稿子（P1-1 `--md`，自动分章编号）
+灌进工程蓝标书模板，产出可直接交付的 `.docx`，
 并在写盘后立刻跑 24 项结构校验（样式 / 页边距 / 目录 / 章节 / 表格 / 图注 / 暗标元数据等）。
 适合 CI、批量出稿和人工排障：退出码机器可读，失败会点名不合格的 check。
 
@@ -14,10 +15,13 @@ CLI 位置：`gui/src-tauri/src/bin/bid_export.rs`（`cargo run --bin bid_export
 在工作目录 `gui/src-tauri` 下执行：
 
 ```bash
-# 1) 导出（--out 覆盖请求 JSON 里的 output_path）
+# 1) 从请求 JSON 导出（--out 覆盖请求 JSON 里的 output_path）
 bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>]
 
-# 2) 只校验（不导出，跑 verify::verify(&p, None)）
+# 2) 从 Markdown 导出（P1-1：默认自动编号；--no-number 关掉自动编号）
+bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>]
+
+# 3) 只校验（不导出，跑 verify::verify(&p, None)）
 bid_export --check-only <docx>
 ```
 
@@ -42,6 +46,48 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 ```
 
 （逗号分隔，只列 `ok=false` 的 check 名，便于 `grep` / 分支判断。）
+
+## Markdown 内容入口（`--md`）
+
+正文写成 Markdown 直接出稿，不必手写请求 JSON（解析器：`office/bid/markdown.rs`）。
+
+```bash
+# 示例夹具：1 H1 + 3 H2（含自带「第二章」）+ H3/H4 + 6 段 + 3 列表格 + 单图/三栏/宽图
+cargo run --quiet --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo.docx
+
+# 关掉自动编号：标题原样保留（已带编号的仍原样）
+cargo run --quiet --bin bid_export -- --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-demo-nonum.docx --no-number
+
+# 换模板 / 自定义稿子
+cargo run --quiet --bin bid_export -- --md ./稿件/施工组织设计.md --out ./out/标书.docx --template ./tpl/某业主模板.docx
+```
+
+口径：
+
+- `--md` 与 `--input` **互斥**，同时给 → `ERROR --md 与 --input 不能同时使用` + exit 2。
+- 图片相对路径按 **Markdown 文件所在目录** 解析；路径不存在 → `ERROR Markdown 解析失败: 图片不存在: <path>` + exit 2。
+- 解析实现：`parse_markdown_with(src, base_dir, !no_number)`；除内容来源外，
+  与 `--input` **完全一致**——同样导出、跑 24 项 check、打印 JSON 摘要 + `EXPORT OK`。
+- `demo.md` 实测产物：`BidTitle1=4`（文档标题 1 + 3 章）、`BidTitle2=3`（3 个 H3）、
+  `BidTitle3≥1`（H4 子节）、带 `BidTableHeader` 的 `<w:tbl>` 1 张、
+  `<w:drawing` 5 处（单图 1 + 三栏 3 + 宽图 1）。
+
+### Markdown 语法速查
+
+唯一真值见 `docs/施工规格-P1-1-2026-11-16.md` §1（写法 → 产出）：
+
+- `# 标题`（首个）→ 文档标题（`BidTitle1`）；后续 H1 忽略。
+- `## 文本` → 一章：未编号自动 `第N章 文本`；已带 `第一章…` / `1.` 原样保留。
+- `### 文本` → 节标题 `BidTitle2`：自动 `N.M 文本`；已带 `N.M` 原样保留。
+- `#### 文本` → 子节 `BidTitle3`：自动 `N.M.K 文本`。
+- 空行分隔的普通文本 → 每段一个 `BidBody` 段（段内换行合并为空格）。
+- 首行 `| a | b |` 紧跟分隔行 `| --- | --- |` → GFM 表格（首行表头，其余数据行，列数以表头为准）。
+- `![图注](路径)` 单行 → 单图 `single`（无图注可写 `![](...)`）。
+- `![图注](路径){wide}` → 宽图 `wide`（内容区全宽 18.6cm）。
+- 连续 3 行图片（行间无空行）→ 三栏组图 `three_up` + 逐图图注。
+- `**粗体**` / 链接 / `-` `>` 列表符号 → 不解析，按纯文本原样保留。
+
+编号规则：中文数字仅 1–10（`一…十`），11 起用阿拉伯数字；章/节序号按出现顺序递增。
 
 ## 请求 JSON 示例
 
@@ -102,7 +148,9 @@ CHECK FAIL doc.metadata_anonymous,doc.captions
 | `2` | 参数错误 / 读盘失败 / JSON 解析失败 / 导出或校验异常 | `ERROR <原因>`（stderr） |
 
 `--check-only` 传入不存在的文件属于读盘错误 → exit 2（不是 1）。
-四个旗标（`--input/--out/--template/--check-only`）后缺值 → `ERROR 缺少 <flag> 的值` + exit 2。
+带值旗标（`--input/--md/--out/--template/--check-only`）后缺值 → `ERROR 缺少 <flag> 的值` + exit 2。
+`--md` 与 `--input` 同时出现 → `ERROR --md 与 --input 不能同时使用` + exit 2；
+`--no-number` 只与 `--md` 搭配（单独配 `--input` → exit 2）。
 
 ## 注意事项
 

@@ -35,3 +35,4 @@ pub mod template;
 pub mod verify;
 pub mod fill;
 pub mod paths;
+pub mod markdown;

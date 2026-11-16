@@ -79,6 +79,7 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
         for block in &chapter.blocks {
             match block {
                 Block::Paragraph { .. } => stats.paragraphs += 1,
+                Block::Heading { .. } => {}          // P1-1：小节标题不计入 paragraphs
                 Block::Table { .. } => stats.tables += 1,
                 Block::Figure(fig) => stats.figures += fig.items.len(),
             }
@@ -161,6 +162,14 @@ fn render_block(
         Block::Paragraph { text } => Ok((
             PARAGRAPH_XML
                 .replace("{{STYLE}}", "BidBody")
+                .replace("{{TEXT}}", &escape_xml(text)),
+            0,
+        )),
+        // P1-1：小节标题复用段落片段，样式名取 BidTitle{level-1}（level 3..=4 由 validate 保证；
+        // H3→BidTitle2、H4→BidTitle3，BidTitle1 留给章标题）
+        Block::Heading { level, text } => Ok((
+            PARAGRAPH_XML
+                .replace("{{STYLE}}", &format!("BidTitle{}", level - 1))
                 .replace("{{TEXT}}", &escape_xml(text)),
             0,
         )),
@@ -449,6 +458,76 @@ mod tests {
             "document.xml 未含五实体转义串: {doc}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P1-1：Heading → BidTitle{level-1}（level 3→BidTitle2、4→BidTitle3 各一段），
+    /// 且不计入 stats.paragraphs。
+    /// 计数依据：先查模板 `word/document.xml`，实测 BidTitle1=2、BidTitle2/3/4=0 处
+    /// （BidTitle2/3/4 仅出现在 `word/styles.xml` 的样式定义里，而导出件只读 document.xml，
+    /// 样式定义不参与计数）→ 导出件中的 BidTitle2/3 全部来自本次 Heading 渲染。
+    #[test]
+    fn heading_renders_expected_styles() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p11-hdg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("heading.docx");
+        let req = BidExportRequest {
+            title: "t".to_string(),
+            chapters: vec![Chapter {
+                title: "第一章 工程概况".to_string(),
+                blocks: vec![
+                    Block::Heading { level: 3, text: "1.1.1 人员".to_string() },
+                    Block::Heading { level: 4, text: "1.1.1.1 班组".to_string() },
+                    Block::Paragraph { text: "正文".to_string() },
+                ],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        let (stats, _) = export(&req, Path::new(TEMPLATE), &out).unwrap();
+        assert_eq!(stats.paragraphs, 1, "Heading 不应计入 paragraphs");
+        let pkg = DocxPackage::open(&out).unwrap();
+        let doc = pkg.text("word/document.xml").unwrap();
+        for level in 2..=3u8 {
+            let needle = format!("w:pStyle w:val=\"BidTitle{level}\"");
+            assert!(
+                doc.matches(&needle).count() >= 1,
+                "导出件缺 {needle}: {doc}"
+            );
+        }
+        // 样式与文本配对（level 3/4 的标题文本分别落在 BidTitle2/BidTitle3 段里）
+        assert!(
+            doc.contains(r#"<w:pStyle w:val="BidTitle2"/></w:pPr><w:r><w:t xml:space="preserve">1.1.1 人员</w:t>"#),
+            "level 3 标题未渲染到 BidTitle2: {doc}"
+        );
+        assert!(
+            doc.contains(r#"<w:pStyle w:val="BidTitle3"/></w:pPr><w:r><w:t xml:space="preserve">1.1.1.1 班组</w:t>"#),
+            "level 4 标题未渲染到 BidTitle3: {doc}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P1-1：level=2 / level=5 → validate Err 且含"标题级别非法（3-4）"
+    #[test]
+    fn heading_invalid_level_rejected() {
+        for level in [2u8, 5u8] {
+            let req = BidExportRequest {
+                title: "t".to_string(),
+                chapters: vec![Chapter {
+                    title: "c".to_string(),
+                    blocks: vec![Block::Heading { level, text: "小节".to_string() }],
+                }],
+                output_path: String::new(),
+                style_id: None,
+                figure_width_cm: None,
+            };
+            let err = req.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("标题级别非法（3-4）"),
+                "level={level} 错误信息不符: {err}"
+            );
+        }
     }
 
     /// 自造无锚点最小包 → export 必须 Err 且信息含"模板缺少锚点"

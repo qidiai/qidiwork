@@ -183,6 +183,7 @@ pub struct FigureBlock {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Paragraph { text: String },
+    Heading { level: u8, text: String },            // ← P1-1：章内小节标题（渲染 BidTitle{level}）
     Table { header: Vec<String>, rows: Vec<Vec<String>> },
     Figure(FigureBlock),                            // ← 新形态（newtype 变体，内部标签 serde 可处理）
 }
@@ -212,6 +213,14 @@ impl BidExportRequest {
             for block in &chapter.blocks {
                 match block {
                     Block::Paragraph { .. } => {}
+                    Block::Heading { level, text } => {
+                        if !(3..=4).contains(level) {
+                            return Err(BidError::new("标题级别非法（3-4）"));
+                        }
+                        if text.trim().is_empty() {
+                            return Err(BidError::new("标题文本为空"));
+                        }
+                    }
                     Block::Table { header, rows } => {
                         if header.is_empty() {
                             return Err(BidError::new("表格表头不能为空"));

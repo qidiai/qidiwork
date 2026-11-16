@@ -8,8 +8,9 @@
 //! - 空行分隔的普通文本 → 一个 [`Block::Paragraph`]，段内换行以空格连接后 trim。
 //! - GFM 表格（`| a | b |` 紧跟 `| --- | --- |`）→ [`Block::Table`]，单元格 trim。
 //!   而是"表头 + 分隔行"却列数不一致（含数据行列数不符）→ `Err("表格第 N 行列数不符")`，N 从表头算 1。
-//! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`）；连续 3 行图片（中间无空行）
-//!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`）。
+//! - 整行 `![图注](路径)` → `Single`（`{wide}` 后缀 → `Wide`，`{ai}` → `ai_generated`，
+//!   可组合为 `{wide,ai}`，标记内逗号分隔并容忍空格）；连续 3 行图片（中间无空行）
+//!   → 一个 `ThreeUp` + `per_image`（图注取各自 `[]`；任一张带 `{ai}` → 整组 `ai_generated`）。
 //! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
 //!   以 `>`/`-`/`*` 开头的行不做列表语义，按普通段落文本保留。
 //!
@@ -263,7 +264,8 @@ impl MdParser<'_> {
                     items,
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
-                    ai_generated: false,
+                    // 任一张带 `{ai}` → 整组标记为 AI 生成（导出一致）
+                    ai_generated: run[idx..idx + 3].iter().any(|spec| spec.ai),
                 }));
                 idx += 3;
             } else {
@@ -282,7 +284,7 @@ impl MdParser<'_> {
                     items: vec![item],
                     caption: String::new(),
                     caption_mode: CaptionMode::PerImage,
-                    ai_generated: false,
+                    ai_generated: spec.ai,
                 }));
                 idx += 1;
             }
@@ -332,11 +334,12 @@ impl MdParser<'_> {
     }
 }
 
-/// 整行图片：`![图注](路径)` + 可选 `{wide}` 后缀。
+/// 整行图片：`![图注](路径)` + 可选 `{wide}` / `{ai}` / `{wide,ai}` 后缀。
 struct ImageSpec {
     caption: String,
     path: String,
     wide: bool,
+    ai: bool,
 }
 
 fn parse_image_line(line: &str) -> Option<ImageSpec> {
@@ -347,11 +350,7 @@ fn parse_image_line(line: &str) -> Option<ImageSpec> {
     let rparen = after.rfind(')')?;
     let path = after[..rparen].trim();
     let tail = after[rparen + 1..].trim();
-    let wide = match tail {
-        "" => false,
-        "{wide}" => true,
-        _ => return None, // 行尾还有别的内容 → 不是整行图片
-    };
+    let (wide, ai) = parse_image_flags(tail)?;
     if path.is_empty() {
         return None;
     }
@@ -359,7 +358,28 @@ fn parse_image_line(line: &str) -> Option<ImageSpec> {
         caption: caption.trim().to_string(),
         path: path.to_string(),
         wide,
+        ai,
     })
+}
+
+/// 行尾标记 → `(wide, ai)`：`""` 表示无标记，`{a,b}` 内逗号分隔、容忍空格。
+///
+/// `None` = 行尾还有别的内容（不是整行图片）。
+fn parse_image_flags(tail: &str) -> Option<(bool, bool)> {
+    if tail.is_empty() {
+        return Some((false, false));
+    }
+    let inner = tail.strip_prefix('{')?.strip_suffix('}')?;
+    let mut wide = false;
+    let mut ai = false;
+    for token in inner.split(',') {
+        match token.trim() {
+            "wide" => wide = true,
+            "ai" => ai = true,
+            _ => return None,
+        }
+    }
+    Some((wide, ai))
 }
 
 /// `#..######` + 必需的一个空格（`#` 独占一行也算标题）。
@@ -717,6 +737,67 @@ mod tests {
             .expect("未解析出图块");
         assert_eq!(fig.layout, FigureLayout::Wide);
         assert_eq!(fig.items[0].caption.as_deref(), Some("图1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 单图 `{ai}` 后缀 → ai_generated = true
+    #[test]
+    fn single_image_ai_flag() {
+        let dir = tmp_dir("ai");
+        let src = format!("# 标题\n\n## 示意图\n\n![图]({IMAGE}){{ai}}\n");
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let fig = chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .expect("未解析出图块");
+        assert!(fig.ai_generated);
+        assert_eq!(fig.layout, FigureLayout::Single);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `{wide,ai}` 组合后缀 → Wide + ai_generated = true
+    #[test]
+    fn wide_and_ai_combined() {
+        let dir = tmp_dir("wide-ai");
+        let src = format!("# 标题\n\n## 示意图\n\n![图]({IMAGE}){{wide,ai}}\n");
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let fig = chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .expect("未解析出图块");
+        assert_eq!(fig.layout, FigureLayout::Wide);
+        assert!(fig.ai_generated);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 三栏里任一张带 `{ai}` → 整组 ai_generated = true
+    #[test]
+    fn three_up_ai_if_any() {
+        let dir = tmp_dir("threeup-ai");
+        let src = format!(
+            "# 标题\n\n## 三栏\n\n![图一]({IMAGE})\n![图二]({IMAGE}){{ wide , ai }}\n![图三]({IMAGE})\n"
+        );
+        let (_, chapters) = parse_markdown(&src, &dir).unwrap();
+        let figs: Vec<&FigureBlock> = chapters[0]
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(figs.len(), 1, "3 行图片应合成 1 个图块");
+        assert_eq!(figs[0].layout, FigureLayout::ThreeUp);
+        assert_eq!(figs[0].items.len(), 3);
+        assert!(figs[0].ai_generated);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

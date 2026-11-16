@@ -1,6 +1,8 @@
 [package]
 name = "qidiwork-gui"
 version = "0.1.11"
+# 主二进制歧义修复:src/bin/*.rs 自动发现的工具 bin 不得抢占主程序产物
+default-run = "qidiwork-gui"
 description = "QidiWork 办公工作台 —— QIDI Code 的原生 GUI 办公界面"
 edition = "2024"
 rust-version = "1.85"
@@ -9,6 +11,11 @@ rust-version = "1.85"
 # 并入 Tauri 依赖树会显著拖慢主工程 cargo check(docs/操作手册.md 5.1)。
 # cf-acp-lib 等主工程 crate 通过 path 依赖引入(M2 起),跨 workspace 解析不受影响。
 [workspace]
+
+# 显式声明主二进制(消除与 src/bin/*.rs 自动发现 bin 的产物歧义)
+[[bin]]
+name = "qidiwork-gui"
+path = "src/main.rs"
 
 [features]
 # 生产构建开关:tauri build CLI 自动启用;直接 cargo build --release 需手动加

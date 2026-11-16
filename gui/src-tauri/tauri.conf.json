@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "QidiWork Workbench",
+  "mainBinaryName": "qidiwork-gui",
   "identifier": "com.qidi.workbench",
   "build": {
     "beforeDevCommand": "npm run dev",

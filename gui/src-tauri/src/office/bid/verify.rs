@@ -1,6 +1,6 @@
-//! T2b：产物分层校验器（规格 §6.5 / P0b §4.3）。
+//! T2b：产物分层校验器（规格 §6.5 / P0b §4.3 / P0c §0.1）。
 //!
-//! 职责：对填充/导出后的 docx 做 23 项分层校验（样式 #1-#8 / 页面 #9-#10 / 文档结构 #11-#17 / 计数 #18-#23），
+//! 职责：对填充/导出后的 docx 做 24 项分层校验（样式 #1-#8 / 页面 #9-#10 / 文档结构 #11-#17 / 计数 #18-#23 / 元数据 #24），
 //! 顺序即规格表格顺序，输出 `VerifyReport`（`Serialize`，供 T3 命令返回）。
 //!
 //! 实现约定（规格 §6.5）：
@@ -88,7 +88,7 @@ const TRPR: &[&str] = &["cantSplit", "trHeight", "tblHeader"];
 const TCPR: &[&str] = &["tcW", "gridSpan", "vMerge", "tcBorders", "shd", "vAlign"];
 const SECTPR: &[&str] = &["headerReference", "footerReference", "pgSz", "pgMar", "cols", "docGrid"];
 
-/// 对 `path` 处 docx 做 23 项分层校验；`expect=None` 时跳过计数类 check（#18-#23）
+/// 对 `path` 处 docx 做 24 项分层校验；`expect=None` 时跳过计数类 check（#18-#23）
 pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let pkg = DocxPackage::open(path)?;
     let styles = pkg.text("word/styles.xml")?;
@@ -98,7 +98,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     let styles = styles.replace(" />", "/>");
     let document = document.replace(" />", "/>");
 
-    let mut checks = Vec::with_capacity(23);
+    let mut checks = Vec::with_capacity(24);
 
     // #1 styles.present：w:styleId="Bid…" 十三项齐全
     let missing: Vec<&str> = BID_STYLES
@@ -367,6 +367,29 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         |e| e.captions,
     ));
 
+    // #24 doc.metadata_anonymous（P0c §0.1）：core.xml 不得含 qidiwork / Bid Template v1，
+    //     且 dc:creator 为空（暗标身份/工具名泄漏防护；包内无 core.xml → 该 check 不通过）
+    let core = if pkg.contains("docProps/core.xml") {
+        pkg.text("docProps/core.xml")?
+    } else {
+        String::new()
+    };
+    let creator_empty = core.contains("<dc:creator></dc:creator>");
+    let leaked: Vec<&str> = ["qidiwork", "Bid Template v1"]
+        .iter()
+        .copied()
+        .filter(|n| core.contains(n))
+        .collect();
+    checks.push(Check {
+        name: "doc.metadata_anonymous".to_string(),
+        ok: creator_empty && leaked.is_empty(),
+        detail: if creator_empty && leaked.is_empty() {
+            "core.xml 无 qidiwork/Bid Template v1 残留且 creator 为空".to_string()
+        } else {
+            format!("core.xml 残留: {}；creator 为空: {}", leaked.join("、"), creator_empty)
+        },
+    });
+
     Ok(VerifyReport { checks })
 }
 
@@ -588,8 +611,8 @@ mod tests {
 
     const TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1.docx";
 
-    /// §6.5 表格顺序（styles.present 打头，doc.captions 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link；G2 在 styles.table_borders 后插 styles.element_order、在 page_number_field 后插 doc.element_order → 23 项）
-    const SPEC_ORDER: [&str; 23] = [
+    /// §6.5 表格顺序（styles.present 打头，doc.metadata_anonymous 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link；G2 在 styles.table_borders 后插 styles.element_order、在 page_number_field 后插 doc.element_order；P0c §0.1 末尾插 doc.metadata_anonymous → 24 项）
+    const SPEC_ORDER: [&str; 24] = [
         "styles.present",
         "styles.body",
         "styles.title1",
@@ -613,21 +636,22 @@ mod tests {
         "doc.tables",
         "doc.figures",
         "doc.captions",
+        "doc.metadata_anonymous",
     ];
 
     fn check<'a>(report: &'a VerifyReport, name: &str) -> &'a Check {
         report.checks.iter().find(|c| c.name == name).unwrap()
     }
 
-    /// 对模板 docx 跑 verify(None)：23 条 check，名字顺序与 §6.5 表格一致
+    /// 对模板 docx 跑 verify(None)：24 条 check，名字顺序与 §6.5 表格一致
     #[test]
-    fn report_has_23_checks_in_spec_order() {
+    fn report_has_24_checks_in_spec_order() {
         let report = verify(Path::new(TEMPLATE), None).unwrap();
-        assert_eq!(report.checks.len(), 23);
+        assert_eq!(report.checks.len(), 24);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, SPEC_ORDER);
         assert_eq!(report.checks.first().unwrap().name, "styles.present");
-        assert_eq!(report.checks.last().unwrap().name, "doc.captions");
+        assert_eq!(report.checks.last().unwrap().name, "doc.metadata_anonymous");
     }
 
     /// styles.xml 的 `<w:sz w:val="30"/>` 改成 28 → styles.title1 必须 ok=false
@@ -851,6 +875,37 @@ mod tests {
                 check(&report, "doc.element_order")
             );
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 反向篡改：导出件 core.xml 的 creator 改回 qidiwork → doc.metadata_anonymous 必须 ok=false
+    #[test]
+    fn metadata_leak_fails() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("meta.docx");
+        export(&minimal_export_req(&out), Path::new(TEMPLATE), &out).unwrap();
+
+        let mut pkg = DocxPackage::open(&out).unwrap();
+        let core = pkg.text("docProps/core.xml").unwrap();
+        assert!(
+            core.contains("<dc:creator></dc:creator>"),
+            "导出器未清空 creator: {core}"
+        );
+        pkg.set_text(
+            "docProps/core.xml",
+            core.replace("<dc:creator></dc:creator>", "<dc:creator>qidiwork</dc:creator>"),
+        );
+        let tampered = dir.join("tampered.docx");
+        pkg.save(&tampered).unwrap();
+
+        let report = verify(&tampered, None).unwrap();
+        assert!(
+            !check(&report, "doc.metadata_anonymous").ok,
+            "{:?}",
+            check(&report, "doc.metadata_anonymous")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

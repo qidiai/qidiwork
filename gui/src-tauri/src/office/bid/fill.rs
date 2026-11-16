@@ -122,12 +122,30 @@ pub fn export(req: &BidExportRequest, template: &Path, out: &Path) -> BidResult<
         let hdr = pkg.text("word/header1.xml")?;
         pkg.set_text("word/header1.xml", hdr.replace("{{DOC_TITLE}}", &escape_xml(&req.title)));
     }
-    // 9) 父目录不存在先创建，再保存
+    // 9) 保存前重写 core.xml（P0c §2：暗标元数据清空；包内无该部件则跳过，不新建）
+    if pkg.contains("docProps/core.xml") {
+        pkg.set_text("docProps/core.xml", core_xml(&req.title));
+    }
+    // 10) 父目录不存在先创建，再保存
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     pkg.save(out)?;
     Ok((stats, std::fs::metadata(out)?.len()))
+}
+
+/// P0c §2 固定 core.xml：title=本次标题（escape_xml），creator/lastModifiedBy 置空；
+/// 不写 cp:revision / dcterms:created/modified（避免时间戳泄露）
+fn core_xml(title: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n  \
+<dc:title>{}</dc:title>\n  \
+<dc:creator></dc:creator>\n  \
+<cp:lastModifiedBy></cp:lastModifiedBy>\n\
+</cp:coreProperties>",
+        escape_xml(title)
+    )
 }
 
 /// 块渲染（§6.4）：段落 → paragraph 片段；表格 → render_table；图 → render_figure。
@@ -621,6 +639,38 @@ mod tests {
         let hdr = pkg.text("word/header1.xml").unwrap();
         assert!(!hdr.contains("{{DOC_TITLE}}"), "页眉占位符未替换: {hdr}");
         assert!(hdr.contains("&lt;&amp;&gt;"), "页眉未含转义后标题: {hdr}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// P0c：导出后 core.xml 不含 qidiwork、含空 creator、title 为本次标题
+    #[test]
+    fn metadata_is_anonymous() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-p0c-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("meta.docx");
+        let req = BidExportRequest {
+            title: "暗标元数据测试标题".to_string(),
+            chapters: vec![Chapter {
+                title: "c".to_string(),
+                blocks: vec![Block::Paragraph { text: "b".to_string() }],
+            }],
+            output_path: out.to_string_lossy().to_string(),
+            style_id: None,
+            figure_width_cm: None,
+        };
+
+        export(&req, Path::new(TEMPLATE), &out).unwrap();
+        let pkg = DocxPackage::open(&out).unwrap();
+        let core = pkg.text("docProps/core.xml").unwrap();
+        assert!(!core.contains("qidiwork"), "core.xml 泄漏 qidiwork: {core}");
+        assert!(
+            core.contains("<dc:creator></dc:creator>"),
+            "core.xml creator 未置空: {core}"
+        );
+        assert!(
+            core.contains("<dc:title>暗标元数据测试标题</dc:title>"),
+            "core.xml title 未写入本次标题: {core}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

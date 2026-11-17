@@ -31,6 +31,14 @@ pub struct PageStat {
     pub words: u32,
 }
 
+/// 超页判定（纯函数，便于单测）
+///
+/// - `max_pages = None`：未设红线 → 永不超页
+/// - `max_pages = Some(n)`：`pages > n` 才算超；`pages == n` 视为**刚好达标**（红线允许等于）
+pub fn exceeds(pages: u32, max_pages: Option<u32>) -> bool {
+    matches!(max_pages, Some(max) if pages > max)
+}
+
 /// 内联 PowerShell 脚本（Windows 专用）。
 ///
 /// 要点：
@@ -189,6 +197,28 @@ pub fn measure(_docx: &Path) -> BidResult<PageStat> {
 // ---------------------------------------------------------------------------
 // 单测：真实测量要 COM + WPS（CI 不可用），此处覆盖 `parse_output` 的异常分支
 // ---------------------------------------------------------------------------
+
+/// 超页判定是纯函数（无 COM），跨平台可测
+#[cfg(test)]
+mod limit_tests {
+    use super::exceeds;
+
+    /// 未设红线永不算超；页数等于上限也只是「刚好达标」，不算超
+    #[test]
+    fn exceeds_none_and_equal_to_limit_is_false() {
+        assert!(!exceeds(5, None));
+        assert!(!exceeds(0, None));
+        assert!(!exceeds(50, Some(50)));
+        assert!(!exceeds(1, Some(50)));
+    }
+
+    /// 超过上限才算超（多 1 页即超）
+    #[test]
+    fn exceeds_over_limit_is_true() {
+        assert!(exceeds(51, Some(50)));
+        assert!(exceeds(5, Some(1)));
+    }
+}
 
 #[cfg(all(test, windows))]
 mod tests {

@@ -1,6 +1,6 @@
 [package]
 name = "qidiwork-cli"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 rust-version = "1.85"
 description = "QidiWork 标书 CLI（导出/导入/页数/项目/冒烟/模板生成）——与 GUI 分包，不进安装包"

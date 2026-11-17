@@ -149,3 +149,29 @@ cargo test --lib updater
 ## 10. 清理
 
 安装包留在 `%TEMP%\qidiwork-update\`，由系统临时目录清理策略回收；同版本重复下载会先删旧文件。
+
+## 11. 发版签名（工具链）
+
+工具在 `tools/release/`（说明见 `tools/release/README.md`），替代 §2 里手写的 openssl 片段，
+输出与 `verify_ed25519` / `check_signature` 逐字节对齐的清单字段。
+
+| 脚本 | 作用 |
+|---|---|
+| `gen-update-key.py` | 生成 `update-signing-key.pem`（PKCS8 Ed25519），打印 `PRIVATE_KEY=` 与 `PUBLIC_KEY_B64=`（32 字节 raw 的 base64）；已存在则拒绝覆盖（`--force` 才覆盖） |
+| `sign-update.py` | 算 `sha256`（hex + 32 字节原始摘要）→ Ed25519 签名 → 输出可粘贴的 `{version,file,sha256,size_bytes,sig}`；`--verify` 用导出公钥自验签并打印 `SIGN OK` |
+
+发版三步（公钥先注入，再出包，再签名）：
+
+```bash
+set QIDIWORK_UPDATER_PUBKEY=<PUBLIC_KEY_B64>      # 编译期注入，改钥必须重新构建
+npm run tauri build
+python tools/release/sign-update.py --key G:/qidiwork-secrets/update-signing-key.pem \
+  --file prod/releases/qidiwork-setup-0.1.12.exe --version 0.1.12 --verify
+```
+
+- 私钥**绝不入库**，固定放仓库外 `G:\qidiwork-secrets\` 并做离线备份。
+- 清单 `version` 必须是纯 `major.minor.patch`（§2 版本解析规则），所以文件名里的重打包后缀
+  `-r4` 不能写进 `version`；`sign-update.py` 省略 `--version` 时会自动剥掉 `-rN` 并从文件名推导，
+  推导结果打到 stderr，务必人工核对。
+- **换钥 = 一次迁移**：旧客户端内嵌旧公钥，新钥签的新包会被它硬拒。必须先发一次"带新公钥"的版本
+  （该版用旧钥签，或在不注入公钥的过渡态发布），等用户装上来之后，再正式启用新钥。

@@ -1,8 +1,8 @@
 //! 标书导出 CLI（P0c 收尾 + P1-1 D3 `--md`）。
 //!
 //! 用法：
-//! - `bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]`
-//! - `bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]`
+//! - `bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages] [--max-pages <N>]`
+//! - `bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages] [--max-pages <N>]`
 //! - `bid_export --check-only <docx>`
 //!
 //! 导出路径：读请求 JSON → `office::bid::model::BidExportRequest`
@@ -20,6 +20,9 @@
 //! - `--pages`（M1）：24 项 check 通过后再用本机 WPS 实测页数（`office::bid::pages::measure`），
 //!   摘要里多一个 `"pages":N`，并在摘要行之后、`EXPORT OK` 之前打印 `PAGES=<n>`；
 //!   测量失败只打 `WARN 页数测量失败: …`（stderr），不改退出码
+//! - `--max-pages <N>`（S3 页数红线）：同上测量（与 `--pages` 同时给出时**复用同一次测量**），
+//!   `pages > N` → 打印 `PAGES_EXCEEDED pages=<n> max=<N>` 并 exit 3（**docx 保留**，便于人工查看）；
+//!   `pages <= N` → 正常 `EXPORT OK`，摘要里带 `"pages":n`
 //! - 结构校验失败：`CHECK FAIL <失败 check 名,逗号分隔>`，exit 1
 //! - 参数/读盘/导出错误：`ERROR <原因>`，exit 2
 //! - `--check-only`：`{"checks":N,"ok":true}` + `CHECK OK`，exit 0
@@ -35,12 +38,14 @@ use qidiwork_gui::office::bid::paths::{DEFAULT_STYLE_ID, resolve_for_exe};
 use qidiwork_gui::office::bid::verify::{self, VerifyReport};
 
 const USAGE: &str =
-    "用法: bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]\n       bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]\n       bid_export --check-only <docx>";
+    "用法: bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages] [--max-pages <N>]\n       bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages] [--max-pages <N>]\n       bid_export --check-only <docx>";
 
 /// 结构校验不合格
 const EXIT_CHECK_FAIL: i32 = 1;
 /// 参数 / 读盘 / 导出错误
 const EXIT_ERROR: i32 = 2;
+/// 页数超红线（S3：文件保留，便于用户查看）
+const EXIT_PAGES_EXCEEDED: i32 = 3;
 
 /// 解析后的子命令
 enum Cmd {
@@ -53,6 +58,8 @@ enum Cmd {
         template_source: &'static str,
         /// `--pages`：导出后追加 WPS 实测页数
         pages: bool,
+        /// `--max-pages <N>`：页数红线（超 → `PAGES_EXCEEDED` + exit 3）
+        max_pages: Option<u32>,
     },
     /// `--md <file.md>`：Markdown 内容入口（`number = !--no-number`）
     ExportMd {
@@ -64,6 +71,8 @@ enum Cmd {
         number: bool,
         /// `--pages`：导出后追加 WPS 实测页数
         pages: bool,
+        /// `--max-pages <N>`：页数红线（超 → `PAGES_EXCEEDED` + exit 3）
+        max_pages: Option<u32>,
     },
     CheckOnly {
         docx: PathBuf,
@@ -78,7 +87,8 @@ fn main() {
             template,
             template_source,
             pages,
-        }) => run_export(&input, &out, &template, template_source, pages),
+            max_pages,
+        }) => run_export(&input, &out, &template, template_source, pages, max_pages),
         Ok(Cmd::ExportMd {
             md,
             out,
@@ -86,7 +96,8 @@ fn main() {
             template_source,
             number,
             pages,
-        }) => run_export_md(&md, &out, &template, template_source, number, pages),
+            max_pages,
+        }) => run_export_md(&md, &out, &template, template_source, number, pages, max_pages),
         Ok(Cmd::CheckOnly { docx }) => run_check_only(&docx),
         Err(msg) => error(&msg),
     }
@@ -114,7 +125,16 @@ fn flag_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Pat
         .ok_or_else(|| format!("缺少 {flag} 的值\n{USAGE}"))
 }
 
-/// 参数解析：`--input`/`--md`/`--out`/`--template` 任意顺序；`--no-number`/`--pages` 为开关；
+/// 取 `--flag` 后面的非负整数；缺值 / 非法值都报错（不静默回落）
+fn flag_u32(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u32, String> {
+    let raw = args
+        .next()
+        .ok_or_else(|| format!("缺少 {flag} 的值\n{USAGE}"))?;
+    raw.parse::<u32>()
+        .map_err(|_| format!("{flag} 需要非负整数，收到 {raw}\n{USAGE}"))
+}
+
+/// 参数解析：`--input`/`--md`/`--out`/`--template`/`--max-pages` 任意顺序；`--no-number`/`--pages` 为开关；
 /// `--check-only` 单独使用；`--md` 与 `--input` 互斥；
 /// 任何带值 flag 缺值都报「缺少 <flag> 的值」并 exit 2
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
@@ -125,6 +145,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
     let mut check_only: Option<PathBuf> = None;
     let mut no_number = false;
     let mut pages = false;
+    let mut max_pages: Option<u32> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--input" => input = Some(flag_value(&mut args, "--input")?),
@@ -133,6 +154,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             "--template" => template = Some(flag_value(&mut args, "--template")?),
             "--no-number" => no_number = true,
             "--pages" => pages = true,
+            "--max-pages" => max_pages = Some(flag_u32(&mut args, "--max-pages")?),
             "--check-only" => check_only = Some(flag_value(&mut args, "--check-only")?),
             other => return Err(format!("未知参数 {other}\n{USAGE}")),
         }
@@ -143,8 +165,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
                 "--check-only 不能与 --input/--md/--out/--template/--no-number 混用\n{USAGE}"
             ));
         }
-        if pages {
-            return Err(format!("--check-only 不能与 --pages 混用\n{USAGE}"));
+        if pages || max_pages.is_some() {
+            return Err(format!(
+                "--check-only 不能与 --pages/--max-pages 混用\n{USAGE}"
+            ));
         }
         return Ok(Cmd::CheckOnly { docx });
     }
@@ -168,6 +192,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             template_source,
             number: !no_number,
             pages,
+            max_pages,
         }),
         (None, Some(input), Some(out)) => Ok(Cmd::ExportJson {
             input,
@@ -175,6 +200,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Cmd, String> {
             template,
             template_source,
             pages,
+            max_pages,
         }),
         // 缺参分两种情况报，便于脚本精确匹配（仍附 USAGE 便于人工排障）
         (md, input, _) => {
@@ -230,6 +256,7 @@ fn run_export(
     template: &Path,
     template_source: &'static str,
     pages: bool,
+    max_pages: Option<u32>,
 ) -> ! {
     let text = match std::fs::read_to_string(input) {
         Ok(t) => t,
@@ -242,7 +269,7 @@ fn run_export(
 
     let base = input.parent().map(Path::to_path_buf).unwrap_or_default();
     resolve_figure_paths(&mut req, &base);
-    export_and_verify(req, out, template, template_source, pages)
+    export_and_verify(req, out, template, template_source, pages, max_pages)
 }
 
 /// 导出：Markdown → `parse_markdown_with(src, md 父目录, !no_number)` → 同上导出 + 校验
@@ -253,6 +280,7 @@ fn run_export_md(
     template_source: &'static str,
     number: bool,
     pages: bool,
+    max_pages: Option<u32>,
 ) -> ! {
     let md_abs = match absolute(md) {
         Ok(p) => p,
@@ -275,19 +303,21 @@ fn run_export_md(
         style_id: None,
         figure_width_cm: None,
     };
-    export_and_verify(req, out, template, template_source, pages)
+    export_and_verify(req, out, template, template_source, pages, max_pages)
 }
 
 /// 导出 + 24 项结构校验 + 摘要输出（`--input` / `--md` 共用的收尾）
 ///
-/// `with_pages`：校验通过后再用本机 WPS 实测页数（`pages::measure`）；
-/// 测量失败只打 `WARN`，不影响摘要与退出码。
+/// `with_pages`（`--pages`）/ `max_pages`（`--max-pages`）：校验通过后用本机 WPS 实测页数
+/// （`pages::measure`），两者同时给出时**只测一次**并复用结果；
+/// 测量失败只打 `WARN`，不影响摘要与退出码（无法判定超页时不误报 exit 3）。
 fn export_and_verify(
     mut req: BidExportRequest,
     out: &Path,
     template: &Path,
     template_source: &'static str,
     with_pages: bool,
+    max_pages: Option<u32>,
 ) -> ! {
     let out_abs = match absolute(out) {
         Ok(p) => p,
@@ -314,9 +344,10 @@ fn export_and_verify(
         exit(EXIT_CHECK_FAIL);
     }
 
-    // `--pages`：本机 WPS 实测（失败只警告，不改退出码、摘要不带 pages）
+    // `--pages` / `--max-pages`：本机 WPS 实测（失败只警告，不改退出码、摘要不带 pages）
+    // 两个 flag 共用一次测量：同时给出不重复拉起 WPS
     let mut measured: Option<u32> = None;
-    if with_pages {
+    if with_pages || max_pages.is_some() {
         match pages::measure(&out_abs) {
             Ok(stat) => measured = Some(stat.pages),
             Err(e) => eprintln!("WARN 页数测量失败: {e}"),
@@ -336,8 +367,13 @@ fn export_and_verify(
         Ok(line) => println!("{line}"),
         Err(e) => error(&format!("摘要序列化失败: {e}")),
     }
-    // 摘要行之后、`EXPORT OK` 之前补一行机器可读的页数（无 --pages 不打印）
+    // 摘要行之后、`EXPORT OK` 之前补一行机器可读的页数（无 --pages/--max-pages 不打印）
     if let Some(pages) = measured {
+        // S3 红线：实测超页 → 保留 docx（便于人工查看）但 exit 3，脚本可据此阻断发布
+        if let Some(max) = max_pages.filter(|max| pages::exceeds(pages, Some(*max))) {
+            println!("PAGES_EXCEEDED pages={pages} max={max}");
+            exit(EXIT_PAGES_EXCEEDED);
+        }
         println!("PAGES={pages}");
     }
     println!("EXPORT OK");

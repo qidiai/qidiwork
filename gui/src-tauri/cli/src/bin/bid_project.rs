@@ -2,7 +2,7 @@
 //!
 //! 用法：
 //! - `bid_project new <dir> --title "某县…施工组织设计"`
-//! - `bid_project build <dir> [-o out.docx] [--no-number]`
+//! - `bid_project build <dir> [-o out.docx] [--no-number] [--max-pages <N>]`
 //! - `bid_project check <dir>`
 //!
 //! `new`：建 `bid.project.json` + `chapters/01-概述.md` + `assets/`；清单已存在 → `ERROR 项目已存在`。
@@ -14,6 +14,9 @@
 //! 输出约定（供脚本消费）：
 //! - `new` 成功：一行 JSON（`dir`/`manifest`）+ `NEW OK`，exit 0
 //! - `build` 成功：一行 JSON 摘要 + `BUILD OK`，exit 0；结构校验失败 `BUILD FAIL <check 名>`，exit 1
+//! - `build --max-pages <N>`（S3 页数红线）：校验通过后 WPS 实测页数，摘要带 `"pages":n`；
+//!   `pages > N` → 打印 `PAGES_EXCEEDED pages=<n> max=<N>` 并 exit 3（docx 保留）；
+//!   测量失败只打 `WARN`（stderr），不改退出码
 //! - `check`：`PROJECT OK` exit 0 / `PROJECT FAIL …` exit 1
 //! - 参数 / 读盘 / 解析 / 导出错误：`ERROR <原因>`，exit 2
 
@@ -22,22 +25,31 @@ use std::process::exit;
 
 use qidiwork_gui::office::bid::fill;
 use qidiwork_gui::office::bid::model::BidExportResult;
+use qidiwork_gui::office::bid::pages;
 use qidiwork_gui::office::bid::project;
 use qidiwork_gui::office::bid::verify::{self, VerifyReport};
 
 const USAGE: &str = "用法: bid_project new <dir> --title <书名>\n       \
-                     bid_project build <dir> [-o <out.docx>] [--no-number]\n       \
+                     bid_project build <dir> [-o <out.docx>] [--no-number] [--max-pages <N>]\n       \
                      bid_project check <dir>";
 
 /// 结构校验 / 项目体检不合格
 const EXIT_CHECK_FAIL: i32 = 1;
 /// 参数 / 读盘 / 解析 / 导出错误
 const EXIT_ERROR: i32 = 2;
+/// 页数超红线（S3：文件保留，便于用户查看）
+const EXIT_PAGES_EXCEEDED: i32 = 3;
 
 /// 解析后的子命令
 enum Cmd {
     New { dir: PathBuf, title: String },
-    Build { dir: PathBuf, out: Option<PathBuf>, number: bool },
+    Build {
+        dir: PathBuf,
+        out: Option<PathBuf>,
+        number: bool,
+        /// `--max-pages <N>`：页数红线（超 → `PAGES_EXCEEDED` + exit 3）
+        max_pages: Option<u32>,
+    },
     Check { dir: PathBuf },
 }
 
@@ -49,7 +61,12 @@ fn main() {
     }
     match parse_args(args) {
         Ok(Cmd::New { dir, title }) => run_new(&dir, &title),
-        Ok(Cmd::Build { dir, out, number }) => run_build(&dir, out.as_deref(), number),
+        Ok(Cmd::Build {
+            dir,
+            out,
+            number,
+            max_pages,
+        }) => run_build(&dir, out.as_deref(), number, max_pages),
         Ok(Cmd::Check { dir }) => run_check(&dir),
         Err(msg) => error(&msg),
     }
@@ -69,6 +86,7 @@ fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut title: Option<String> = None;
     let mut out: Option<PathBuf> = None;
+    let mut max_pages: Option<u32> = None;
     let mut no_number = false;
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -83,6 +101,15 @@ fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
                     .next()
                     .ok_or_else(|| format!("缺少 {arg} 的值\n{USAGE}"))?;
                 out = Some(PathBuf::from(value));
+            }
+            "--max-pages" => {
+                let value = it
+                    .next()
+                    .ok_or_else(|| format!("缺少 --max-pages 的值\n{USAGE}"))?;
+                let n = value.parse::<u32>().map_err(|_| {
+                    format!("--max-pages 需要非负整数，收到 {value}\n{USAGE}")
+                })?;
+                max_pages = Some(n);
             }
             "--no-number" => no_number = true,
             other if other.starts_with('-') => {
@@ -100,8 +127,10 @@ fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
 
     match sub.as_str() {
         "new" => {
-            if out.is_some() || no_number {
-                return Err(format!("new 不接受 -o/--out 与 --no-number\n{USAGE}"));
+            if out.is_some() || no_number || max_pages.is_some() {
+                return Err(format!(
+                    "new 不接受 -o/--out、--no-number 与 --max-pages\n{USAGE}"
+                ));
             }
             let title = title.ok_or_else(|| format!("new 需要 --title\n{USAGE}"))?;
             Ok(Cmd::New { dir, title })
@@ -114,11 +143,14 @@ fn parse_args(args: Vec<String>) -> Result<Cmd, String> {
                 dir,
                 out,
                 number: !no_number,
+                max_pages,
             })
         }
         "check" => {
-            if title.is_some() || out.is_some() || no_number {
-                return Err(format!("check 不接受 --title/-o/--no-number\n{USAGE}"));
+            if title.is_some() || out.is_some() || no_number || max_pages.is_some() {
+                return Err(format!(
+                    "check 不接受 --title/-o/--no-number/--max-pages\n{USAGE}"
+                ));
             }
             Ok(Cmd::Check { dir })
         }
@@ -161,8 +193,8 @@ fn run_new(dir: &Path, title: &str) -> ! {
     exit(0)
 }
 
-/// `build`：合并 → 导出 → 24 项校验 → 摘要 + `BUILD OK`
-fn run_build(dir: &Path, out: Option<&Path>, number: bool) -> ! {
+/// `build`：合并 → 导出 → 24 项校验 → （可选）页数红线 → 摘要 + `BUILD OK`
+fn run_build(dir: &Path, out: Option<&Path>, number: bool, max_pages: Option<u32>) -> ! {
     let mut req = match project::build_request(dir, number) {
         Ok(r) => r,
         Err(e) => error(&e.to_string()),
@@ -204,6 +236,19 @@ fn run_build(dir: &Path, out: Option<&Path>, number: bool) -> ! {
         exit(EXIT_CHECK_FAIL);
     }
 
+    // `--max-pages`：24 项校验通过后用本机 WPS 实测页数（复用 `pages::measure`，不重写 COM）；
+    // 测量失败只警告：无法判定超页时不误报 exit 3
+    let measured = match max_pages {
+        Some(_) => match pages::measure(&out_abs) {
+            Ok(stat) => Some(stat.pages),
+            Err(e) => {
+                eprintln!("WARN 页数测量失败: {e}");
+                None
+            }
+        },
+        None => None,
+    };
+
     let summary = BidExportResult {
         path: out_abs.to_string_lossy().to_string(),
         bytes,
@@ -212,9 +257,24 @@ fn run_build(dir: &Path, out: Option<&Path>, number: bool) -> ! {
         tables: stats.tables,
         figures: stats.figures,
     };
-    match serde_json::to_string(&summary) {
+    // 摘要 = `BidExportResult` 的 JSON + 命中 `--max-pages` 时追加 `"pages":n`
+    let mut summary_value = match serde_json::to_value(&summary) {
+        Ok(v) => v,
+        Err(e) => error(&format!("摘要序列化失败: {e}")),
+    };
+    if let (Some(n), Some(obj)) = (measured, summary_value.as_object_mut()) {
+        obj.insert("pages".to_string(), serde_json::Value::from(n));
+    }
+    match serde_json::to_string(&summary_value) {
         Ok(line) => println!("{line}"),
         Err(e) => error(&format!("摘要序列化失败: {e}")),
+    }
+    // S3 红线：实测超页 → 保留 docx（便于人工查看）但 exit 3，脚本可据此阻断发布
+    if let Some(n) = measured {
+        if let Some(max) = max_pages.filter(|max| pages::exceeds(n, Some(*max))) {
+            println!("PAGES_EXCEEDED pages={n} max={max}");
+            exit(EXIT_PAGES_EXCEEDED);
+        }
     }
     println!("BUILD OK");
     exit(0)

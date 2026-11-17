@@ -2,6 +2,11 @@
 
 > 适用版本：v0.1.0 及以上 · 下载：<https://qidiwork.qidiai.ltd/>
 
+## 系统要求
+
+- **Windows 10 及以上（64 位）**。
+- **Windows 7 / 8 / 8.1 不支持**：界面依赖 WebView2（仅支持 Win10+），程序编译工具链同样仅支持 Win10+。在 Win7 上安装后会出现 `0xc0000005` 或「无法定位程序输入点 GetSystemTimePreciseAsFileTime」等报错——这是系统版本过旧，**不是安装包损坏或病毒**，请换用 Win10 及以上电脑。
+
 ## 安装步骤
 
 1. **下载安装包**：在下载中心点击「下载 v0.1.0」，得到 `qidiwork-setup-0.1.0.exe`（约 34 MB）。
@@ -51,3 +56,4 @@ QidiWork Workbench\
 | 双击安装包无反应 | 任务管理器结束残留的 `QidiWork*setup*` 进程后重试；确认已点 SmartScreen 的「仍要运行」 |
 | 打开后状态栏显示"未连接" | 说明内核未拉起：确认 `qidiwork.exe` 与主程序在同一目录；杀毒软件隔离区找回 |
 | 对话无回复 | 检查设置面板中 API Key 是否有效、网络可达所选模型服务商 |
+| Win7 上报 0xc0000005 或「GetSystemTimePreciseAsFileTime 入口点找不到」 | 系统过旧（本产品需 Win10+），非文件损坏；换 Win10 及以上电脑 |

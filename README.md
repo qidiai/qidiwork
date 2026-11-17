@@ -21,6 +21,8 @@ QIDI Code 是一个基于 Rust 构建的终端 AI 编码工具，支持多模型
 
 ### Windows 用户：直接下载安装（推荐）
 
+**系统要求：Windows 10 及以上（64 位）**；Windows 7/8 不支持（原因与报错对照见 [安装指引](docs/安装指引-SmartScreen.md)）。
+
 1. 打开下载中心：<https://qidiwork.qidiai.ltd/>
 2. 下载 `qidiwork-setup-0.1.0.exe`（约 34 MB，AI 内核已随包内置，安装即用）
 3. 安装时如遇 Windows SmartScreen 蓝色提示：点「更多信息」→「仍要运行」（未购买代码签名证书的正常现象，详见 [安装指引](docs/安装指引-SmartScreen.md)）

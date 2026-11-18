@@ -19,19 +19,19 @@ CLI 位置：`gui/src-tauri/cli/src/bin/bid_export.rs`（crate `qidiwork-cli`，
 
 ```bash
 # 1) 从请求 JSON 导出（--out 覆盖请求 JSON 里的 output_path）
-bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--pages]
+bid_export --input <req.json> --out <out.docx> [--template <tpl.docx>] [--compact] [--pages] [--max-pages <N>]
 
 # 2) 从 Markdown 导出（P1-1：默认自动编号；--no-number 关掉自动编号）
-bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--pages]
+bid_export --md <file.md> --out <out.docx> [--no-number] [--template <tpl.docx>] [--compact] [--pages] [--max-pages <N>]
 
-# 3) 只校验（不导出，跑 verify::verify(&p, None)）
-bid_export --check-only <docx>
+# 3) 只校验（不导出，跑 verify::verify_with_style(&p, None, style)）
+bid_export --check-only <docx> [--compact]
 ```
 
 成功输出（先一行 JSON 摘要，再 `EXPORT OK`）：
 
 ```json
-{"path":"…/out/p0a-sample.docx","bytes":20226,"chapters":2,"paragraphs":4,"tables":1,"figures":1}
+{"path":"…/out/p0a-sample.docx","bytes":20226,"chapters":2,"paragraphs":4,"tables":1,"figures":1,"template_source":"dev","max_pages_source":"none"}
 EXPORT OK
 ```
 
@@ -125,6 +125,54 @@ cargo run -p qidiwork-cli --bin bid_export -- --md ./稿件/施工组织设计.m
   `ERROR 导出失败: 横道图日期非法: <start>..<end>`；跨度过大见上条。
 - `demo.md` 里的横道图为 3 工序 / 25 天跨度 → 4 个 7 天桶，导出件含 7 格底纹（覆盖桶数）。
 
+## 压缩档位（`--compact`）与页数上限（`--max-pages`）
+
+标书常有「不得超过 N 页」的硬约束（暗标尤其常见）。两条互补手段：
+
+### 压缩档位 `--compact`
+
+`--compact` 换用**紧凑模板** `resources/templates/bid-engineering-blue-v1-compact.docx`
+（由 `gen_bid_template --compact` 生成、随仓库提交，约 4.8 KB，`DocStyle::default().compact()`）：
+
+| 版式参数 | 默认模板 | 紧凑模板 |
+| --- | --- | --- |
+| 正文行距 | 1.5（`w:line="360"`） | 1.3（`w:line="312"`） |
+| 页边距 | 1.2cm（`w:top="680"`） | 1.0cm（`w:top="567"`） |
+| 表格字号 | 12pt（`w:sz="24"`） | 10.5pt（`w:sz="21"`，可读下限） |
+
+- 模板解析：`--compact` → `<style_id>-compact.docx`（与默认模板同一条
+  `paths::resolve_for_exe`：先 exe 同级 `templates/`、再仓库 `resources/templates/`）；
+  找不到 → `ERROR 紧凑模板缺失（先运行 gen_bid_template --compact）` + exit 2（不静默回落默认模板）。
+- 校验：导出后仍跑同一套 24 项 check（名称/数量不变），但版式类期望值改由
+  `verify_with_style(&out, None, &DocStyle::default().compact())` 计算，所以紧凑产物用
+  **默认**档位复查必然报 `CHECK FAIL styles.body,page.margins`（这不是 bug，是档位不符）。
+- `--compact` 与 `--template` 互斥（`ERROR --compact 不能与 --template 同时使用` + exit 2）。
+- `--check-only <docx> --compact` 按压缩档位复查紧凑产物；不加 `--compact` 按默认档位复查。
+- 压缩只改版式参数，正文一字不减；仍超页只能人工删减内容。
+
+### 页数上限 `--max-pages`
+
+优先级（§7.5）：**CLI `--max-pages` > 清单 `max_pages` > 不设限**。
+`--md` 会先看 Markdown 所在目录、再看其上一级目录的 `bid.project.json`（项目模式下稿子通常在
+`<proj>/chapters/`）；`--input` 不读清单，只认 CLI。
+
+- 摘要恒带 `"max_pages_source":"cli|manifest|none"`，脚本可据此判断这条上限是谁定的。
+- **只有「有上限」或显式 `--pages` 时才拉起 WPS 测页**（§7.6）；无上限且无 `--pages` →
+  不测页、摘要不含 `pages`、不打印 `PAGES=`（每次导出不再白等 10s+，也不吃 COM 失败路径）。
+- 实测 `pages > max` → 摘要之后打印 `PAGES_EXCEEDED pages=<n> max=<M>` 并 exit 3，
+  **docx 保留**（便于人工查看/删减）；`pages <= max` → 正常 `EXPORT OK`。
+- 测量失败只打 `WARN 页数测量失败: …`（stderr），退出码不变——页数是旁证，不是导出门槛。
+
+```bash
+# 紧凑模板 + 6 页红线（demo.md 实测 4 页）
+cargo run -p qidiwork-cli --bin bid_export -- \
+    --md ../tests/bid-export/md/demo.md --out ../tests/bid-export/out/md-compact.docx \
+    --compact --max-pages 6
+# {"path":"…/md-compact.docx","bytes":78370,"chapters":3,"paragraphs":6,"tables":1,"figures":5,"template_source":"dev","max_pages_source":"cli","pages":4}
+# PAGES=4
+# EXPORT OK
+```
+
 ## 页数实测（`--pages` / `bid_pages`）
 
 页数**不估算**，用本机 WPS（COM `KWPS.Application`）只读打开导出件、`Repaginate()` 后
@@ -161,7 +209,8 @@ EXPORT OK
 
 口径：
 
-- `--pages` 只在**导出 + 24 项 check 全过之后**才测页数：check 失败（exit 1）不测。
+- `--pages` / 页数上限（`--max-pages` 或清单 `max_pages`）都只在**导出 + 24 项 check 全过之后**
+  才测页数：check 失败（exit 1）不测；两者同时给出时只测一次并复用结果。
 - 摘要行仍是第一行（字段顺序不变），`pages` 追加在末尾；随后一行 `PAGES=<n>`，再 `EXPORT OK`。
 - 测量失败（本机没装 WPS / COM 未注册 / 文档打不开 / 输出无法解析）只打
   `WARN 页数测量失败: <原因>` 到 stderr，**摘要不带 `pages`、退出码不变（仍 0）**——
@@ -240,7 +289,8 @@ EXPORT OK
 | --- | --- | --- |
 | `0` | 导出成功且 24 项 check 全过；或 `--check-only` 全过 | 一行 JSON 摘要 + `EXPORT OK` / `{"checks":N,"ok":true}` + `CHECK OK` |
 | `1` | 结构校验有 `ok=false`（导出后自检或 `--check-only` 均同） | 先打印 `{"checks":N,"ok":false}`，再打印 `CHECK FAIL <失败 check 名,逗号分隔>` |
-| `2` | 参数错误 / 读盘失败 / JSON 解析失败 / 导出或校验异常 | `ERROR <原因>`（stderr） |
+| `2` | 参数错误 / 读盘失败 / JSON 解析失败 / 导出或校验异常 / 紧凑模板缺失 | `ERROR <原因>`（stderr） |
+| `3` | 实测页数超上限（`--max-pages` 或清单 `max_pages`） | 摘要行 + `PAGES_EXCEEDED pages=<n> max=<M>`（**docx 保留**） |
 
 `--check-only` 传入不存在的文件属于读盘错误 → exit 2（不是 1）。
 带值旗标（`--input/--md/--out/--template/--check-only`）后缺值 → `ERROR 缺少 <flag> 的值` + exit 2。
@@ -254,8 +304,8 @@ EXPORT OK
   `Bid Template v1`。这条由 check #24 `doc.metadata_anonymous` 兜底校验，
   因此**老产物**（P0c 之前生成、仍是模板元数据的 docx）跑 `--check-only` 会报
   `CHECK FAIL doc.metadata_anonymous`，重新导出一次即可。
-- **页数用 `--pages` 实测**（本机 WPS COM，见上节「页数实测」）；不加 `--pages` 时
-  `bid_export` 只做结构校验、不渲染。需要同时落 PDF 人工核对版式时用
+- **页数用 `--pages`（或任何页数上限）实测**（本机 WPS COM，见上节）；既没给 `--pages`
+  也没有上限时 `bid_export` 只做结构校验、不渲染、不测页。需要同时落 PDF 人工核对版式时用
   `gui/tests/bid-export/render-wps.ps1`，口径见 `docs/ops/wps-render-verify.md`。
 - 输出目录不存在会自动创建；`--out` 相对路径按当前工作目录解析。
 - 默认模板可用 `--template` 覆盖，换模板后 13 项 Bid 样式的 check 依然生效（模板漂移会直接报错）。

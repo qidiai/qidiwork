@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::path::Path;
 
 use super::docx::DocxPackage;
+use super::model::{DocStyle, HeadingStyle};
 use super::BidResult;
 
 /// 期望计数（`expect=None` → 只查结构 #1-#17，#18-#23 skipped）
@@ -88,8 +89,24 @@ const TRPR: &[&str] = &["cantSplit", "trHeight", "tblHeader"];
 const TCPR: &[&str] = &["tcW", "gridSpan", "vMerge", "tcBorders", "shd", "vAlign"];
 const SECTPR: &[&str] = &["headerReference", "footerReference", "pgSz", "pgMar", "cols", "docGrid"];
 
-/// 对 `path` 处 docx 做 24 项分层校验；`expect=None` 时跳过计数类 check（#18-#23）
+/// 对 `path` 处 docx 做 24 项分层校验；`expect=None` 时跳过计数类 check（#18-#23）。
+///
+/// 版式类 check 按**默认** `DocStyle` 计算（= `bid-engineering-blue-v1.docx`）。
+/// 紧凑模板（`--compact` 生成件）请用 [`verify_with_style`] 传 `DocStyle::default().compact()`。
 pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
+    verify_with_style(path, expect, &DocStyle::default())
+}
+
+/// 同 [`verify`]，但版式类 check（#2-#10：正文行距/缩进/字号、标题字号颜色、表头、
+/// 表字号、边框、页边距）的期望串由 `style` 计算（§7.3/§7.8）。
+///
+/// check 数量仍 24、名称不变：紧凑档位只是换了一组期望值（1.3 行距 → `w:line="312"`、
+/// 1.0cm 边距 → `w:top="567"`、表字号 10.5pt → `w:sz="21"` …）。
+pub fn verify_with_style(
+    path: &Path,
+    expect: Option<&Expect>,
+    style: &DocStyle,
+) -> BidResult<VerifyReport> {
     let pkg = DocxPackage::open(path)?;
     let styles = pkg.text("word/styles.xml")?;
     let document = pkg.text("word/document.xml")?;
@@ -97,6 +114,48 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     // 归一：属性尾部的 " />" 并成 "/>"，使属性写法断言与生成器输出对齐
     let styles = styles.replace(" />", "/>");
     let document = document.replace(" />", "/>");
+
+    // 版式期望值全部由 `style` 计算：默认档位与 P0a 模板逐字一致，紧凑档位自动跟着变
+    let body_line = style.line_twips();
+    let body_indent = style.first_line_chars_x100();
+    let body_after = if style.body.space_after_pt > 0 {
+        format!(" w:after=\"{}\"", style.space_after_twips())
+    } else {
+        String::new()
+    };
+    let body_needles = vec![
+        format!("<w:spacing w:line=\"{body_line}\" w:lineRule=\"auto\"{body_after}/>"),
+        format!("<w:ind w:firstLineChars=\"{body_indent}\"/>"),
+        format!("<w:jc w:val=\"{}\"/>", jc_val(&style.body.align)),
+        format!("<w:sz w:val=\"{}\"/>", style.half_points(style.body.size_pt)),
+    ];
+    let h1_needles = heading_needles(&style.heading1, 0);
+    let h2_needles = heading_needles(&style.heading2, 1);
+    let header_needles = vec![
+        format!("w:fill=\"{}\"", style.table.header_fill),
+        format!("w:val=\"{}\"", style.table.header_color),
+        "<w:b/>".to_string(),
+    ];
+    let caption_needles = vec![
+        format!(
+            "<w:sz w:val=\"{}\"/>",
+            style.half_points(style.figure.caption_size_pt)
+        ),
+        "<w:b/>".to_string(),
+        format!("<w:jc w:val=\"{}\"/>", jc_val(&style.figure.caption_align)),
+    ];
+    let border_needles = vec![
+        format!("w:color=\"{}\"", style.table.outer_color),
+        format!("w:color=\"{}\"", style.table.inner_color),
+        format!("w:sz=\"{}\"", style.border_eighth_pt()),
+    ];
+    let margin = style.margin_twips();
+    let margin_needles = vec![
+        format!("w:top=\"{margin}\""),
+        format!("w:bottom=\"{margin}\""),
+        format!("w:left=\"{margin}\""),
+        format!("w:right=\"{margin}\""),
+    ];
 
     let mut checks = Vec::with_capacity(24);
 
@@ -116,47 +175,21 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         },
     });
 
-    // #2-#6 段落样式块内容断言
-    checks.push(style_check(
-        "styles.body",
-        &styles,
-        "BidBody",
-        &[
-            r#"<w:spacing w:line="360" w:lineRule="auto"/>"#,
-            r#"<w:ind w:firstLineChars="200"/>"#,
-            r#"<w:jc w:val="both"/>"#,
-            r#"<w:sz w:val="24"/>"#,
-        ],
-    ));
-    checks.push(style_check(
-        "styles.title1",
-        &styles,
-        "BidTitle1",
-        &[
-            "253D57",
-            r#"<w:sz w:val="30"/>"#,
-            "<w:b/>",
-            r#"<w:jc w:val="center"/>"#,
-            r#"<w:outlineLvl w:val="0"/>"#,
-        ],
-    ));
-    checks.push(style_check(
-        "styles.title2",
-        &styles,
-        "BidTitle2",
-        &["315276", r#"<w:sz w:val="28"/>"#, "<w:b/>"],
-    ));
+    // #2-#6 段落样式块内容断言（needle 由 `style` 计算）
+    checks.push(style_check("styles.body", &styles, "BidBody", &body_needles));
+    checks.push(style_check("styles.title1", &styles, "BidTitle1", &h1_needles));
+    checks.push(style_check("styles.title2", &styles, "BidTitle2", &h2_needles));
     checks.push(style_check(
         "styles.table_header",
         &styles,
         "BidTableHeader",
-        &[r#"w:fill="4877AC""#, r#"w:val="FFFFFF""#, "<w:b/>"],
+        &header_needles,
     ));
     checks.push(style_check(
         "styles.caption",
         &styles,
         "BidCaption",
-        &[r#"<w:sz w:val="24"/>"#, "<w:b/>", r#"<w:jc w:val="center"/>"#],
+        &caption_needles,
     ));
 
     // #7 styles.table_borders：BidTable 块边框属性（w:sz="4" 为属性写法，非元素写法）
@@ -164,11 +197,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
         "styles.table_borders",
         &styles,
         "BidTable",
-        &[
-            r#"w:color="74A6CC""#,
-            r#"w:color="B0D0E8""#,
-            r#"w:sz="4""#,
-        ],
+        &border_needles,
     ));
 
     // #8 styles.element_order（G2 护栏）：styles.xml 全部 pPr/rPr 的第一层子元素顺序须单调
@@ -185,20 +214,11 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     checks.push(contains_check(
         "page.size",
         &document,
-        &[r#"w:w="11906""#, r#"w:h="16838""#],
+        &[r#"w:w="11906""#.to_string(), r#"w:h="16838""#.to_string()],
     ));
 
-    // #10 page.margins
-    checks.push(contains_check(
-        "page.margins",
-        &document,
-        &[
-            r#"w:top="680""#,
-            r#"w:bottom="680""#,
-            r#"w:left="680""#,
-            r#"w:right="680""#,
-        ],
-    ));
+    // #10 page.margins（页边距由 `style.margin_twips()` 计算：默认 1.2cm → 680，紧凑 1.0cm → 567）
+    checks.push(contains_check("page.margins", &document, &margin_needles));
 
     // #11-#16 文档结构 check（P0b §4.3 新增 4 条，插在 page.margins 之后；B6 插 doc.styles_link）
     // #11 doc.toc：目录域仍在（填充器不动 BID_TOC）。限定 w:tag w:val="BID_TOC" 的 sdt 块内断言；找不到块 → ok=false
@@ -263,7 +283,7 @@ pub fn verify(path: &Path, expect: Option<&Expect>) -> BidResult<VerifyReport> {
     checks.push(contains_check(
         "page_number_field",
         &footer,
-        &[r#"instr=" PAGE ""#, r#"instr=" NUMPAGES ""#],
+        &[r#"instr=" PAGE ""#.to_string(), r#"instr=" NUMPAGES ""#.to_string()],
     ));
     // #15 doc.element_order（G2 护栏）：document.xml 全 6 容器 + header/footer 的 pPr/rPr 子元素顺序
     //     （" />" 未归一部件就地归一后再判，自闭合标签不增深度）
@@ -516,8 +536,32 @@ fn element_order_check(name: &str, runs: &[(&str, &str, &[&str])]) -> Check {
     }
 }
 
+/// 正文/图注 `align` 语义映射（与 `template_gen` 同口径）：justify → both，其余原样透传
+fn jc_val(align: &str) -> &str {
+    match align {
+        "justify" => "both",
+        other => other,
+    }
+}
+
+/// 标题样式块的期望串（`styles.title1` / `styles.title2`）：
+/// 颜色（hex 子串）+ 字号（pt→half-points）+ 加粗（`bold=false` 不产 `<w:b/>`，故不参与断言）
+/// + 对齐（justify→both）+ 大纲级别（`outline` = 0 基）
+fn heading_needles(heading: &HeadingStyle, outline: u8) -> Vec<String> {
+    let mut needles = vec![
+        heading.color.clone(),
+        format!("<w:sz w:val=\"{}\"/>", heading.size_pt * 2),
+        format!("<w:jc w:val=\"{}\"/>", jc_val(&heading.align)),
+        format!("<w:outlineLvl w:val=\"{outline}\"/>"),
+    ];
+    if heading.bold {
+        needles.push("<w:b/>".to_string());
+    }
+    needles
+}
+
 /// 样式块内容断言（#2-#7）：块内须含全部 needle；找不到样式 → ok=false + `缺样式 X`
-fn style_check(name: &str, styles: &str, id: &str, needles: &[&str]) -> Check {
+fn style_check(name: &str, styles: &str, id: &str, needles: &[String]) -> Check {
     match style_block(styles, id) {
         None => Check {
             name: name.to_string(),
@@ -527,7 +571,7 @@ fn style_check(name: &str, styles: &str, id: &str, needles: &[&str]) -> Check {
         Some(block) => {
             let missing: Vec<&str> = needles
                 .iter()
-                .copied()
+                .map(String::as_str)
                 .filter(|n| !block.contains(n))
                 .collect();
             Check {
@@ -544,8 +588,12 @@ fn style_check(name: &str, styles: &str, id: &str, needles: &[&str]) -> Check {
 }
 
 /// 包含断言（#9-#10）：xml 须含全部 needle
-fn contains_check(name: &str, xml: &str, needles: &[&str]) -> Check {
-    let missing: Vec<&str> = needles.iter().copied().filter(|n| !xml.contains(n)).collect();
+fn contains_check(name: &str, xml: &str, needles: &[String]) -> Check {
+    let missing: Vec<&str> = needles
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !xml.contains(n))
+        .collect();
     Check {
         name: name.to_string(),
         ok: missing.is_empty(),
@@ -661,6 +709,8 @@ mod tests {
     use crate::office::bid::docx::DocxPackage;
 
     const TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1.docx";
+    /// 紧凑模板（`gen_bid_template --compact` 产出，随仓库提交）
+    const COMPACT_TEMPLATE: &str = "resources/templates/bid-engineering-blue-v1-compact.docx";
 
     /// §6.5 表格顺序（styles.present 打头，doc.metadata_anonymous 收尾；P0b §4.3 在 page.margins 后插 4 条；B6 在 doc.header_footer 后插 doc.styles_link；G2 在 styles.table_borders 后插 styles.element_order、在 page_number_field 后插 doc.element_order；P0c §0.1 末尾插 doc.metadata_anonymous → 24 项）
     const SPEC_ORDER: [&str; 24] = [
@@ -998,5 +1048,72 @@ xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // §7.8 样式变体：`verify_with_style`（紧凑模板）
+    // -----------------------------------------------------------------------
+
+    /// 紧凑模板导出的成品配压缩档位 → 24 项 check 全过（版式期望值随 style 变）
+    #[test]
+    fn compact_template_export_passes_with_compact_style() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-compact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("compact.docx");
+        export(&minimal_export_req(&out), Path::new(COMPACT_TEMPLATE), &out).unwrap();
+
+        let report = verify_with_style(&out, None, &DocStyle::default().compact()).unwrap();
+        assert_eq!(report.checks.len(), 24, "check 数量须仍为 24");
+        let failed: Vec<&str> = report
+            .checks
+            .iter()
+            .filter(|c| !c.ok)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert!(report.ok(), "紧凑成品校验失败: {failed:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 同一份紧凑成品用**默认**档位跑 → 版式类 check 必须失配（证明期望值真的由 style 算，
+    /// 不是写死的默认串）；模板完整性类 check 不受影响
+    #[test]
+    fn compact_template_export_fails_with_default_style() {
+        let dir = std::env::temp_dir().join(format!("qidi-bid-verify-compact-def-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("compact.docx");
+        export(&minimal_export_req(&out), Path::new(COMPACT_TEMPLATE), &out).unwrap();
+
+        let report = verify(&out, None).unwrap();
+        assert_eq!(report.checks.len(), 24);
+        assert!(
+            !check(&report, "styles.body").ok,
+            "紧凑成品行距 1.3 应被默认档位（1.5）判失败: {:?}",
+            check(&report, "styles.body")
+        );
+        assert!(
+            !check(&report, "page.margins").ok,
+            "紧凑成品边距 1.0cm 应被默认档位（1.2cm）判失败: {:?}",
+            check(&report, "page.margins")
+        );
+        assert!(
+            check(&report, "styles.present").ok,
+            "样式齐全性不受档位影响: {:?}",
+            check(&report, "styles.present")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `verify(path, expect)` 与 `verify_with_style(path, expect, DocStyle::default())` 等价
+    #[test]
+    fn verify_wrapper_matches_default_style() {
+        let plain = verify(Path::new(TEMPLATE), None).unwrap();
+        let styled = verify_with_style(Path::new(TEMPLATE), None, &DocStyle::default()).unwrap();
+        assert_eq!(plain.checks.len(), styled.checks.len());
+        for (a, b) in plain.checks.iter().zip(styled.checks.iter()) {
+            assert_eq!((a.name.as_str(), a.ok), (b.name.as_str(), b.ok), "check 不一致");
+            assert_eq!(a.detail, b.detail, "check detail 不一致");
+        }
     }
 }

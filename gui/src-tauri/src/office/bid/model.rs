@@ -21,6 +21,16 @@ pub struct DocStyle {
 #[serde(default)]
 pub struct PageStyle { pub paper: String /* "A4V" */, pub margin_cm: f32 /* 1.2 */ }
 
+/// 可读下限（§7.3）：正文/表格字号压缩后不得低于 10.5pt
+pub const MIN_READABLE_PT: f32 = 10.5;
+/// `BodyStyle::size_pt` 是整数 u32，无法表达 10.5 → 压缩时夹到 ≥10.5 的最小整数 11pt
+pub const MIN_BODY_SIZE_PT: u32 = 11;
+
+/// `TableStyleCfg::size_pt` 的反序列化默认值（12pt）
+fn default_table_sz() -> f32 {
+    12.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct BodyStyle {
@@ -29,6 +39,8 @@ pub struct BodyStyle {
     pub line_spacing: f32,     // 1.5  → w:line = (240*1.5).round() = 360
     pub align: String,         // "justify" → w:jc both
     pub first_line_indent_chars: u32, // 2 → w:firstLineChars="200"
+    /// 段后距（pt → 模板 `w:spacing/@w:after` = pt*20）；0 = 不输出该属性（默认，保持字节级不变）
+    pub space_after_pt: u32,   // 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -45,6 +57,9 @@ pub struct TableStyleCfg {
     pub header_color: String,  // "FFFFFF"
     pub first_col_fill: String,// "E6F2F9"（P0b 新增字段，B2 才消费）
     pub cant_split: bool,      // true
+    /// 表格字号（pt）。用 f32 以便表达 10.5pt（压缩档位）；模板渲染 `w:sz` = pt*2
+    #[serde(default = "default_table_sz")]
+    pub size_pt: f32,          // 12.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +86,7 @@ impl Default for BodyStyle {
             line_spacing: 1.5,
             align: "justify".to_string(),
             first_line_indent_chars: 2,
+            space_after_pt: 0,
         }
     }
 }
@@ -91,6 +107,7 @@ impl Default for TableStyleCfg {
             header_color: "FFFFFF".to_string(),
             first_col_fill: "E6F2F9".to_string(),
             cant_split: true,
+            size_pt: default_table_sz(),
         }
     }
 }
@@ -132,8 +149,26 @@ impl DocStyle {
     pub fn margin_twips(&self) -> u32 { (self.page.margin_cm / 2.54 * 1440.0).round() as u32 }
     /// 边框 pt → eighth-points（w:sz 单位）
     pub fn border_eighth_pt(&self) -> u32 { (self.table.border_pt * 8.0).round() as u32 }
+    /// 表格字号 pt → half-points（w:sz 单位；10.5pt → 21，12pt → 24）
+    pub fn table_half_points(&self) -> u32 { (self.table.size_pt * 2.0).round() as u32 }
     /// 首行缩进字符数 → w:firstLineChars（×100）
     pub fn first_line_chars_x100(&self) -> u32 { self.body.first_line_indent_chars * 100 }
+    /// 段后距 pt → w:spacing/@w:after（twips = pt*20）
+    pub fn space_after_twips(&self) -> u32 { self.body.space_after_pt * 20 }
+
+    /// 压缩档位（§7.3 阻断 3 修正）：行距 1.5 → 1.3、页边距 1.2 → 1.0cm、表字号 → 10.5pt；
+    /// 正文字号不主动改（仅当调用方设得比可读下限更小时夹到下限），其余字段不变。
+    ///
+    /// 表字号直接取可读下限 10.5pt（12 → 10.5 即压缩档位本身；调用方设更小时天然被抬到下限）。
+    /// `body.size_pt` 为整数 u32 无法表达 10.5 → 下限取 `MIN_BODY_SIZE_PT`（11pt）。
+    pub fn compact(&self) -> DocStyle {
+        let mut out = self.clone();
+        out.body.line_spacing = 1.3;
+        out.page.margin_cm = 1.0;
+        out.body.size_pt = out.body.size_pt.max(MIN_BODY_SIZE_PT);
+        out.table.size_pt = MIN_READABLE_PT;
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -556,5 +591,68 @@ mod tests {
         // 2026-12-01 → 2026-12-25 相隔 24 天（含首含尾 span = 25）
         let span = days_from_ymd("2026-12-25").unwrap() - days_from_ymd("2026-12-01").unwrap() + 1;
         assert_eq!(span, 25);
+    }
+
+    // -----------------------------------------------------------------------
+    // §7.3 压缩档位（B 片）
+    // -----------------------------------------------------------------------
+
+    /// 压缩档位取值：行距 1.5→1.3、页边距 1.2→1.0cm、表字号 12→10.5pt，其余字段不变
+    #[test]
+    fn compact_applies_expected_preset() {
+        let base = DocStyle::default();
+        let c = base.compact();
+        assert_eq!(c.body.line_spacing, 1.3, "行距须 1.3");
+        assert_eq!(c.page.margin_cm, 1.0, "页边距须 1.0cm");
+        assert_eq!(c.table.size_pt, 10.5, "表字号须 10.5pt");
+        assert_eq!(c.table_half_points(), 21, "10.5pt → w:sz 21");
+        assert_eq!(c.line_twips(), 312, "1.3 倍 → w:line 312");
+        assert_eq!(c.margin_twips(), 567, "1.0cm → 567 twips");
+        // 其余字段不得被压缩档位改动
+        assert_eq!(c.body.size_pt, base.body.size_pt, "正文字号不受压缩影响（12pt 已 ≥ 下限）");
+        assert_eq!(c.body.font, base.body.font);
+        assert_eq!(c.body.align, base.body.align);
+        assert_eq!(c.body.first_line_indent_chars, base.body.first_line_indent_chars);
+        assert_eq!(c.heading1, base.heading1);
+        assert_eq!(c.heading2, base.heading2);
+        assert_eq!(c.figure, base.figure);
+        assert_eq!(c.table.cant_split, base.table.cant_split);
+        assert_eq!(c.style_id, base.style_id);
+    }
+
+    /// 可读下限：调用方设更小字号 → 压缩时夹到下限（表 10.5pt；正文 u32 粒度夹到 11pt）
+    #[test]
+    fn compact_clamps_font_to_readable_floor() {
+        let mut base = DocStyle::default();
+        base.body.size_pt = 9;
+        base.table.size_pt = 9.0;
+        let c = base.compact();
+        assert_eq!(c.table.size_pt, MIN_READABLE_PT, "表字号不得低于 10.5pt");
+        assert!(
+            c.body.size_pt as f32 >= MIN_READABLE_PT,
+            "正文不得低于 10.5pt，实际 {}",
+            c.body.size_pt
+        );
+        assert_eq!(c.body.size_pt, MIN_BODY_SIZE_PT, "u32 粒度下夹到 11pt");
+        assert!(c.table_half_points() >= 21, "夹到下限后 w:sz 不得小于 21");
+    }
+
+    /// 新字段 serde 默认值：缺失时 space_after_pt=0、size_pt=12（保持旧配置可加载）
+    #[test]
+    fn new_style_fields_have_serde_defaults() {
+        let missing: DocStyle = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.body.space_after_pt, 0, "space_after_pt 默认 0");
+        assert_eq!(missing.table.size_pt, 12.0, "table.size_pt 默认 12");
+        assert_eq!(missing.space_after_twips(), 0, "0pt → 不输出 w:after");
+
+        let given: DocStyle =
+            serde_json::from_str(r#"{"body":{"space_after_pt":6},"table":{"size_pt":10.5}}"#).unwrap();
+        assert_eq!(given.body.space_after_pt, 6);
+        assert_eq!(given.space_after_twips(), 120, "6pt → 120 twips");
+        assert_eq!(given.table.size_pt, 10.5);
+        assert_eq!(given.table_half_points(), 21);
+        // 未给出的同段字段仍取默认（serde(default) 生效）
+        assert_eq!(given.body.font, "宋体");
+        assert_eq!(given.table.border_pt, 0.5);
     }
 }

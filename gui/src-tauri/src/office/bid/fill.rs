@@ -38,6 +38,14 @@ const EMPTY_FIGURE_CELL: &str = "<w:tc><w:tcPr><w:tcW w:w=\"3515\" w:type=\"dxa\
 /// 内容区宽（twips）：A4 宽 11906 - 2×680 页边距 = 10546
 const CONTENT_WIDTH_TWIPS: u32 = 10546;
 
+/// §7.7 重要 4：列宽加权——单列占总宽的下限/上限（百分比）
+const COL_MIN_PCT: u32 = 12;
+const COL_MAX_PCT: u32 = 45;
+/// 列权重下限：极短列（空/1 字）也不至于被压成 0 宽
+const COL_MIN_WEIGHT: u64 = 4;
+/// §7.7 重要 4：行内任一单元格字符数超过该值 → 该行取消 `cantSplit`（允许跨页）
+const ROW_SPLIT_CHARS: usize = 60;
+
 /// 横道图（P1-5 §3）：跨度 ≤ 112 天用 7 天/桶，否则 14 天/桶；桶数上限 16
 const GANTT_BUCKET_DAYS: i64 = 7;
 const GANTT_BUCKET_DAYS_WIDE: i64 = 14;
@@ -226,7 +234,8 @@ fn render_gantt(gantt: &GanttBlock) -> BidResult<(String, usize)> {
     }
     let cols = buckets as usize + 1;
 
-    // 列宽：首列 2600 twips，其余均分余宽（整除余数给首列，与 render_table 同约定）
+    // 列宽：首列 2600 twips，其余均分余宽（整除余数给首列）。
+    // 横道图列宽按时间桶均分（列内容恒为空/一格），不参与 §7.7 的业务表列宽加权
     let rest = CONTENT_WIDTH_TWIPS - GANTT_NAME_WIDTH;
     let base = rest / buckets as u32;
     let rem = rest % buckets as u32;
@@ -312,16 +321,14 @@ fn render_gantt_row(widths: &[u32], texts: &[String], fills: Option<&[bool]>) ->
         .replace("{{CELLS}}", &cells_xml)
 }
 
-/// 表格渲染（§6.4 + §5.5 table.xml / table_row.xml）
+/// 表格渲染（§6.4 + §5.5 table.xml / table_row.xml + §7.7 重要 4 列宽加权）
 fn render_table(header: &[String], rows: &[Vec<String>], style: &DocStyle) -> BidResult<String> {
     let cols = header.len();
     if cols == 0 {
         return Err(BidError::new("表格表头不能为空"));
     }
-    // 内容区 10546 twips 均分，余数给首列
-    let base = CONTENT_WIDTH_TWIPS / cols as u32;
-    let rem = CONTENT_WIDTH_TWIPS % cols as u32;
-    let widths: Vec<u32> = (0..cols).map(|c| base + if c == 0 { rem } else { 0 }).collect();
+    // 列宽：按列内容长度加权（非等分）；gridCol 与单元格 tcW 共用同一组宽度
+    let widths = table_column_widths(header, rows, CONTENT_WIDTH_TWIPS);
     let grid: String = widths
         .iter()
         .map(|w| format!("<w:gridCol w:w=\"{w}\"/>"))
@@ -339,17 +346,217 @@ fn render_table(header: &[String], rows: &[Vec<String>], style: &DocStyle) -> Bi
 
     // cant_split：true → <w:cantSplit/>，false → 空串（表头行/数据行一致）
     let cant_split = if style.table.cant_split { "<w:cantSplit/>" } else { "" };
+    // §7.7 重要 4：单行任一单元格 > 60 字 → 该行不 cantSplit，允许跨页
+    //（否则整行被推到下一页，留下大片空白）
+    let row_cant_split = |cells: &[String]| {
+        if cells.iter().any(|c| char_len(c) > ROW_SPLIT_CHARS) {
+            ""
+        } else {
+            cant_split
+        }
+    };
 
     let mut rows_xml = String::new();
     // 表头行：{{HEADER_FLAG}} = <w:tblHeader/>，单元格样式 BidTableHeader，首列不加底纹
-    rows_xml.push_str(&render_row(&widths, header, "<w:tblHeader/>", "BidTableHeader", "", cant_split));
+    rows_xml.push_str(&render_row(
+        &widths,
+        header,
+        "<w:tblHeader/>",
+        "BidTableHeader",
+        "",
+        row_cant_split(header),
+    ));
     // 数据行：flag 空串 + BidTableBody + 首列底纹
     for row in rows {
-        rows_xml.push_str(&render_row(&widths, row, "", "BidTableBody", &first_col_shd, cant_split));
+        rows_xml.push_str(&render_row(
+            &widths,
+            row,
+            "",
+            "BidTableBody",
+            &first_col_shd,
+            row_cant_split(row),
+        ));
     }
     Ok(TABLE_XML
         .replace("{{GRID}}", &grid)
         .replace("{{ROWS}}", &rows_xml))
+}
+
+/// 字符数（按 Unicode 标量计：中文一字算 1）
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+/// 列宽（§7.7 重要 4）：按列内容长度加权分配内容区宽度。
+///
+/// - 每列权重 = 该列（表头 + 全部数据行）单元格字符数的最大值，下限 `COL_MIN_WEIGHT`；
+/// - 按权重初分后把单列夹到 `COL_MIN_PCT`..`COL_MAX_PCT`（12%..45%），越界列钉死，
+///   余量按权重分给未夹列（多轮，直到不再有列越界）；
+/// - 下限之和已超总宽（列数 ≥ 9）→ 全列按权重等比回缩（§7.7「不足时按比例回缩」）；
+/// - 全部列都被夹死后仍有余量（3 列及以上）→ 先填「只触下限」的列（仍未超 45%）；
+/// - 45% 上限本身不可满足（2 列：2×45% < 100%）→ 余量按权重摊给所有列，表格须占满内容宽。
+///
+/// 返回宽度之和恒等于 `total`。
+fn table_column_widths(header: &[String], rows: &[Vec<String>], total: u32) -> Vec<u32> {
+    let cols = header.len();
+    if cols == 0 {
+        return Vec::new();
+    }
+    let weights: Vec<u64> = (0..cols)
+        .map(|c| {
+            let mut max = header.get(c).map_or(0, |t| char_len(t));
+            for row in rows {
+                if let Some(t) = row.get(c) {
+                    max = max.max(char_len(t));
+                }
+            }
+            (max as u64).max(COL_MIN_WEIGHT)
+        })
+        .collect();
+    let sum_w: u64 = weights.iter().sum();
+    let min_w = (total as u64 * COL_MIN_PCT as u64 / 100) as f64;
+    let max_w = (total as u64 * COL_MAX_PCT as u64 / 100) as f64;
+    let max_cap = max_w.round() as u64;
+
+    // 列太多：下限之和已超过总宽 → 全列按权重等比回缩
+    if min_w * cols as f64 > total as f64 {
+        return scale_to_total(&weights, sum_w, total);
+    }
+
+    let mut widths = vec![0u64; cols];
+    let mut pinned = vec![false; cols];
+    let mut remaining = total as f64;
+    let mut free_weight = sum_w as f64;
+    for _ in 0..cols {
+        let mut any = false;
+        for i in 0..cols {
+            if pinned[i] || free_weight <= 0.0 {
+                continue;
+            }
+            let share = remaining * (weights[i] as f64) / free_weight;
+            if share < min_w {
+                widths[i] = min_w.round() as u64;
+                pinned[i] = true;
+                remaining -= min_w.round();
+                free_weight -= weights[i] as f64;
+                any = true;
+            } else if share > max_w {
+                widths[i] = max_w.round() as u64;
+                pinned[i] = true;
+                remaining -= max_w.round();
+                free_weight -= weights[i] as f64;
+                any = true;
+            } else {
+                widths[i] = share.round() as u64;
+            }
+        }
+        if !any {
+            break;
+        }
+    }
+
+    // 余量重分：未夹列 → 只触下限的列（≤45%）→（上限不可满足时）所有列
+    let mut remain = total as i64 - widths.iter().sum::<u64>() as i64;
+    if remain != 0 {
+        if (cols as u64) * max_cap < total as u64 {
+            // 2 列：45% 上限与「占满内容宽」不可兼得 → 按权重摊给所有列
+            let all: Vec<usize> = (0..cols).collect();
+            remain = spread_by_weight(&mut widths, &weights, &all, remain, u64::MAX);
+        } else {
+            let mut targets: Vec<usize> = (0..cols).filter(|&i| !pinned[i]).collect();
+            if targets.is_empty() {
+                targets = (0..cols).filter(|&i| widths[i] < max_cap).collect();
+            }
+            if !targets.is_empty() {
+                remain = spread_by_weight(&mut widths, &weights, &targets, remain, max_cap);
+            }
+            if remain != 0 {
+                let all: Vec<usize> = (0..cols).collect();
+                remain = spread_by_weight(&mut widths, &weights, &all, remain, u64::MAX);
+            }
+        }
+        // 兜底（理论不可达）：仍有余额就塞给当前最宽列，保证总和 == total
+        while remain > 0 {
+            let widest = (0..cols).max_by_key(|&i| widths[i]).unwrap_or(0);
+            widths[widest] += 1;
+            remain -= 1;
+        }
+    }
+    widths.into_iter().map(|w| w as u32).collect()
+}
+
+/// 按权重把差额 `diff`（正=加、负=减）摊给 `targets`；加时单列不超过 `cap`。
+/// 返回未能分配完的余量（全部目标列触 `cap` 时非 0）。
+fn spread_by_weight(
+    widths: &mut [u64],
+    weights: &[u64],
+    targets: &[usize],
+    diff: i64,
+    cap: u64,
+) -> i64 {
+    let mut remain = diff;
+    if targets.is_empty() {
+        return remain;
+    }
+    let total_weight = targets.iter().map(|&i| weights[i]).sum::<u64>().max(1);
+    // 每轮把「按权重的份额」分给所有目标列；触 cap 的列本轮分不到，
+    // 余下的差额进下一轮（最多 targets.len()+1 轮即可收敛，再加兜底一轮）
+    for _ in 0..=targets.len() {
+        if remain == 0 {
+            break;
+        }
+        let want = remain.unsigned_abs();
+        let mut moved: i64 = 0;
+        for &i in targets {
+            if remain == 0 {
+                break;
+            }
+            let part = (want * weights[i] / total_weight).max(1).min(remain.unsigned_abs());
+            if remain > 0 {
+                let add = part.min(cap.saturating_sub(widths[i]));
+                widths[i] += add;
+                moved += add as i64;
+            } else {
+                let sub = part.min(widths[i]);
+                widths[i] -= sub;
+                moved -= sub as i64;
+            }
+        }
+        remain -= moved;
+        // 整除余数兜给最后一个目标列（受 cap 约束）
+        if remain > 0 {
+            if let Some(&last) = targets.last() {
+                let add = (remain as u64).min(cap.saturating_sub(widths[last]));
+                widths[last] += add;
+                remain -= add as i64;
+            }
+        } else if remain < 0 {
+            if let Some(&last) = targets.last() {
+                let sub = remain.unsigned_abs().min(widths[last]);
+                widths[last] -= sub;
+                remain += sub as i64;
+            }
+        }
+    }
+    remain
+}
+
+/// 全列按权重等比缩放到 `total`（余数逐 twip 摊给前面的列）
+fn scale_to_total(weights: &[u64], sum_w: u64, total: u32) -> Vec<u32> {
+    let sum_w = sum_w.max(1);
+    let mut widths: Vec<u64> = weights
+        .iter()
+        .map(|&w| total as u64 * w / sum_w)
+        .collect();
+    let assigned: u64 = widths.iter().sum();
+    let mut rest = total as i64 - assigned as i64;
+    let mut i = 0usize;
+    while rest > 0 {
+        widths[i % weights.len()] += 1;
+        rest -= 1;
+        i += 1;
+    }
+    widths.into_iter().map(|w| w as u32).collect()
 }
 
 /// 单行渲染（§5.5 table_row.xml）：表头行带 <w:tblHeader/>，数据行 flag 为空串；
@@ -1063,6 +1270,106 @@ mod tests {
         let tbl_on = render_table(&["h".to_string()], &[vec!["b".to_string()]], &DocStyle::default()).unwrap();
         assert!(tbl_on.contains("<w:cantSplit/>"), "cant_split=true 全表须含: {tbl_on}");
     }
+
+    // -----------------------------------------------------------------------
+    // §7.7 重要 4：真实表格列宽加权 + cantSplit 长行放行（3 条）
+    // -----------------------------------------------------------------------
+
+    /// 取 XML 里全部 `<w:gridCol w:w="…"/>` 的宽度
+    fn grid_widths(xml: &str) -> Vec<u32> {
+        const PREFIX: &str = "<w:gridCol w:w=\"";
+        let mut out = Vec::new();
+        let mut rest = xml;
+        while let Some(p) = rest.find(PREFIX) {
+            let after = &rest[p + PREFIX.len()..];
+            let end = after.find('"').expect("gridCol 宽度未闭合");
+            out.push(after[..end].parse::<u32>().expect("gridCol 宽度非数字"));
+            rest = &after[end..];
+        }
+        out
+    }
+
+    /// ① 2 列表（短/长）：宽度不得等分，长文列更宽，总宽仍为内容区宽 10546
+    #[test]
+    fn two_column_table_widths_are_weighted() {
+        let header = vec!["序号".to_string(), "施工内容".to_string()];
+        let long = "塘底清淤及外运：清除塘底淤泥约 2.54 万立方米，运距 15 公里，含晾晒与压实".to_string();
+        let rows = vec![
+            vec!["1".to_string(), long.clone()],
+            vec!["2".to_string(), long.clone()],
+        ];
+        let xml = render_table(&header, &rows, &DocStyle::default()).unwrap();
+        let widths = grid_widths(&xml);
+        assert_eq!(widths.len(), 2, "两列表须 2 个 gridCol: {xml}");
+        assert_ne!(widths[0], widths[1], "列宽不得等分: {widths:?}");
+        assert!(widths[1] > widths[0], "长文列须更宽: {widths:?}");
+        assert_eq!(widths.iter().sum::<u32>(), 10546, "总宽须等于内容区宽: {widths:?}");
+        // gridCol 与单元格 tcW 用同一组宽度
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                xml.contains(&format!("<w:tcW w:w=\"{w}\" w:type=\"dxa\"/>")),
+                "第 {i} 列 tcW 未与 gridCol 共用宽度 {w}: {xml}"
+            );
+        }
+    }
+
+    /// ② 8 列表：总宽仍为 10546，且每列不低于 12%（1265 twips）
+    #[test]
+    fn eight_column_table_keeps_total_and_min_share() {
+        let header: Vec<String> = (1..=8).map(|i| format!("列{i}")).collect();
+        let rows = vec![
+            (1..=8).map(|i| "x".repeat(i)).collect::<Vec<String>>(),
+            (1..=8)
+                .map(|i| format!("内容{i}{}", "y".repeat(i * 2)))
+                .collect::<Vec<String>>(),
+        ];
+        let xml = render_table(&header, &rows, &DocStyle::default()).unwrap();
+        let widths = grid_widths(&xml);
+        assert_eq!(widths.len(), 8, "八列表须 8 个 gridCol: {widths:?}");
+        assert_eq!(
+            widths.iter().sum::<u32>(),
+            10546,
+            "八列表总宽须仍为 10546: {widths:?}"
+        );
+        let min_share = 10546 * 12 / 100; // 1265
+        for (i, w) in widths.iter().enumerate() {
+            assert!(
+                *w >= min_share,
+                "第 {} 列宽 {w} 低于 12%（{min_share}）: {widths:?}",
+                i + 1
+            );
+            assert!(*w <= 10546 * 45 / 100, "第 {} 列宽 {w} 超过 45%: {widths:?}", i + 1);
+        }
+    }
+
+    /// ③ 含 158 字单元格的行不得 cantSplit（允许跨页）；短行照旧 cantSplit
+    #[test]
+    fn long_cell_row_allows_page_break() {
+        let header = vec!["项".to_string(), "说明".to_string()];
+        let short_row = vec!["a".to_string(), "短文本".to_string()];
+        let long_row = vec!["b".to_string(), "长".repeat(158)];
+        let xml = render_table(&header, &[short_row, long_row], &DocStyle::default()).unwrap();
+        let rows_xml: Vec<&str> = xml.split("<w:tr>").skip(1).collect();
+        assert_eq!(rows_xml.len(), 3, "须 3 行（表头 + 2 数据行）: {xml}");
+        assert!(
+            rows_xml[0].contains("<w:cantSplit/>"),
+            "表头行须保留 cantSplit: {}",
+            rows_xml[0]
+        );
+        assert!(
+            rows_xml[1].contains("<w:cantSplit/>"),
+            "短行须保留 cantSplit: {}",
+            rows_xml[1]
+        );
+        assert!(
+            !rows_xml[2].contains("<w:cantSplit/>"),
+            "158 字单元格所在行须允许跨页: {}",
+            rows_xml[2]
+        );
+        // 全表统计：3 行里恰 2 行 cantSplit
+        assert_eq!(xml.matches("<w:cantSplit/>").count(), 2, "{xml}");
+    }
+
 
     // -----------------------------------------------------------------------
     // P1-5 横道图（3 条）

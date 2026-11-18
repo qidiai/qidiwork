@@ -235,6 +235,14 @@ fn styles_xml(style: &DocStyle) -> String {
     let h4_bold = bold_tag(style.heading4.bold);
     let cap_sz = style.half_points(style.figure.caption_size_pt);
     let border_sz = style.border_eighth_pt();
+    // §7.3：表字号走 `table.size_pt`（f32，可表达 10.5pt → w:sz 21）
+    let table_sz = style.table_half_points();
+    // §7.3：段后距 → `w:spacing/@w:after`（pt*20）；0pt 时不输出该属性，默认产物字节级不变
+    let space_after = if style.body.space_after_pt > 0 {
+        format!(" w:after=\"{}\"", style.space_after_twips())
+    } else {
+        String::new()
+    };
     format!(
 r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -247,7 +255,7 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidBody">
     <w:name w:val="BidBody"/>
-    <w:pPr><w:spacing w:line="{line}" w:lineRule="auto"/><w:ind w:firstLineChars="{indent}"/><w:jc w:val="{body_jc}"/></w:pPr>
+    <w:pPr><w:spacing w:line="{line}" w:lineRule="auto"{space_after}/><w:ind w:firstLineChars="{indent}"/><w:jc w:val="{body_jc}"/></w:pPr>
     <w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="{font}"/><w:sz w:val="{body_sz}"/><w:szCs w:val="{body_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTitle1">
@@ -273,12 +281,12 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <w:style w:type="paragraph" w:styleId="BidTableHeader">
     <w:name w:val="BidTableHeader"/>
     <w:pPr><w:shd w:val="clear" w:color="auto" w:fill="{header_fill}"/><w:jc w:val="center"/></w:pPr>
-    <w:rPr><w:b/><w:color w:val="{header_color}"/><w:sz w:val="{body_sz}"/></w:rPr>
+    <w:rPr><w:b/><w:color w:val="{header_color}"/><w:sz w:val="{table_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidTableBody">
     <w:name w:val="BidTableBody"/>
     <w:pPr><w:jc w:val="center"/></w:pPr>
-    <w:rPr><w:sz w:val="{body_sz}"/></w:rPr>
+    <w:rPr><w:sz w:val="{table_sz}"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="BidCaption">
     <w:name w:val="BidCaption"/>
@@ -327,6 +335,8 @@ r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         font = font,
         body_sz = body_sz,
         line = line,
+        space_after = space_after,
+        table_sz = table_sz,
         indent = indent,
         body_jc = body_jc,
         h1_align = style.heading1.align,
@@ -667,5 +677,104 @@ mod tests {
                 "纸型 {paper} 的 pgSz 不符: {doc}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // §7.3 压缩档位（B 片）：表字号占位 + 段后距占位 + 默认产物字节稳定
+    // -----------------------------------------------------------------------
+
+    /// 取 styles.xml 里某个 styleId 的整块（`<w:style …>` 到下一个 `<w:style` 之前）
+    fn style_block(styles: &str, id: &str) -> String {
+        let marker = format!("w:styleId=\"{id}\"");
+        let marker_pos = styles
+            .find(&marker)
+            .unwrap_or_else(|| panic!("styles.xml 缺样式 {id}"));
+        let start = styles[..marker_pos].rfind("<w:style").expect("style 起始标签缺失");
+        let end = styles[start + 1..]
+            .find("<w:style")
+            .map_or(styles.len(), |p| start + 1 + p);
+        styles[start..end].to_string()
+    }
+
+    /// §7.3：`BidTableHeader`/`BidTableBody` 的 `<w:sz>` 取自 `style.table.size_pt`
+    /// （默认 12pt → 24；压缩 10.5pt → 21）
+    #[test]
+    fn table_style_size_follows_docstyle() {
+        let default_styles = template_styles_xml();
+        for id in ["BidTableHeader", "BidTableBody"] {
+            let block = style_block(&default_styles, id);
+            assert!(
+                block.contains(r#"<w:sz w:val="24"/>"#),
+                "{id} 默认须 12pt（sz 24）: {block}"
+            );
+        }
+
+        let compact = DocStyle::default().compact();
+        assert_eq!(compact.table.size_pt, 10.5);
+        let compact_styles = template_styles_xml_for(&compact);
+        for id in ["BidTableHeader", "BidTableBody"] {
+            let block = style_block(&compact_styles, id);
+            assert!(
+                block.contains(r#"<w:sz w:val="21"/>"#),
+                "{id} 压缩后须 10.5pt（sz 21）: {block}"
+            );
+            assert!(
+                !block.contains(r#"<w:sz w:val="24"/>"#),
+                "{id} 压缩后不得残留 12pt: {block}"
+            );
+        }
+        // 正文字号不随表字号变化（压缩只把表字号降到 10.5）
+        let body = style_block(&compact_styles, "BidBody");
+        assert!(
+            body.contains(r#"<w:sz w:val="24"/>"#),
+            "BidBody 正文字号不应被表字号影响: {body}"
+        );
+    }
+
+    /// §7.3：`BidBody` 段后距 → `w:spacing/@w:after`（pt*20）；0pt 时不输出该属性
+    #[test]
+    fn body_space_after_rendered_only_when_positive() {
+        let default_body = style_block(&template_styles_xml(), "BidBody");
+        assert!(
+            !default_body.contains("w:after="),
+            "默认 0pt 不得输出 w:after: {default_body}"
+        );
+        assert!(
+            default_body.contains(r#"<w:spacing w:line="360" w:lineRule="auto"/>"#),
+            "默认段后距下 spacing 须与 P0a 逐字一致: {default_body}"
+        );
+
+        let mut style = DocStyle::default();
+        style.body.space_after_pt = 6;
+        let body = style_block(&template_styles_xml_for(&style), "BidBody");
+        assert!(
+            body.contains(r#"w:after="120""#),
+            "6pt → w:after 120: {body}"
+        );
+        assert!(
+            body.contains(r#"w:line="360""#),
+            "段后距不得顶掉行距: {body}"
+        );
+    }
+
+    /// 默认 DocStyle 的 document.xml / styles.xml sha256 钉死（P0a 断言不得因新字段漂移）
+    #[test]
+    fn default_template_bytes_are_pinned() {
+        assert_eq!(
+            sha256_hex(template_document_xml().as_bytes()),
+            "bf4d37b28304784fe5f1aee11a2179ee0b013af0010ddb147b9582d0818d1d9b",
+            "默认 document.xml 与 P0a 模板字节级不一致"
+        );
+        assert_eq!(
+            sha256_hex(template_styles_xml().as_bytes()),
+            "c042c97121843518f030c86d7e1dee0f936adcd8f4a259e47e06ebb30bc344bb",
+            "默认 styles.xml 与拆分前字节级不一致"
+        );
+    }
+
+    /// sha256 → 小写十六进制
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
     }
 }

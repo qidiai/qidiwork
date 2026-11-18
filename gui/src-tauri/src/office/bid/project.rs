@@ -10,10 +10,13 @@
 //! ```
 //!
 //! - `chapters` 为空或缺省 → 取 `chapters/*.md` 按**文件名升序**；显式列出则按列表顺序。
-//! - 每个 md 按 [`parse_markdown_with`] 解析：**各文件自己的 H1 忽略**（书名取自 manifest），
-//!   其 H2 各自成章；所有文件的章节按顺序拼接。
+//! - 每章一文件（§7.1）：文件**首行**是 `# 文本` 或纯文本编号行（`一、工程概况`）→ 该行即章题，
+//!   其余 `##`/`###` 降为节/子节；首行不是这两类（老式 `##` 章节文件、骨架文件）→ 保持旧语义
+//!   （预置书名 H1，每个 `##` 各自成章），既有项目不破。
 //! - 图片相对路径一律按**项目根目录**（`dir`）解析——契约把 `assets/` 放在项目根，
 //!   所以章节里写 `![图注](assets/x.png)`，与 md 文件自身所在目录无关。
+//! - 缺图（§7.4）：默认 `strict_images = false` → 跳过该图、图注留成段落，warning 进
+//!   [`validate_project`] 的 problems；清单写 `"strict_images": true` 恢复硬错误。
 //! - `number = true` 时合并后再统一重号（各文件先按 `number = false` 解析，避免每个文件
 //!   各自从"第一章"重来），调用 [`renumber`]，口径与 `markdown.rs` 完全一致。
 //!
@@ -23,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::markdown::{parse_markdown_with, renumber};
+use super::markdown::{detect_chapter_title, parse_chapter_markdown, parse_markdown_with, renumber};
 use super::model::{BidExportRequest, Chapter};
 use super::paths::{resolve_from, DEFAULT_STYLE_ID};
 use super::{BidError, BidResult};
@@ -45,6 +48,13 @@ pub struct ProjectManifest {
     pub style_id: Option<String>,
     #[serde(default)]
     pub figure_width_cm: Option<f32>,
+    /// 页数上限（§7.5：CLI `--max-pages` 优先于本字段；都没有则不设限）。
+    /// 本片只落字段，优先级与 CLI 接线由后续片完成。
+    #[serde(default)]
+    pub max_pages: Option<u32>,
+    /// 缺图是否硬错误（§7.4）：默认 `false` = 跳过图片 + warning，`true` = `Err("图片不存在")`。
+    #[serde(default)]
+    pub strict_images: bool,
     /// 为空 → 取 `chapters/*.md` 文件名升序；非空 → 以列表顺序为准
     #[serde(default)]
     pub chapters: Vec<String>,
@@ -65,6 +75,8 @@ pub fn create_skeleton(dir: &Path, title: &str) -> BidResult<()> {
         title: title.trim().to_string(),
         style_id: None,
         figure_width_cm: None,
+        max_pages: None,
+        strict_images: false,
         chapters: Vec::new(),
     };
     let json = serde_json::to_string_pretty(&manifest)
@@ -101,8 +113,10 @@ pub fn build_request(dir: &Path, number: bool) -> BidResult<BidExportRequest> {
 
     let mut chapters: Vec<Chapter> = Vec::new();
     for path in &paths {
-        let mut parsed = parse_chapter(&manifest.title, dir, path)?;
+        let (mut parsed, warnings) = parse_chapter(&manifest, dir, path)?;
         chapters.append(&mut parsed);
+        // 缺图 warning 由 CLI 打印（`WARN 缺图: …`），本层只保证不阻断、不留悬空图片引用
+        let _ = warnings;
     }
     if number {
         renumber(&mut chapters);
@@ -135,8 +149,14 @@ pub fn validate_project(dir: &Path) -> BidResult<Vec<String>> {
     let mut problems: Vec<String> = Vec::new();
     let mut chapters: Vec<Chapter> = Vec::new();
     for path in &paths {
-        match parse_chapter(&manifest.title, dir, path) {
-            Ok(mut parsed) => chapters.append(&mut parsed),
+        match parse_chapter(&manifest, dir, path) {
+            Ok((mut parsed, warnings)) => {
+                chapters.append(&mut parsed);
+                // 缺图（§7.4）：不是硬错误，但要作为问题报出来（`缺图: <path>`）
+                for warning in warnings {
+                    push_unique(&mut problems, warning);
+                }
+            }
             Err(e) => push_unique(&mut problems, e.0),
         }
     }
@@ -221,22 +241,75 @@ fn list_chapters_dir(dir: &Path) -> BidResult<Vec<PathBuf>> {
     Ok(files.into_iter().map(|(_, p)| p).collect())
 }
 
-/// 解析单个章节文件：图片相对路径按**项目根**解析（契约把 `assets/` 放在项目根，
-/// 与 `chapters/` 平级，故 md 里写 `assets/x.png`）；文件自身 H1 被预置书名屏蔽掉。
-fn parse_chapter(title: &str, base_dir: &Path, path: &Path) -> BidResult<Vec<Chapter>> {
-    let src = std::fs::read_to_string(path).map_err(|_| {
-        BidError::new(format!("章节文件不存在: {}", path.display()))
-    })?;
-    let src = with_doc_title(title, &src);
-    let (_title, chapters) = parse_markdown_with(&src, base_dir, false)
-        .map_err(|e| BidError::new(format!("章节解析失败 {}: {e}", path.display())))?;
-    Ok(chapters)
+/// 解析单个章节文件 → `(章节, warnings)`。
+///
+/// 图片相对路径按**项目根**解析（契约把 `assets/` 放在项目根，与 `chapters/` 平级，
+/// 故 md 里写 `assets/x.png`）。
+///
+/// 两条路径（§7.1）：
+/// - 首行是 `# 文本` / 纯文本编号行，且**不等于书名** → 新语义：一文件一章，
+///   调 [`parse_chapter_markdown`]（章题取首行，`##`/`###` 降为节/子节，缺图按
+///   `manifest.strict_images` 降级）；
+/// - 否则（首行是书名本身、`##` 开头的老章节文件、或根本没有可识别首行）→ 旧语义：
+///   预置一行书名 H1 屏蔽文件自身 H1，每个 `##` 各自成章，缺图仍为硬错误。
+fn parse_chapter(
+    manifest: &ProjectManifest,
+    base_dir: &Path,
+    path: &Path,
+) -> BidResult<(Vec<Chapter>, Vec<String>)> {
+    let src = std::fs::read_to_string(path)
+        .map_err(|_| BidError::new(format!("章节文件不存在: {}", path.display())))?;
+    let fail = |e: BidError| BidError::new(format!("章节解析失败 {}: {e}", path.display()));
+
+    let first = src
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .find(|line| !line.trim().is_empty());
+    let detected = first.and_then(|line| detect_chapter_title(line.trim()));
+    let is_book_title = detected
+        .as_deref()
+        .is_some_and(|t| t.trim() == manifest.title.trim());
+
+    match detected {
+        Some(_) if !is_book_title => {
+            let fallback = fallback_chapter_title(path);
+            let (chapter, warnings) = parse_chapter_markdown(
+                &src,
+                base_dir,
+                false, // 各文件先不编号，合并后统一 renumber
+                &fallback,
+                manifest.strict_images,
+            )
+            .map_err(fail)?;
+            Ok((vec![chapter], warnings))
+        }
+        _ => {
+            // 旧语义：预置书名 H1，让解析器忽略文件自身 H1；`##` 各自成章
+            let prefixed = format!("# {}\n\n{src}", manifest.title.trim());
+            let (_title, chapters) = parse_markdown_with(&prefixed, base_dir, false).map_err(fail)?;
+            Ok((chapters, Vec::new()))
+        }
+    }
 }
 
-/// 预置一行书名 H1：解析器见到它就不再采信文件自己的 H1（§A.1"各文件自己的 H1 忽略"），
-/// 同时让没有 H1 的章节文件也能解析（否则解析器报"缺少文档标题"）。
-fn with_doc_title(title: &str, src: &str) -> String {
-    format!("# {title}\n\n{src}")
+/// 章题兜底：文件名去目录、扩展名与 `NN-` / `NN_` 前缀（`chapters/01-工程概况.md` → `工程概况`）。
+fn fallback_chapter_title(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let digits = stem.chars().take_while(|c| c.is_ascii_digit()).count();
+    let rest = &stem[digits..];
+    let trimmed = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix('_'))
+        .unwrap_or(rest);
+    let trimmed = if trimmed.trim().is_empty() {
+        stem.as_str()
+    } else {
+        trimmed
+    };
+    trimmed.trim().to_string()
 }
 
 fn push_unique(problems: &mut Vec<String>, msg: String) {
@@ -264,6 +337,7 @@ pub fn resolve_template(style_id: Option<&str>) -> BidResult<PathBuf> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::super::model::Block;
     use super::*;
 
     const TITLE: &str = "某县2026年度高标准农田建设项目施工组织设计";
@@ -289,9 +363,16 @@ mod tests {
             title: TITLE.to_string(),
             style_id,
             figure_width_cm: None,
+            max_pages: None,
+            strict_images: false,
             chapters,
         };
         let json = serde_json::to_string_pretty(&manifest).unwrap();
+        std::fs::write(dir.join(MANIFEST_FILE), json).unwrap();
+    }
+
+    /// 写清单原样 JSON（测 `max_pages` / `strict_images` 等字段解析）
+    fn write_manifest_json(dir: &Path, json: &str) {
         std::fs::write(dir.join(MANIFEST_FILE), json).unwrap();
     }
 
@@ -326,13 +407,15 @@ mod tests {
     }
 
     /// §A.4-2：两文件各 1 章 → 2 章，顺序按文件名升序（与写盘先后无关）
+    ///
+    /// §7.1 起章节文件是"一文件一章"：首行 `# <章题>` 即章题（书名仍取 manifest）。
     #[test]
     fn build_merges_files_in_order() {
         let dir = tmp_project("merge");
         write_manifest(&dir, Vec::new());
         // 故意先写 02，再写 01：合并顺序必须仍按文件名
-        write_chapter(&dir, "02-施工部署.md", "# 文件自己的书名（应被忽略）\n\n## 施工部署\n\n先地下后地上。\n");
-        write_chapter(&dir, "01-工程概况.md", "# 另一个书名（应被忽略）\n\n## 工程概况\n\n本工程为省级中心村建设项目。\n");
+        write_chapter(&dir, "02-施工部署.md", "# 施工部署\n\n先地下后地上。\n");
+        write_chapter(&dir, "01-工程概况.md", "# 工程概况\n\n本工程为省级中心村建设项目。\n");
 
         let req = build_request(&dir, true).unwrap();
         assert_eq!(req.title, TITLE, "书名取 manifest，不用文件 H1");
@@ -444,6 +527,126 @@ mod tests {
 
         // 缺省 / 空白 → 默认模板仍可解析
         assert!(resolve_template(None).is_ok(), "None 应回落到默认模板");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // §7 项目模式：首行章题 / 缺图降级 / 老式文件兼容 / manifest 新字段
+    // -----------------------------------------------------------------------
+
+    /// §7.1 + §7.2：首行 `一、工程概况`（纯文本编号行）→ 一文件一章，标题不叠加"第一章"
+    #[test]
+    fn numbered_first_line_builds_one_chapter() {
+        let dir = tmp_project("numbered-first");
+        write_manifest(&dir, vec!["chapters/01-ch1.md".to_string()]);
+        write_chapter(
+            &dir,
+            "01-ch1.md",
+            "一、工程概况\n\n本项目为省级中心村建设项目。\n\n### 1.1 项目概况\n\n正文。\n",
+        );
+
+        let req = build_request(&dir, true).unwrap();
+        assert_eq!(req.chapters.len(), 1, "一文件一章");
+        assert_eq!(req.chapters[0].title, "一、工程概况", "不得出现'第一章 一、'");
+        let heading = req.chapters[0]
+            .blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Heading { level, text } => Some((*level, text.clone())),
+                _ => None,
+            })
+            .expect("应解析出节标题");
+        assert_eq!(heading, (4u8, "1.1 项目概况".to_string()), "`###` 降为子节");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.4：项目模式缺图默认只记 warning（不阻断 build），`validate_project` 报"缺图"
+    #[test]
+    fn missing_image_warns_in_project_mode() {
+        let dir = tmp_project("warn-img");
+        write_manifest(&dir, vec!["chapters/01-ch1.md".to_string()]);
+        write_chapter(
+            &dir,
+            "01-ch1.md",
+            "一、工程概况\n\n![施工现场平面布置](assets/nope.png)\n\n正文。\n",
+        );
+
+        let req = build_request(&dir, true).unwrap();
+        assert_eq!(req.chapters.len(), 1);
+        assert!(
+            !req.chapters[0]
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Figure(_))),
+            "缺图不得生成图片块（不留悬空引用）"
+        );
+        assert!(
+            req.chapters[0]
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Paragraph { text } if text == "施工现场平面布置")),
+            "缺图的图注应保留为普通段落"
+        );
+
+        let problems = validate_project(&dir).unwrap();
+        assert_eq!(problems, vec!["缺图: assets/nope.png".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §7.4：清单写 `"strict_images": true` → 缺图恢复硬错误
+    #[test]
+    fn strict_images_manifest_is_hard_error() {
+        let dir = tmp_project("strict-img");
+        write_manifest_json(
+            &dir,
+            &format!(
+                r#"{{"title":"{TITLE}","strict_images":true,"chapters":["chapters/01-ch1.md"]}}"#
+            ),
+        );
+        write_chapter(&dir, "01-ch1.md", "# 工程概况\n\n![平面布置](assets/nope.png)\n");
+
+        let err = build_request(&dir, true).unwrap_err();
+        assert!(
+            err.to_string().contains("图片不存在: assets/nope.png"),
+            "strict_images 应恢复硬错误: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 兼容（§7.1）：首行是 `##`（老式多章文件）→ 仍按每个 `##` 各自成章
+    #[test]
+    fn legacy_h2_chapter_file_still_splits() {
+        let dir = tmp_project("legacy-h2");
+        write_manifest(&dir, vec!["chapters/01-ch1.md".to_string()]);
+        write_chapter(
+            &dir,
+            "01-ch1.md",
+            "## 一、工程概况\n\n正文一。\n\n## 二、主要施工方法\n\n正文二。\n",
+        );
+
+        let req = build_request(&dir, true).unwrap();
+        assert_eq!(req.chapters.len(), 2, "老式文件仍每 `##` 一章");
+        assert_eq!(req.chapters[0].title, "一、工程概况", "中文序号不叠加章号");
+        assert_eq!(req.chapters[1].title, "二、主要施工方法");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// manifest 新字段：`max_pages` / `strict_images` 缺省不炸、显式可读回
+    #[test]
+    fn manifest_max_pages_and_strict_images_default_and_set() {
+        let dir = tmp_project("manifest-fields");
+        write_manifest_json(&dir, &format!(r#"{{"title":"{TITLE}"}}"#));
+        let manifest = load_manifest(&dir).unwrap();
+        assert_eq!(manifest.max_pages, None, "缺省不设上限");
+        assert!(!manifest.strict_images, "缺省缺图降级");
+
+        write_manifest_json(
+            &dir,
+            &format!(r#"{{"title":"{TITLE}","max_pages":50,"strict_images":true}}"#),
+        );
+        let manifest = load_manifest(&dir).unwrap();
+        assert_eq!(manifest.max_pages, Some(50));
+        assert!(manifest.strict_images);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -20,8 +20,14 @@
 //! - 行内格式（`**粗体**`、链接）与 `\` 转义不解析，按纯文本原样保留；
 //!   以 `>`/`-`/`*` 开头的行不做列表语义，按普通段落文本保留。
 //!
+//! 项目模式（一章一文件，§7.1）：[`parse_chapter_markdown`] 先读**真实首行**决定章题
+//! （`# 文本` 或纯文本编号行，否则 `fallback_title`），正文 `##`→H3、`###`→H4；
+//! 缺图默认降级为 warning（`strict_images = false`）：跳过该图、图注留成普通段落，
+//! 绝不留下悬空图片引用。正文里**不做**纯文本编号识别（§7.2）。
+//!
 //! 编号（[`parse_markdown`] 默认开，[`parse_markdown_with`] 可关）：章标题未匹配
-//! `^第.+章` 且未匹配 `^\d+[.．、]` 时加 `第{中文数字}章 ` 前缀；`###`/`####` 未匹配
+//! 可读编号前缀（见 `has_readable_number`：`第N章`、`一、`、`（一）`、`\d+(\.\d+)*[.、\s]`）时加
+//! `第{中文数字}章 ` 前缀；`###`/`####` 未匹配
 //! `^\d+(\.\d+)*` 时加 `{章}.{节}` / `{章}.{节}.{子节} ` 前缀；已编号的原样保留，
 //! 但计数照常推进——显式 `第N章` / `N.M` 还会**同步**计数器，后续自动号从 M+1 接续。
 //! H4 先于 H3 出现时把节号补为 1，产出 `N.1.K` 而非 `N.0.K`。
@@ -47,18 +53,76 @@ pub fn parse_markdown_with(
     base_dir: &Path,
     number: bool,
 ) -> BidResult<(String, Vec<Chapter>)> {
-    let lines: Vec<&str> = src.trim_start_matches('\u{feff}').lines().collect();
-    let mut p = MdParser {
-        base_dir,
-        number,
-        title: None,
-        chapters: Vec::new(),
-        para: Vec::new(),
-        chapter_no: 0,
-        sec_no: 0,
-        sub_no: 0,
-    };
+    let lines = lines_of(src);
+    let mut p = MdParser::new(base_dir, number, false, true);
+    parse_lines(&mut p, &lines)?;
+    p.flush_para();
 
+    let title = p
+        .title
+        .ok_or_else(|| BidError::new("缺少文档标题（# 标题）"))?;
+    Ok((title, p.chapters))
+}
+
+/// 项目模式（§7.1 / §7.2 / §7.4）：一章一文件 → `(章节, warnings)`。
+///
+/// 章题取文件**真实首行**（忽略前导空行）：
+/// - `# 文本` → 文本；
+/// - **纯文本编号行**（行长 ≤ 40、不含 `。；，`、且带可读编号前缀）→ 该行原文；
+/// - 都不命中 → `fallback_title`（调用方传「文件名去 `NN-` 前缀」）。
+///
+/// 正文：`##` → [`Block::Heading`] level 3、`###` → level 4；正文里的 `#` 忽略、
+/// `####`+ 不作标题（整行按普通段落保留，与单文件模式一致）；正文**不做**纯文本编号识别，
+/// 故 `29.32万平方米五清十拆…` 这类句子绝不会被当成标题（§7.2）。
+///
+/// 缺图（§7.4）：`strict_images = true` → `Err("图片不存在: {path}")`（`--md` 单文件口径）；
+/// `false` → **跳过该图**（不生成 drawing，不留悬空引用）、把它的图注留成普通段落，
+/// 并把 `缺图: {path}` 记进第二个返回值（不阻断导出）。
+///
+/// 章题在本函数里**不**加 `第N章` 前缀：单文件的章号未知，合并场景请传 `number = false`
+/// 后统一 [`renumber`]；`number = true` 只影响节/子节自动编号（按 1.M 计）。
+pub fn parse_chapter_markdown(
+    src: &str,
+    base_dir: &Path,
+    number: bool,
+    fallback_title: &str,
+    strict_images: bool,
+) -> BidResult<(Chapter, Vec<String>)> {
+    let lines = lines_of(src);
+    let mut p = MdParser::new(base_dir, number, true, strict_images);
+
+    let mut start = 0usize;
+    let mut title = fallback_title.trim().to_string();
+    if let Some(first) = lines.iter().position(|line| !line.trim().is_empty()) {
+        if let Some(detected) = detect_chapter_title(lines[first].trim()) {
+            title = detected;
+            start = first + 1; // 首行已作章题，不再喂给正文解析
+        }
+    }
+    p.title = Some(title.clone());
+    p.chapters.push(Chapter {
+        title,
+        blocks: Vec::new(),
+    });
+
+    parse_lines(&mut p, &lines[start..])?;
+    p.flush_para();
+
+    let mut chapters = std::mem::take(&mut p.chapters);
+    let chapter = chapters.pop().unwrap_or_else(|| Chapter {
+        title: p.title.clone().unwrap_or_default(),
+        blocks: Vec::new(),
+    });
+    Ok((chapter, p.warnings))
+}
+
+/// 去 BOM 后按行切分（两种模式共用）。
+fn lines_of(src: &str) -> Vec<&str> {
+    src.trim_start_matches('\u{feff}').lines().collect()
+}
+
+/// 逐行解析（单文件模式与项目模式共用；差异只在标题层级映射与缺图策略）。
+fn parse_lines(p: &mut MdParser<'_>, lines: &[&str]) -> BidResult<()> {
     let mut i = 0;
     while i < lines.len() {
         let text = lines[i].trim();
@@ -69,7 +133,7 @@ pub fn parse_markdown_with(
         }
         // 横道图围栏（P1-5 §2）：```gantt [标题] … ``` → Block::Gantt
         if let Some(info) = text.strip_prefix("```gantt") {
-            let (gantt, next) = parse_gantt_fence(&lines, i, info)?;
+            let (gantt, next) = parse_gantt_fence(lines, i, info)?;
             p.flush_para();
             p.push_block(Block::Gantt(gantt));
             i = next;
@@ -93,38 +157,49 @@ pub fn parse_markdown_with(
             continue;
         }
         if let Some((level, heading)) = parse_heading(text) {
-            match level {
-                1 => {
-                    if p.title.is_none() && !heading.is_empty() {
-                        p.title = Some(heading.to_string());
+            if p.chapter_mode {
+                // 项目模式：章题已由首行确定，正文 `##`→H3、`###`→H4
+                match level {
+                    1 => {} // 正文里的 H1 忽略（与单文件模式"其后 H1 忽略"一致）
+                    2 => {
+                        p.flush_para();
+                        p.push_heading(3, heading);
                     }
+                    3 => {
+                        p.flush_para();
+                        p.push_heading(4, heading);
+                    }
+                    _ => p.para.push(text.to_string()), // H4+ 不作标题
                 }
-                2 => {
-                    p.flush_para();
-                    p.start_chapter(heading);
+            } else {
+                match level {
+                    1 => {
+                        if p.title.is_none() && !heading.is_empty() {
+                            p.title = Some(heading.to_string());
+                        }
+                    }
+                    2 => {
+                        p.flush_para();
+                        p.start_chapter(heading);
+                    }
+                    3 | 4 => {
+                        p.flush_para();
+                        p.push_heading(level as u8, heading);
+                    }
+                    _ => p.para.push(text.to_string()), // H5+ 不作标题
                 }
-                3 | 4 => {
-                    p.flush_para();
-                    p.push_heading(level as u8, heading);
-                }
-                _ => p.para.push(text.to_string()), // H5+ 不作标题
             }
             i += 1;
             continue;
         }
-        if let Some(next) = p.try_table(&lines, i)? {
+        if let Some(next) = p.try_table(lines, i)? {
             i = next;
             continue;
         }
         p.para.push(text.to_string());
         i += 1;
     }
-    p.flush_para();
-
-    let title = p
-        .title
-        .ok_or_else(|| BidError::new("缺少文档标题（# 标题）"))?;
-    Ok((title, p.chapters))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +265,32 @@ struct MdParser<'a> {
     sec_no: usize,
     /// 本节内 H4 序号
     sub_no: usize,
+    /// 项目模式（一章一文件）：`##`→H3、`###`→H4，`start_chapter` 不再被调用
+    chapter_mode: bool,
+    /// 缺图是否硬错误（项目模式默认 `false`，见 [`parse_chapter_markdown`]）
+    strict_images: bool,
+    /// 非致命问题（目前只有 `缺图: {path}`）
+    warnings: Vec<String>,
 }
 
-impl MdParser<'_> {
+impl<'a> MdParser<'a> {
+    fn new(base_dir: &'a Path, number: bool, chapter_mode: bool, strict_images: bool) -> Self {
+        Self {
+            base_dir,
+            number,
+            title: None,
+            chapters: Vec::new(),
+            para: Vec::new(),
+            // 项目模式的章号未知（合并后由 renumber 决定），节号按 1 起算
+            chapter_no: usize::from(chapter_mode),
+            sec_no: 0,
+            sub_no: 0,
+            chapter_mode,
+            strict_images,
+            warnings: Vec::new(),
+        }
+    }
+
     /// 段落缓冲落盘：段内换行以空格连接后 trim；空段不产出块。
     fn flush_para(&mut self) {
         if self.para.is_empty() {
@@ -265,10 +363,22 @@ impl MdParser<'_> {
     }
 
     /// 图片序列 → 图块：每 3 张一组 `three_up`（逐图图注），余下的逐张 Single/Wide。
+    ///
+    /// 缺图（§7.4）：`strict_images` → `Err`；否则**跳过该图**（不生成 drawing）并记 warning，
+    /// 其图注留成普通段落。分组只在「连续存在」的图片之间进行，避免缺图把三栏拆错。
     fn push_image_run(&mut self, run: &[ImageSpec]) -> BidResult<()> {
         let mut idx = 0;
         while idx < run.len() {
-            if run.len() - idx >= 3 {
+            if !image_exists(self.base_dir, &run[idx].path) {
+                self.drop_image(&run[idx])?;
+                idx += 1;
+                continue;
+            }
+            let usable = run[idx..]
+                .iter()
+                .take_while(|spec| image_exists(self.base_dir, &spec.path))
+                .count();
+            if usable >= 3 {
                 let mut items = Vec::with_capacity(3);
                 for spec in &run[idx..idx + 3] {
                     items.push(FigureItem {
@@ -309,6 +419,20 @@ impl MdParser<'_> {
                 }));
                 idx += 1;
             }
+        }
+        Ok(())
+    }
+
+    /// 缺图处置（§7.4）：严格 → `Err("图片不存在: {path}")`；否则跳过图片、图注留成段落 + warning。
+    ///
+    /// docx 侧因此**不会**出现悬空图片引用（不进 [`Block::Figure`] 就没有 drawing）。
+    fn drop_image(&mut self, spec: &ImageSpec) -> BidResult<()> {
+        if self.strict_images {
+            return Err(BidError::new(format!("图片不存在: {}", spec.path)));
+        }
+        self.warnings.push(format!("缺图: {}", spec.path));
+        if let Some(caption) = caption_of(&spec.caption) {
+            self.push_block(Block::Paragraph { text: caption });
         }
         Ok(())
     }
@@ -495,16 +619,26 @@ fn is_sep_cell(cell: &str) -> bool {
 
 /// 图片路径：相对 → `base_dir` 拼接；必须存在。
 fn resolve_image(base_dir: &Path, raw: &str) -> BidResult<String> {
-    let path = Path::new(raw);
-    let abs: PathBuf = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
-    };
+    let abs = image_path(base_dir, raw);
     if !abs.is_file() {
         return Err(BidError::new(format!("图片不存在: {raw}")));
     }
     Ok(abs.to_string_lossy().into_owned())
+}
+
+/// 图片绝对路径（不校验存在性；`is_absolute` 原样采信）。
+fn image_path(base_dir: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
+/// 图片是否存在（缺图降级预检，不含 `Err`）。
+fn image_exists(base_dir: &Path, raw: &str) -> bool {
+    image_path(base_dir, raw).is_file()
 }
 
 fn caption_of(caption: &str) -> Option<String> {
@@ -560,31 +694,121 @@ fn explicit_section_number(text: &str) -> Option<usize> {
     leading_usize(rest).map(|(n, _)| n)
 }
 
-/// 章标题是否已编号：`^第.+章` 或 `^\d+[.．、]`。
+/// 章标题是否已编号（命中任一可读编号前缀 → 不加 `第N章`）。
 fn matches_chapter_number(text: &str) -> bool {
-    if let Some(rest) = text.strip_prefix('第') {
-        let mut chars = rest.chars();
-        // `.+` 至少一个字符，其后必须出现 `章`（"第章"不算）
-        if let Some(first) = chars.next() {
-            if first != '章' && chars.any(|c| c == '章') {
-                return true;
-            }
-        }
-    }
-    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
-    digits > 0 && matches!(text.chars().nth(digits), Some('.' | '．' | '、'))
+    has_readable_number(text)
 }
 
-/// 节/子节标题是否已编号：`^\d+(\.\d+)*`。
+/// 节/子节标题是否已编号：`^\d+(\.\d+)*` 或任一可读编号前缀。
 ///
-/// 字面实现——`(\.\d+)*` 可匹配空串，故等价于"以 ASCII 数字开头"。
-/// 这样 `1.1 概述`、`1.1概述`、`1 概述` 都按已编号原样保留，不会被二次加前缀。
+/// 阿拉伯数字部分字面实现——`(\.\d+)*` 可匹配空串，故等价于"以 ASCII 数字开头"。
+/// 这样 `1.1 概述`、`1.1概述`、`1 概述` 都按已编号原样保留，不会被二次加前缀；
+/// 中文序号（`一、`、`（一）`）同样视为已编号（§7.2，防 `1.1 一、项目简介`）。
 fn matches_section_number(text: &str) -> bool {
-    text.chars().next().is_some_and(|c| c.is_ascii_digit())
+    text.chars().next().is_some_and(|c| c.is_ascii_digit()) || has_readable_number(text)
+}
+
+/// 可读编号前缀（§7.2）——命中任一即"人已经编过号"，自动编号不再叠加。模式：
+///
+/// - `^[一二三四五六七八九十百]+、`（`一、工程概况`）
+/// - `^（[一二三四五六七八九十百]+）`（`（一）工程概况`）
+/// - `^第[一二三四五六七八九十百0-9]+章`（`第一章` / `第1章`）
+/// - `^\d+(\.\d+)*[.．、\s]`（`1.` / `1.1 ` / `2、`；`29.32万平方米` 不命中）
+fn has_readable_number(text: &str) -> bool {
+    starts_with_cn_ordinal(text)
+        || starts_with_cn_paren(text)
+        || starts_with_cn_chapter(text)
+        || starts_with_arabic_ordinal(text)
+}
+
+/// 中文数字字符（`一`…`百`）个数。
+fn cn_num_len(text: &str) -> usize {
+    text.chars()
+        .take_while(|c| matches!(c, '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十' | '百'))
+        .count()
+}
+
+/// `^[一二三四五六七八九十百]+、`
+fn starts_with_cn_ordinal(text: &str) -> bool {
+    let n = cn_num_len(text);
+    n > 0 && text.chars().nth(n) == Some('、')
+}
+
+/// `^（[一二三四五六七八九十百]+）`
+fn starts_with_cn_paren(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('（') else {
+        return false;
+    };
+    let n = cn_num_len(rest);
+    n > 0 && rest.chars().nth(n) == Some('）')
+}
+
+/// `^第[一二三四五六七八九十百0-9]+章`
+fn starts_with_cn_chapter(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('第') else {
+        return false;
+    };
+    let n = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十' | '百'))
+        .count();
+    n > 0 && rest.chars().nth(n) == Some('章')
+}
+
+/// `^\d+(\.\d+)*[.．、\s]`：多级号必须**以分隔符收尾**，故 `29.32万平方米` / `2.54万立方米`
+/// 这类量词不算编号（§7.2 反例）。
+fn starts_with_arabic_ordinal(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    if !chars.peek().is_some_and(char::is_ascii_digit) {
+        return false;
+    }
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() {
+            continue;
+        }
+        // `1.1`：点后仍是数字 → 多级号继续；否则点就是分隔符本身
+        if (c == '.' || c == '．') && chars.peek().is_some_and(char::is_ascii_digit) {
+            continue;
+        }
+        return matches!(c, '.' | '．' | '、' | ' ' | '\t');
+    }
+    false
+}
+
+/// 首行 → 章题：`# 文本`（非空）或**纯文本编号行**（§7.2 三重约束）；否则 `None`。
+///
+/// `None` 表示"这行不像章题"，调用方（`project::parse_chapter`）据此回退到老式
+/// "每个 `##` 各自成章"语义——骨架文件与 `##` 开头的老章节文件都走这条。
+pub fn detect_chapter_title(line: &str) -> Option<String> {
+    let text = line.trim();
+    if let Some((1, heading)) = parse_heading(text) {
+        let heading = heading.trim();
+        return if heading.is_empty() {
+            None
+        } else {
+            Some(heading.to_string())
+        };
+    }
+    if is_plain_chapter_title(text) {
+        Some(text.to_string())
+    } else {
+        None
+    }
+}
+
+/// 纯文本章题（§7.2）：行长 ≤ 40、不含 `。；，`、且带可读编号前缀。
+///
+/// 三条缺一不可——真实标书正文里的 `29.32万平方米五清十拆…，…。` 正是靠"逗号/句号"
+/// 与"多级号未收尾"两条同时挡住的。
+fn is_plain_chapter_title(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().count() <= 40
+        && !text.chars().any(|c| matches!(c, '。' | '；' | '，'))
+        && has_readable_number(text)
 }
 
 // ---------------------------------------------------------------------------
-// 单测（D2：7 条，图片经临时目录复制，不依赖仓库真实路径写法）
+// 单测（D2：7 条，图片经临时目录复制，不依赖仓库真实路径写法；+§7 项目模式 6 条）
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -987,6 +1211,166 @@ mod tests {
         assert!(
             err.to_string().contains("横道图至少需要一个工序"),
             "错误信息不符: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // §7 项目模式（一章一文件）：章题首行识别 / 编号不叠加 / 缺图降级
+    // -----------------------------------------------------------------------
+
+    fn plain(chapter: &Chapter) -> Vec<String> {
+        chapter
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Paragraph { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn figures(chapter: &Chapter) -> Vec<&FigureBlock> {
+        chapter
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Figure(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ①§7.2：`一、工程概况` 已带中文序号 → 不再变成 `第一章 一、…`；计数器照常推进
+    #[test]
+    fn cn_numbered_chapter_not_double_numbered() {
+        let mut chapters = vec![
+            Chapter {
+                title: "一、工程概况".to_string(),
+                blocks: Vec::new(),
+            },
+            Chapter {
+                title: "二、主要施工方法".to_string(),
+                blocks: vec![Block::Heading {
+                    level: 3,
+                    text: "（一）施工准备".to_string(),
+                }],
+            },
+            Chapter {
+                title: "第9章 安全生产".to_string(),
+                blocks: Vec::new(),
+            },
+            Chapter {
+                title: "质量保证".to_string(),
+                blocks: Vec::new(),
+            },
+        ];
+        renumber(&mut chapters);
+        assert_eq!(chapters[0].title, "一、工程概况", "中文序号不得叠加章号");
+        assert_eq!(chapters[1].title, "二、主要施工方法");
+        assert_eq!(chapters[2].title, "第9章 安全生产", "阿拉伯章号原样保留");
+        assert_eq!(chapters[3].title, "第十章 质量保证", "无编号的仍按序号接续");
+        assert_eq!(
+            headings(&chapters[1]),
+            vec![(3u8, "（一）施工准备".to_string())],
+            "中文括号序号不得叠加节号"
+        );
+    }
+
+    /// ②§7.1：纯文本首行 `一、工程概况` 识别为章题；正文 `###` → H4
+    #[test]
+    fn plain_number_first_line_is_chapter_title() {
+        let dir = tmp_dir("plain-first");
+        let src = "一、工程概况\n\n本项目为省级中心村建设项目。\n\n### 1.1 项目概况\n\n塘底清淤约2.54万立方米。\n";
+        let (chapter, warnings) = parse_chapter_markdown(src, &dir, false, "01-ch1", true).unwrap();
+        assert_eq!(chapter.title, "一、工程概况", "纯文本编号行应成为章题");
+        assert_eq!(headings(&chapter), vec![(4u8, "1.1 项目概况".to_string())]);
+        assert!(warnings.is_empty(), "无缺图不应有 warning: {warnings:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ②b§7.1：`# 一、工程概况` 同样识别为章题，且不被加 `第一章` 前缀
+    #[test]
+    fn h1_numbered_first_line_is_chapter_title() {
+        let dir = tmp_dir("h1-first");
+        let src = "# 二、主要施工方法\n\n正文一。\n\n## 2.1 施工顺序\n\n正文二。\n";
+        let (chapter, _) = parse_chapter_markdown(src, &dir, false, "02-ch2", true).unwrap();
+        assert_eq!(chapter.title, "二、主要施工方法");
+        assert_eq!(headings(&chapter), vec![(3u8, "2.1 施工顺序".to_string())]);
+        assert_eq!(plain(&chapter), vec!["正文一。".to_string(), "正文二。".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ③§7.1：首行既不是 H1 也不是编号行 → 用 fallback 章题（文件名去 `NN-`）
+    #[test]
+    fn chapter_title_falls_back_to_file_name() {
+        let dir = tmp_dir("fallback");
+        let src = "本项目为省级中心村建设项目。\n\n### 1.1 项目概况\n";
+        let (chapter, _) = parse_chapter_markdown(src, &dir, false, "工程概况", true).unwrap();
+        assert_eq!(chapter.title, "工程概况", "无可识别首行时用 fallback");
+        assert_eq!(headings(&chapter), vec![(4u8, "1.1 项目概况".to_string())]);
+        assert_eq!(plain(&chapter), vec!["本项目为省级中心村建设项目。".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ④§7.2：原文 ch1:98 / ch1:106 的"29.32万平方米…"/"2.54万立方米…" 不得成为标题
+    #[test]
+    fn numeric_body_lines_are_not_titles() {
+        let dir = tmp_dir("not-title");
+        let body_98 = "29.32万平方米五清十拆与各分项工程散布村域，单作业面工程量小，无法组织大规模连续施工，作业面转换频繁，队伍窝工与调度失效风险高。";
+        let body_106 = "2.54万立方米清淤量分布于多口水塘，围堰修筑与抽排水受汛期水位制约，淤泥含水率高，处置去向与环保要求直接相关。";
+        // 首行判定层：量词（多级号未收尾 / 含标点）都不算章题
+        assert!(detect_chapter_title(body_98).is_none(), "长句不得成章题");
+        assert!(detect_chapter_title(body_106).is_none());
+        assert!(detect_chapter_title("29.32万平方米").is_none(), "带小数的量不是编号");
+        assert!(detect_chapter_title("2.54万立方米").is_none());
+        // 解析层：出现在正文里只能是段落，绝不产出标题
+        let src = format!("# 工程概况\n\n{body_98}\n\n{body_106}\n");
+        let (chapter, _) = parse_chapter_markdown(&src, &dir, false, "01", true).unwrap();
+        assert!(
+            headings(&chapter).is_empty(),
+            "正文数字行不得产出标题: {:?}",
+            headings(&chapter)
+        );
+        assert_eq!(plain(&chapter), vec![body_98.to_string(), body_106.to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⑤§7.4：`strict_images = true` → 缺图仍是硬错误（与 `--md` 口径一致）
+    #[test]
+    fn chapter_missing_image_strict_rejected() {
+        let dir = tmp_dir("chapter-strict");
+        let src = "# 工程概况\n\n![施工现场平面布置](assets/nope.png)\n";
+        let err = parse_chapter_markdown(src, &dir, false, "01", true).unwrap_err();
+        assert!(
+            err.to_string().contains("图片不存在: assets/nope.png"),
+            "错误信息不符: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ⑥§7.4：非 strict → 跳过缺图、图注留成段落、有 warning，其余结构照常
+    #[test]
+    fn chapter_missing_image_warns_and_continues() {
+        let dir = tmp_dir("chapter-warn");
+        let src = format!(
+            "# 工程概况\n\n![缺失的图](assets/nope.png)\n\n### 1.1 项目概况\n\n![好图]({IMAGE})\n"
+        );
+        let (chapter, warnings) = parse_chapter_markdown(&src, &dir, false, "01", false).unwrap();
+        assert_eq!(warnings, vec!["缺图: assets/nope.png".to_string()]);
+        assert_eq!(
+            headings(&chapter),
+            vec![(4u8, "1.1 项目概况".to_string())],
+            "缺图不得影响其余结构解析"
+        );
+        let figs = figures(&chapter);
+        assert_eq!(figs.len(), 1, "缺图不生成 drawing，存在的图照常嵌入");
+        assert_eq!(figs[0].items.len(), 1);
+        assert_eq!(figs[0].items[0].caption.as_deref(), Some("好图"));
+        assert_eq!(
+            plain(&chapter),
+            vec!["缺失的图".to_string()],
+            "缺图的图注应保留为普通段落"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

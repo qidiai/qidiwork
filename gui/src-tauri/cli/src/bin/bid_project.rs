@@ -20,6 +20,8 @@
 //!   （§7.6：无上限不测、不打印 pages），命中时摘要带 `"pages":n`；
 //!   `pages > max` → 打印 `PAGES_EXCEEDED pages=<n> max=<M>` 并 exit 3（docx 保留）；
 //!   测量失败只打 `WARN`（stderr），不改退出码
+//! - P2 告警通道（T1）：`build` 收尾 warnings 非空时在摘要 JSON 行之后、`PAGES_EXCEEDED`/
+//!   `BUILD OK` 之前逐条打印 `WARN <name> <detail>`（stdout）；告警不阻断、不影响退出码
 //! - `check`：`PROJECT OK` exit 0 / `PROJECT FAIL …` exit 1
 //! - 参数 / 读盘 / 解析 / 导出错误：`ERROR <原因>`，exit 2
 
@@ -326,6 +328,10 @@ fn run_build(
     match serde_json::to_string(&summary_value) {
         Ok(line) => println!("{line}"),
         Err(e) => error(&format!("摘要序列化失败: {e}")),
+    }
+    // P2 告警通道（T1）：摘要 JSON 行之后逐条 WARN（不阻断、不改退出码）
+    for w in &report.warnings {
+        println!("WARN {} {}", w.name, w.detail);
     }
     // S3 红线：实测超页 → 保留 docx（便于人工查看）但 exit 3，脚本可据此阻断发布
     if let (Some(n), Some(max)) = (measured, max_pages) {

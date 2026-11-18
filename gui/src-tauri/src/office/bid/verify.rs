@@ -11,12 +11,17 @@
 //! - `expect=None` → #18-#23 计数类 check `ok=true` + detail `skipped`。
 //! - 元素顺序（#8 styles.element_order / #15 doc.element_order，G2 护栏）：容器第一层子元素名
 //!   只保留在顺序表内的（表外未知元素跳过），下标须单调不减；自闭合标签不增深度。
+//!
+//! P2 告警通道（T1）：24 条 checks 之外另收集 `warnings`（`font.size_min` 有效字号聚合单条、
+//! `figure.layout_risk` 图片超高/图注分离每违规实例一条）。告警条目 `ok=false` 语义为"该项命中"，
+//! 不影响 `ok()`（只看 checks）、不影响退出码；`to_json()` 恒输出 `warnings` 数组（空为 `[]`）。
 
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::docx::DocxPackage;
-use super::model::{DocStyle, HeadingStyle};
+use super::model::{DocStyle, HeadingStyle, MIN_READABLE_PT};
 use super::BidResult;
 
 /// 期望计数（`expect=None` → 只查结构 #1-#17，#18-#23 skipped）
@@ -41,17 +46,20 @@ pub struct Check {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
     pub checks: Vec<Check>,
+    /// P2 告警通道（T1）：不阻断导出、不影响 `ok()`；条目 `ok=false` 表示该告警项命中
+    pub warnings: Vec<Check>,
 }
 
 impl VerifyReport {
-    /// 全部 check 通过才算通过
+    /// 全部 check 通过才算通过（warnings 不参与判定）
     pub fn ok(&self) -> bool {
         self.checks.iter().all(|c| c.ok)
     }
 
-    /// 序列化为 JSON 字符串（serde_json）
+    /// 序列化为 JSON 字符串（serde_json；warnings 恒输出，空为 `[]`）
     pub fn to_json(&self) -> String {
-        serde_json::json!({ "ok": self.ok(), "checks": self.checks }).to_string()
+        serde_json::json!({ "ok": self.ok(), "checks": self.checks, "warnings": self.warnings })
+            .to_string()
     }
 }
 
@@ -424,7 +432,9 @@ pub fn verify_with_style(
         },
     });
 
-    Ok(VerifyReport { checks })
+    // P2 告警通道（T1）：24 条 checks 收集完毕后追加静态告警（不影响 ok()）
+    let warnings = collect_warnings(&document, &styles);
+    Ok(VerifyReport { checks, warnings })
 }
 
 /// 按 `w:styleId="X"` 定位样式块：向前找最近 `<w:style`，向后找 `</w:style>`
@@ -697,6 +707,445 @@ fn first_col_fill_ok(table: &str) -> bool {
 /// 含 `needle` 的 `<w:tbl>` 块个数（#21 doc.tables 计数口径：3up 图桌不计入）
 fn count_tables_with(xml: &str, needle: &str) -> usize {
     tables_with(xml, needle).len()
+}
+
+// ---------------------------------------------------------------------------
+// P2 告警通道（T1）：有效字号 + 图注/图片静态几何；字符串扫描，不引依赖
+// ---------------------------------------------------------------------------
+
+/// 最小可读字号阈值（half-points）：由 `model::MIN_READABLE_PT`（10.5pt）换算 = 21
+const MIN_HALF_POINTS: u32 = (MIN_READABLE_PT * 2.0) as u32;
+
+/// 收集 P2 告警：`font.size_min` 聚合单条 + `figure.layout_risk` 每违规实例一条
+fn collect_warnings(document: &str, styles: &str) -> Vec<Check> {
+    let mut warnings = Vec::new();
+    if let Some(w) = font_size_warning(document, styles) {
+        warnings.push(w);
+    }
+    warnings.extend(figure_warnings(document));
+    warnings
+}
+
+/// 单个标签文本内取属性值：` w:val="…"` → `…`；无该属性 → None
+fn tag_attr<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let needle = format!(" {attr}=\"");
+    let at = tag.find(&needle)?;
+    let rest = &tag[at + needle.len()..];
+    rest.split('"').next()
+}
+
+/// 在 `xml` 中找首个边界合法的 `<{tag}`（后随 `>`/`/`/空白，避免 `<w:szCs` 误命中 `<w:sz`），
+/// 取其 `attr` 属性值；标签无该属性或找不到标签 → None
+fn attr_val<'a>(xml: &'a str, tag: &str, attr: &str) -> Option<&'a str> {
+    let open = format!("<{tag}");
+    let mut from = 0usize;
+    while let Some(rel) = xml[from..].find(&open) {
+        let start = from + rel;
+        let after = start + open.len();
+        from = after;
+        let boundary = matches!(
+            xml[after..].chars().next(),
+            Some(c) if c == '>' || c == '/' || c.is_whitespace()
+        );
+        if !boundary {
+            continue;
+        }
+        let gt = xml[start..].find('>')?;
+        return tag_attr(&xml[start..start + gt], attr);
+    }
+    None
+}
+
+/// 从 `start`（须指向 `<w:{tag}` 开标签）提取配平块，支持同名嵌套（如文本框内 run）；
+/// 自闭合开标签不增深度；未配平 → None
+fn balanced_block<'a>(xml: &'a str, start: usize, tag: &str) -> Option<&'a str> {
+    let open = format!("<w:{tag}");
+    let close = format!("</w:{tag}>");
+    if !xml[start..].starts_with(&open) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut rest = &xml[start..];
+    let mut consumed = 0usize;
+    while let Some(lt) = rest.find('<') {
+        let tail = &rest[lt..];
+        let gt = tail.find('>')?;
+        let t = &tail[..=gt];
+        let is_open = t.starts_with(&open)
+            && matches!(
+                t.as_bytes().get(open.len()),
+                Some(b'>') | Some(b'/') | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+            );
+        let end = start + consumed + lt + gt + 1;
+        if is_open && !t.ends_with("/>") {
+            depth += 1;
+        } else if t == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(&xml[start..end]);
+            }
+        } else if is_open && depth == 0 {
+            // 自闭合开标签（如 <w:r/>）→ 块即该标签本身
+            return Some(&xml[start..end]);
+        }
+        consumed += lt + gt + 1;
+        rest = &tail[gt + 1..];
+    }
+    None
+}
+
+/// 块自身的第一层首个 `<w:{child}` 子块（须紧跟开标签之后，如 w:p 的 pPr / w:r 的 rPr）；
+/// 不是首子元素 → None（避免误取嵌套文本框内的同名元素）
+fn own_child_block<'a>(block: &'a str, child: &str) -> Option<&'a str> {
+    let gt = block.find('>')?;
+    let inner = block[gt + 1..].trim_start();
+    let open = format!("<w:{child}");
+    if !inner.starts_with(&open) {
+        return None;
+    }
+    let boundary = matches!(
+        inner[open.len()..].chars().next(),
+        Some(c) if c == '>' || c == '/' || c.is_whitespace()
+    );
+    if !boundary {
+        return None;
+    }
+    let start = block.len() - inner.len();
+    balanced_block(block, start, child)
+}
+
+/// styles.xml → styleId → (样式级 rPr 直接 sz, basedOn 父样式 id)。
+/// sz 取块内最后一个 `<w:rPr`（样式级 rPr 在 pPr 之后，避免误取段标记 rPr）
+fn style_sz_map(styles: &str) -> HashMap<String, (Option<u32>, Option<String>)> {
+    let mut map = HashMap::new();
+    let mut from = 0usize;
+    while let Some(rel) = styles[from..].find("<w:style") {
+        let start = from + rel;
+        let after = start + "<w:style".len();
+        from = after;
+        let boundary = matches!(
+            styles[after..].chars().next(),
+            Some(c) if c == '>' || c == '/' || c.is_whitespace()
+        );
+        if !boundary {
+            continue;
+        }
+        let Some(block) = balanced_block(styles, start, "style") else { continue };
+        let Some(gt) = block.find('>') else { continue };
+        let Some(id) = tag_attr(&block[..gt], "w:styleId") else { continue };
+        // 样式级 rPr = 块内最后一个边界合法的 <w:rPr
+        let mut rpr_at = None;
+        let mut scan = 0usize;
+        while let Some(rrel) = block[scan..].find("<w:rPr") {
+            let s = scan + rrel;
+            let safter = s + "<w:rPr".len();
+            scan = safter;
+            if matches!(
+                block[safter..].chars().next(),
+                Some(c) if c == '>' || c == '/' || c.is_whitespace()
+            ) {
+                rpr_at = Some(s);
+            }
+        }
+        let sz = rpr_at
+            .and_then(|s| balanced_block(block, s, "rPr"))
+            .and_then(|rpr| attr_val(rpr, "w:sz", "w:val"))
+            .and_then(|v| v.parse::<u32>().ok());
+        let based_on = attr_val(block, "w:basedOn", "w:val").map(str::to_string);
+        map.insert(id.to_string(), (sz, based_on));
+    }
+    map
+}
+
+/// 沿 basedOn 链上溯解析样式字号（D7：深度上限 8 + visited 防环）；解析不到 → None
+fn chain_sz(map: &HashMap<String, (Option<u32>, Option<String>)>, id: &str) -> Option<u32> {
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut cur = id;
+    for _ in 0..8 {
+        if !visited.insert(cur) {
+            return None;
+        }
+        let (sz, based) = map.get(cur)?;
+        if let Some(sz) = sz {
+            return Some(*sz);
+        }
+        cur = based.as_deref()?;
+    }
+    None
+}
+
+/// docDefaults/rPrDefault/rPr/sz（读 styles.xml，不硬编码模板值）；缺失 → None
+fn doc_default_sz(styles: &str) -> Option<u32> {
+    let start = styles.find("<w:docDefaults>")?;
+    let end = start + styles[start..].find("</w:docDefaults>")?;
+    let block = &styles[start..end];
+    let rstart = block.find("<w:rPrDefault>")?;
+    let rend = rstart + block[rstart..].find("</w:rPrDefault>")?;
+    attr_val(&block[rstart..rend], "w:sz", "w:val")?
+        .parse::<u32>()
+        .ok()
+}
+
+/// run 自身（剔除嵌套 run——文本框内 run 独立计，D6）是否含非自闭合 `<w:t>`/`<w:t …>`；
+/// 纯域代码（instrText）/纯 drawing run 自然不含 → 跳过
+fn run_has_own_text(run: &str) -> bool {
+    let mut depth = 0usize;
+    let mut rest = run;
+    while let Some(lt) = rest.find('<') {
+        let tail = &rest[lt..];
+        let Some(gt) = tail.find('>') else { break };
+        let tag = &tail[..=gt];
+        let bytes = tag.as_bytes();
+        let r_open = tag.starts_with("<w:r")
+            && matches!(bytes.get(4), Some(b'>') | Some(b' ') | Some(b'/'));
+        if r_open && !tag.ends_with("/>") {
+            depth += 1;
+        } else if tag == "</w:r>" {
+            depth = depth.saturating_sub(1);
+        } else if depth == 1
+            && tag.starts_with("<w:t")
+            && matches!(bytes.get(4), Some(b'>') | Some(b' '))
+            && !tag.ends_with("/>")
+        {
+            return true;
+        }
+        rest = &tail[gt + 1..];
+    }
+    false
+}
+
+/// M2 字号告警：扫含文本 run，有效字号 = 直接 rPr/sz > rStyle > pStyle > docDefaults；
+/// 任一 < 21 half-points → 聚合单条（detail 含最小字号与低于阈值 run 数）；解析不到跳过
+fn font_size_warning(document: &str, styles: &str) -> Option<Check> {
+    let map = style_sz_map(styles);
+    let default_sz = doc_default_sz(styles);
+    // 预计算全部非自闭合 <w:p 开标签位置（段落可嵌套：文本框段落独立；run 归属取其前最近开标签）
+    let mut p_starts: Vec<usize> = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = document[from..].find("<w:p") {
+        let s = from + rel;
+        let after = s + "<w:p".len();
+        from = after;
+        if !matches!(document[after..].chars().next(), Some(c) if c == '>' || c.is_whitespace()) {
+            continue;
+        }
+        let Some(gt) = document[s..].find('>') else { break };
+        if !document[s..s + gt].ends_with('/') {
+            p_starts.push(s);
+        }
+    }
+    let mut min_sz: Option<u32> = None;
+    let mut count = 0usize;
+    let mut p_idx = 0usize;
+    let mut p_cache: Option<(usize, Option<String>)> = None;
+    let mut from = 0usize;
+    while let Some(rel) = document[from..].find("<w:r") {
+        let start = from + rel;
+        let after = start + "<w:r".len();
+        // 推进到开标签之后：嵌套 run（文本框）独立参与判定（D6）
+        from = after;
+        if !matches!(
+            document[after..].chars().next(),
+            Some(c) if c == '>' || c == '/' || c.is_whitespace()
+        ) {
+            continue;
+        }
+        let Some(run) = balanced_block(document, start, "r") else { continue };
+        if !run_has_own_text(run) {
+            continue;
+        }
+        while p_idx < p_starts.len() && p_starts[p_idx] < start {
+            p_idx += 1;
+        }
+        let mut p_style: Option<String> = None;
+        if p_idx > 0 {
+            let ps = p_starts[p_idx - 1];
+            match &p_cache {
+                Some((cached, cached_style)) if *cached == ps => p_style = cached_style.clone(),
+                _ => {
+                    p_style = balanced_block(document, ps, "p")
+                        .and_then(|p| own_child_block(p, "pPr"))
+                        .and_then(|ppr| attr_val(ppr, "w:pStyle", "w:val"))
+                        .map(str::to_string);
+                    p_cache = Some((ps, p_style.clone()));
+                }
+            }
+        }
+        let rpr = own_child_block(run, "rPr");
+        let sz = rpr
+            .and_then(|r| attr_val(r, "w:sz", "w:val"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .or_else(|| {
+                rpr.and_then(|r| attr_val(r, "w:rStyle", "w:val"))
+                    .and_then(|id| chain_sz(&map, id))
+            })
+            .or_else(|| p_style.as_deref().and_then(|id| chain_sz(&map, id)))
+            .or(default_sz);
+        if let Some(sz) = sz {
+            if sz < MIN_HALF_POINTS {
+                count += 1;
+                min_sz = Some(match min_sz {
+                    Some(m) => m.min(sz),
+                    None => sz,
+                });
+            }
+        }
+    }
+    let min = min_sz?;
+    Some(Check {
+        name: "font.size_min".to_string(),
+        ok: false,
+        detail: format!(
+            "最小有效字号 {}pt（w:sz={min}），低于 {}pt 阈值的 run 数 {count}",
+            min as f32 / 2.0,
+            MIN_HALF_POINTS as f32 / 2.0
+        ),
+    })
+}
+
+/// 内容区高（EMU）：body 末尾 sectPr 的 pgSz.h − pgMar.top − pgMar.bottom（twips×635）；
+/// 任一属性缺失/不可解析 → None（跳过 a 类判定）
+fn content_height_emu(document: &str) -> Option<u64> {
+    let start = document.rfind("<w:sectPr")?;
+    let block = balanced_block(document, start, "sectPr")?;
+    let h = attr_val(block, "w:pgSz", "w:h")?.parse::<u64>().ok()?;
+    let top = attr_val(block, "w:pgMar", "w:top")?.parse::<u64>().ok()?;
+    let bottom = attr_val(block, "w:pgMar", "w:bottom")?.parse::<u64>().ok()?;
+    Some(h.saturating_sub(top).saturating_sub(bottom) * 635)
+}
+
+/// body 第一层直接子元素：(标签名去 w: 前缀, 完整块切片)；自闭合子元素块即标签本身。
+/// `w:sdt`（BID_CHAPTER_BODY 等）是结构包装而非版式元素：透明展开其 sdtContent，
+/// 使章节正文段/图注段落在同一扁平序列上参与紧邻判定（锁定测试 separated_caption 的契约）
+fn body_top_children(document: &str) -> Vec<(&str, &str)> {
+    let Some(bs) = document.find("<w:body>") else { return Vec::new() };
+    let inner_start = bs + "<w:body>".len();
+    let Some(be) = document[inner_start..].find("</w:body>") else { return Vec::new() };
+    top_children(&document[inner_start..inner_start + be])
+}
+
+/// sdt 块内的 sdtContent 内容切片（去掉 sdtContent 自身标签）；缺失 → None
+fn sdt_inner(block: &str) -> Option<&str> {
+    let s = block.find("<w:sdtContent>")?;
+    let b = balanced_block(block, s, "sdtContent")?;
+    let gt = b.find('>')?;
+    let end = b.len().checked_sub("</w:sdtContent>".len())?;
+    Some(&b[gt + 1..end])
+}
+
+/// 内容片段的第一层子元素扫描（深度计数；sdt 透明递归展开）
+fn top_children(inner: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut child_start = 0usize;
+    let mut child_name: Option<&str> = None;
+    let mut pos = 0usize;
+    let mut rest = inner;
+    while let Some(lt) = rest.find('<') {
+        let tail = &rest[lt..];
+        let Some(gt) = tail.find('>') else { break };
+        let tag = &tail[..=gt];
+        let abs = pos + lt;
+        if tag.starts_with("</") {
+            // 只对 w: 前缀闭标签减深度：非 w: 开标签（wp:/a:/pic: 等）未增深度，
+            // 其闭标签也不得减（否则 drawing 内部深度被击穿，子块边界错乱）
+            if tag_name(tag).is_some() {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(n) = child_name.take() {
+                        push_child(&mut out, n, &inner[child_start..abs + gt + 1]);
+                    }
+                }
+            }
+        } else if tag.ends_with("/>") {
+            if depth == 0 {
+                if let Some(n) = tag_name(tag) {
+                    push_child(&mut out, n, &inner[abs..abs + gt + 1]);
+                }
+            }
+        } else if let Some(n) = tag_name(tag) {
+            if depth == 0 {
+                child_start = abs;
+                child_name = Some(n);
+            }
+            depth += 1;
+        }
+        pos = abs + gt + 1;
+        rest = &tail[gt + 1..];
+    }
+    out
+}
+
+/// 收录一个顶层子元素：sdt → 递归展开 sdtContent；其余原样收录
+fn push_child<'a>(out: &mut Vec<(&'a str, &'a str)>, name: &'a str, block: &'a str) {
+    if name == "sdt" {
+        if let Some(inner) = sdt_inner(block) {
+            out.extend(top_children(inner));
+            return;
+        }
+    }
+    out.push((name, block));
+}
+
+/// M3 图注/图片静态几何告警（每违规实例一条，D3）：
+/// a) 全篇 wp:extent/@cy > 内容区高；b) 含 drawing 的 body 直接子级 w:p，
+/// 紧邻下一直接兄弟不是 pStyle=BidCaption 的 w:p（w:tbl 内部 drawing 不参与 b）
+fn figure_warnings(document: &str) -> Vec<Check> {
+    let mut out = Vec::new();
+    // a) 图片显示高度超内容区高
+    if let Some(h) = content_height_emu(document) {
+        let mut from = 0usize;
+        while let Some(rel) = document[from..].find("<wp:extent") {
+            let s = from + rel;
+            let after = s + "<wp:extent".len();
+            from = after;
+            if !matches!(
+                document[after..].chars().next(),
+                Some(c) if c == '>' || c == '/' || c.is_whitespace()
+            ) {
+                continue;
+            }
+            let Some(gt) = document[s..].find('>') else { break };
+            let Some(cy) = tag_attr(&document[s..s + gt], "cy").and_then(|v| v.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if cy > h {
+                out.push(Check {
+                    name: "figure.layout_risk".to_string(),
+                    ok: false,
+                    detail: format!("图片显示高度 {cy} EMU 超内容区高 {h} EMU（页高减上下边距，twips×635）"),
+                });
+            }
+        }
+    }
+    // b) 图注分离：含 drawing 的 body 直接子级段之后紧邻须为 BidCaption 图注段
+    let children = body_top_children(document);
+    for (i, (name, block)) in children.iter().enumerate() {
+        if *name != "p" || !block.contains("<w:drawing") {
+            continue;
+        }
+        let next = children.get(i + 1);
+        let next_is_caption = next.is_some_and(|(n, b)| {
+            *n == "p"
+                && own_child_block(b, "pPr")
+                    .and_then(|ppr| attr_val(ppr, "w:pStyle", "w:val"))
+                    == Some("BidCaption")
+        });
+        if !next_is_caption {
+            let next_desc = match next {
+                Some((n, _)) if *n == "p" => "w:p（非 BidCaption）".to_string(),
+                Some((n, _)) => format!("w:{n}"),
+                None => "无（body 末尾）".to_string(),
+            };
+            out.push(Check {
+                name: "figure.layout_risk".to_string(),
+                ok: false,
+                detail: format!("图注分离：含图片段紧邻下一元素不是 BidCaption 图注段（实际: {next_desc}）"),
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]

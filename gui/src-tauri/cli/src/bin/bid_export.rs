@@ -28,7 +28,9 @@
 //!   `pages <= max` → 正常 `EXPORT OK`，摘要里带 `"pages":n`
 //! - 结构校验失败：`CHECK FAIL <失败 check 名,逗号分隔>`，exit 1
 //! - 参数/读盘/导出错误：`ERROR <原因>`，exit 2
-//! - `--check-only`：`{"checks":N,"ok":true}` + `CHECK OK`，exit 0
+//! - `--check-only`：`{"checks":N,"ok":true,"warnings":n}` + `CHECK OK`，exit 0
+//! - P2 告警通道（T1）：warnings 非空时在摘要 JSON 行之后、`EXPORT OK`/`CHECK OK`/`CHECK FAIL`
+//!   之前逐条打印 `WARN <name> <detail>`（stdout）；告警不阻断、不影响退出码
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -471,6 +473,10 @@ fn export_and_verify(
         Ok(line) => println!("{line}"),
         Err(e) => error(&format!("摘要序列化失败: {e}")),
     }
+    // P2 告警通道（T1）：摘要 JSON 行之后逐条 WARN（不阻断、不改退出码）
+    for w in &report.warnings {
+        println!("WARN {} {}", w.name, w.detail);
+    }
     // 摘要行之后、`EXPORT OK` 之前补一行机器可读的页数（无上限且无 --pages 时不打印）
     if let Some(pages) = measured {
         // S3 红线：实测超页 → 保留 docx（便于人工查看）但 exit 3，脚本可据此阻断发布
@@ -509,12 +515,19 @@ fn run_check_only(docx: &Path, compact: bool) -> ! {
         Err(e) => error(&format!("校验失败 {}: {e}", docx.display())),
     };
     let n = report.checks.len();
+    let wn = report.warnings.len();
     if report.ok() {
-        println!("{}", serde_json::json!({ "checks": n, "ok": true }));
+        println!("{}", serde_json::json!({ "checks": n, "ok": true, "warnings": wn }));
+        for w in &report.warnings {
+            println!("WARN {} {}", w.name, w.detail);
+        }
         println!("CHECK OK");
         exit(0);
     }
-    println!("{}", serde_json::json!({ "checks": n, "ok": false }));
+    println!("{}", serde_json::json!({ "checks": n, "ok": false, "warnings": wn }));
+    for w in &report.warnings {
+        println!("WARN {} {}", w.name, w.detail);
+    }
     println!("CHECK FAIL {}", failed_names(&report));
     exit(EXIT_CHECK_FAIL)
 }

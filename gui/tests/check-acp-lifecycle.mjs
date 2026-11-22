@@ -11,6 +11,7 @@ const quoted = relative => JSON.stringify(path.join(gui, relative).replaceAll('\
 fs.writeFileSync(path.join(dir, 'lib.rs'), `#[path = ${quoted('src-tauri/src/transport.rs')}] pub mod transport;
 #[path = ${quoted('src-tauri/src/acp/mod.rs')}] pub mod acp;
 #[cfg(test)] #[path = ${quoted('tests/orchestra-t2-bridge.rs')}] mod lifecycle_tests;
+#[cfg(test)] #[path = ${quoted('tests/permission-wait-bridge.rs')}] mod permission_wait_tests;
 `);
 fs.writeFileSync(path.join(dir, 'Cargo.toml'), `[package]
 name = "qidi-acp-lifecycle-check"
@@ -21,7 +22,7 @@ path = "lib.rs"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread", "time", "test-util"] }
 tracing = "0.1"
 `);
 for (const relative of ['src-tauri/src/acp/bridge.rs', 'tests/orchestra-t2-bridge.rs']) {

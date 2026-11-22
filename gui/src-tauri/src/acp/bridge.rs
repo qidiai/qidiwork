@@ -10,8 +10,8 @@
 //! - 断连时对挂起权限回 `cancelled` 应答后再清理;
 //! - initialize 校验 `result.protocolVersion`,不匹配即失败;
 //! - 路由循环内不 await 写队列(防御性拒绝走 best-effort 后台任务);
-//! - 权限请求带 per-request 截止时间(默认 120s):到期仍无人回填即按
-//!   **拒绝**回应 agent,**绝不自动 allow**(缺口:见 `spawn_permission_timeout`);
+//! - 权限请求无限等待显式应答或生命周期清理;等待期间暂停对应会话的
+//!   prompt 运行预算,不自动允许、拒绝或取消;
 //! - 注意 `PROMPT_TIMEOUT` 超时 ≠ 取消:超时只发 TurnCompleted 错误事件,
 //!   agent 侧仍在跑,真正中断需配合 `session/cancel`(M4 编排)。
 
@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::acp::jsonrpc::{self, ACP_PROTOCOL_VERSION, ERR_METHOD_NOT_FOUND, Incoming};
@@ -32,10 +32,6 @@ use crate::transport::{AgentTransport, ExitInfo, TransportError};
 /// 单个 RPC 的默认超时。session/prompt 的回合可能跑很久,单独放宽。
 const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-/// 单条权限请求的默认截止时间(per-request)。到期仍无人回填 → 按**拒绝**
-/// 回应 agent 并广播 `PermissionCancelled{reason:"timeout"}`,**绝不自动 allow**。
-/// 与 `PROMPT_TIMEOUT` 无关:后者只防前端无限等 `session/prompt` 应答。
-const DEFAULT_PERMISSION_TIMEOUT: Duration = Duration::from_secs(120);
 /// 展示流(桥 → 前端转发任务)的 broadcast 容量。256 在长回合密集
 /// session/update 下易被追平 → Lagged 丢帧,最坏丢 TurnCompleted 使
 /// 前端 busy 永久卡住(见 useAgent.ts 头部注释)。提到 1024 降低触发
@@ -63,15 +59,12 @@ pub enum BridgeEvent {
     },
     /// A pending permission request became void: the bridge dropped its pending
     /// table (bridge restart / agent exit), the turn that asked for it has
-    /// ended, the session was removed, or the per-request deadline expired.
-    /// The frontend drops the matching permission queue entry and clears a
-    /// stuck `busy` flag, so no zombie dialog survives.
+    /// ended, the session was removed, or explicit cancellation succeeded.
+    /// Permission waiting itself never emits a timeout event.
     ///
-    /// `request_id` scope of validity:
-    /// - `Some(id)` (timeout only): **that single** request is void; the turn is
-    ///   still running, sibling requests stay answerable. The frontend removes
-    ///   just that entry and must NOT clear `busy`.
-    /// - `None` (bridge_restart / turn_ended / session_removed): the whole
+    /// `request_id` scope of validity (wire format retained):
+    /// - `Some(id)`: only that entry is void; the frontend must NOT clear `busy`.
+    /// - `None` (bridge_restart / turn_ended / session_removed / cancelled): the whole
     ///   session's pending set is gone; no id is re-sent because once the
     ///   connection or the turn is gone the kernel side id is dead too (see
     ///   the pending-interaction semantics in the kernel). The frontend clears
@@ -160,12 +153,74 @@ struct PermissionEntry {
     session_id: String,
     /// agent 给出的全部合法选项 id,回填时校验。
     option_ids: Vec<String>,
-    /// 该请求里 `kind` 含 `reject` 的选项 id(`reject_once` / `reject_always`)。
-    /// 超时按拒绝处理时用它回填;缺失则退化为 `cancelled`(绝不 allow)。
-    reject_option: Option<String>,
-    /// 截止时刻(落表时 = now + `permission_timeout`)。超时任务只有复核
-    /// `deadline <= now` 才会动手,避免早醒误杀仍在有效期内的请求。
-    deadline: Instant,
+}
+
+/// 审批和 prompt 预算的唯一账本。通知只唤醒等待者,不承载计时状态。
+#[derive(Default)]
+struct PermissionLedger {
+    permissions: HashMap<u64, PermissionEntry>,
+    prompts: HashMap<u64, PromptBudget>,
+}
+
+struct PromptBudget {
+    session_id: String,
+    remaining: Duration,
+    running_since: Option<Instant>,
+    changed: watch::Sender<()>,
+}
+
+impl PermissionLedger {
+    fn has_permission(&self, session_id: &str) -> bool {
+        self.permissions.values().any(|entry| entry.session_id == session_id)
+    }
+
+    fn pause(&mut self, session_id: &str, now: Instant) -> Vec<watch::Sender<()>> {
+        self.prompts.values_mut()
+            .filter(|budget| budget.session_id == session_id)
+            .filter_map(|budget| {
+                let start = budget.running_since.take()?;
+                budget.remaining = budget.remaining.saturating_sub(now.duration_since(start));
+                Some(budget.changed.clone())
+            })
+            .collect()
+    }
+
+    fn resume(&mut self, session_id: &str, now: Instant) -> Vec<watch::Sender<()>> {
+        if self.has_permission(session_id) {
+            return Vec::new();
+        }
+        self.prompts.values_mut()
+            .filter(|budget| budget.session_id == session_id && budget.running_since.is_none())
+            .map(|budget| {
+                budget.running_since = Some(now);
+                budget.changed.clone()
+            })
+            .collect()
+    }
+
+    fn take_permissions(&mut self, session_id: &str) -> Vec<(u64, PermissionEntry)> {
+        let ids: Vec<_> = self.permissions.iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(id, _)| *id).collect();
+        ids.into_iter().filter_map(|id| self.permissions.remove(&id).map(|entry| (id, entry))).collect()
+    }
+
+    fn take_prompts(&mut self, session_id: &str) -> Vec<u64> {
+        let ids: Vec<_> = self.prompts.iter()
+            .filter(|(_, budget)| budget.session_id == session_id)
+            .map(|(id, _)| *id).collect();
+        for id in &ids {
+            self.prompts.remove(id);
+        }
+        ids
+    }
+}
+
+/// 必须在释放账本锁后调用,发送与 await 均不进入账本临界区。
+fn wake_prompts(notifications: Vec<watch::Sender<()>>) {
+    for changed in notifications {
+        changed.send_replace(());
+    }
 }
 
 /// 在途 RPC 应答回传通道。
@@ -177,10 +232,8 @@ pub struct AcpBridge {
     initialized: AtomicBool,
     /// 我方在途请求:id → 应答回传。
     pending: Arc<Mutex<HashMap<u64, PendingTx>>>,
-    /// 在途权限请求:id → 登记(会话 + 合法选项)。
-    permission_pending: Arc<Mutex<HashMap<u64, PermissionEntry>>>,
-    /// 单条权限请求的截止时间(默认 [`DEFAULT_PERMISSION_TIMEOUT`],测试可注入)。
-    permission_timeout: Duration,
+    /// 审批和 prompt 预算共锁;普通 RPC 表与此锁不嵌套。
+    permission_ledger: Mutex<PermissionLedger>,
     event_tx: broadcast::Sender<BridgeEvent>,
     sessions: Mutex<Vec<SessionRecord>>,
     /// 每会话最近一次模型状态(内核应答原样缓存;查询走 model_state)。
@@ -212,30 +265,8 @@ fn option_ids_of(params: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 取权限请求里「拒绝」选项的 id,供超时按拒绝回填时使用。
-///
-/// 判定只看 `kind` 是否含 `reject`(`reject_once` / `reject_always`,以及
-/// schema 后续可能新增的 reject 变体);与 [`option_ids_of`] 同样读线上
-/// camelCase 的 `optionId`。没有 reject 选项 → `None`,超时改走 `cancelled`。
-fn reject_option_of(params: &serde_json::Value) -> Option<String> {
-    params
-        .get("options")
-        .and_then(|o| o.as_array())
-        .and_then(|arr| {
-            arr.iter().find_map(|o| {
-                let kind = o.get("kind").and_then(|k| k.as_str())?;
-                if !kind.to_ascii_lowercase().contains("reject") {
-                    return None;
-                }
-                o.get("optionId").and_then(|i| i.as_str()).map(String::from)
-            })
-        })
-}
-
 /// 构造并发送一条权限结果应答(`result.outcome.{outcome,optionId}`)。
-///
-/// 抽成自由函数是因为超时任务只持有克隆出来的 `transport`(它借不到桥:
-/// `handle_agent_request` 拿的是 `&self`,Arc 的强引用不能从 `&self` 复制)。
+/// 通用于显式选择与生命周期清理,调用前必须先释放账本锁。
 fn send_permission_outcome_on(
     transport: &dyn AgentTransport,
     request_id: u64,
@@ -336,22 +367,6 @@ impl AcpBridge {
     /// 挂到传输层:取走行接收端(唯一消费者)并启动路由循环。
     /// 返回的桥同时是事件源(`subscribe`)。
     pub fn attach(transport: Arc<dyn AgentTransport>) -> Result<Arc<Self>, TransportError> {
-        Self::attach_with_timeout(transport, DEFAULT_PERMISSION_TIMEOUT)
-    }
-
-    /// 测试注入点:权限超时可控(公开 `attach` 签名保持不变)。
-    #[cfg(test)]
-    pub(crate) fn new_with_timeout(
-        transport: Arc<dyn AgentTransport>,
-        permission_timeout: Duration,
-    ) -> Result<Arc<Self>, TransportError> {
-        Self::attach_with_timeout(transport, permission_timeout)
-    }
-
-    fn attach_with_timeout(
-        transport: Arc<dyn AgentTransport>,
-        permission_timeout: Duration,
-    ) -> Result<Arc<Self>, TransportError> {
         let line_rx = transport.take_line_receiver()?;
         let (event_tx, _) = broadcast::channel(EVENT_CAPACITY);
         let bridge = Arc::new(Self {
@@ -359,8 +374,7 @@ impl AcpBridge {
             next_id: AtomicU64::new(1),
             initialized: AtomicBool::new(false),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            permission_pending: Arc::new(Mutex::new(HashMap::new())),
-            permission_timeout,
+            permission_ledger: Mutex::new(PermissionLedger::default()),
             event_tx,
             sessions: Mutex::new(Vec::new()),
             model_states: Mutex::new(HashMap::new()),
@@ -432,38 +446,18 @@ impl AcpBridge {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(session_id);
-                let mut permissions = self
-                    .permission_pending
-                    .lock()
+                let mut ledger = self.permission_ledger.lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let ids: Vec<u64> = permissions
-                    .iter()
-                    .filter(|(_, entry)| entry.session_id == session_id)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in &ids {
-                    let _ = permissions.remove(id);
-                }
-                Some(ids)
+                let permissions = ledger.take_permissions(session_id);
+                let prompts = ledger.take_prompts(session_id);
+                Some((permissions, prompts))
             }
         };
-        let Some(ids) = dropped else {
+        let Some((permissions, prompts)) = dropped else {
             return false;
         };
-        for id in ids {
-            let resp = jsonrpc::success_response(
-                id,
-                serde_json::json!({"outcome": {"outcome": "cancelled"}}),
-            );
-            if let Err(e) = self.transport.send(resp.to_string()) {
-                tracing::warn!(request_id = id, "已移除会话的权限取消应答发送失败(忽略): {e}");
-            }
-            let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
-                session_id: session_id.to_string(),
-                request_id: None, // 整会话失效:前端清空该会话队列
-                reason: "session_removed".to_string(),
-            });
-        }
+        self.remove_pending_prompts(prompts);
+        self.finish_permissions(permissions, "session_removed", true);
         true
     }
 
@@ -485,38 +479,19 @@ impl AcpBridge {
     /// 全同步(收尾只做 best-effort 发送),监控任务直接调用。
     fn on_exit(&self, info: ExitInfo) {
         // 1) 在途 RPC 全部按错误收尾
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (_, tx) in pending.drain() {
+        let pending: Vec<_> = self.pending.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).drain().collect();
+        let permissions = {
+            let mut ledger = self.permission_ledger.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            ledger.prompts.clear();
+            ledger.permissions.drain().collect()
+        };
+        for (_, tx) in pending {
             let _ = tx.send(Err((-1, "agent 已断开".into())));
         }
-        drop(pending);
-        // 2) 挂起权限逐项回 cancelled(best-effort:写失败即放弃)
-        //    Trigger A (bridge restart): before the pending table is cleared,
-        //    report every entry to the frontend as PermissionCancelled. Without
-        //    it the frontend keeps stale queue entries whose ids no longer
-        //    exist in the table, so every click fails silently (zombie dialog).
-        //    The old request_id is NOT re-pushed (dead once disconnected).
-        let mut permissions = self
-            .permission_pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (id, entry) in permissions.iter() {
-            let resp = jsonrpc::success_response(
-                *id,
-                serde_json::json!({"outcome": {"outcome": "cancelled"}}),
-            );
-            let _ = self.transport.send(resp.to_string());
-            let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
-                session_id: entry.session_id.clone(),
-                request_id: None, // 整会话失效:前端清空该会话队列
-                reason: "bridge_restart".to_string(),
-            });
-        }
-        permissions.clear();
-        drop(permissions);
+        // 2) 出锁后回 cancelled(best-effort),整会话队列失效。
+        self.finish_permissions(permissions, "bridge_restart", true);
         // 3) 最后广播断连
         let _ = self.event_tx.send(BridgeEvent::Disconnected {
             code: info.code,
@@ -650,8 +625,6 @@ impl AcpBridge {
                 .unwrap_or("")
                 .to_string();
             let option_ids = option_ids_of(&params);
-            let reject_option = reject_option_of(&params);
-            let deadline = Instant::now() + self.permission_timeout;
             // known 检查、在途登记与发射同处一锁:删除后不得再弹过期审批。
             let accepted = {
                 let sessions = self
@@ -661,19 +634,17 @@ impl AcpBridge {
                 if !sessions.iter().any(|r| r.id == session_id) {
                     false
                 } else {
-                    let _ = self
-                        .permission_pending
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .insert(
-                            id,
-                            PermissionEntry {
-                                session_id: session_id.clone(),
-                                option_ids,
-                                reject_option,
-                                deadline,
-                            },
-                        );
+                    let notifications = {
+                        let mut ledger = self.permission_ledger.lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        ledger.permissions.insert(id, PermissionEntry {
+                            session_id: session_id.clone(),
+                            option_ids,
+                        });
+                        // 首条审批同步结算;重叠审批的 running_since 已为 None。
+                        ledger.pause(&session_id, Instant::now())
+                    };
+                    wake_prompts(notifications);
                     let _ = self.event_tx.send(BridgeEvent::PermissionRequest {
                         request_id: id,
                         session_id: session_id.clone(),
@@ -694,8 +665,6 @@ impl AcpBridge {
                 self.send_best_effort(jsonrpc::error_response(id, -32602, "未知会话"));
                 return;
             }
-            // 落表成功才挂超时任务:未登记的请求已就地拒绝,无需截止时间。
-            self.spawn_permission_timeout(id, deadline);
             return;
         }
         tracing::warn!(method = %method, "agent 请求了未声明的能力,拒绝");
@@ -719,11 +688,9 @@ impl AcpBridge {
     /// 前端回填权限选择。optionId 必须是 agent 给出的合法选项,否则 Err
     /// 且条目保留(可重试);成功后条目移除,重复响应报错。
     pub fn resolve_permission(&self, request_id: u64, option_id: &str) -> Result<(), String> {
-        let mut pending = self
-            .permission_pending
-            .lock()
+        let mut ledger = self.permission_ledger.lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(entry) = pending.get(&request_id) else {
+        let Some(entry) = ledger.permissions.get(&request_id) else {
             return Err(format!("权限请求 {request_id} 不存在或已响应"));
         };
         if !entry.option_ids.iter().any(|o| o == option_id) {
@@ -732,123 +699,111 @@ impl AcpBridge {
                 entry.option_ids
             ));
         }
-        let Some(PermissionEntry { session_id, .. }) = pending.remove(&request_id) else {
+        let Some(PermissionEntry { session_id, .. }) = ledger.permissions.remove(&request_id) else {
             unreachable!("上一行 get 刚确认存在,无并发写者");
         };
-        drop(pending);
+        let notifications = ledger.resume(&session_id, Instant::now());
+        drop(ledger);
+        wake_prompts(notifications);
         self.send_permission_outcome(request_id, &session_id, "selected", Some(option_id))
     }
 
     /// 用户取消权限对话框(前端关弹窗场景,k3 M3 审计 §3-P2)。
     pub fn cancel_permission(&self, request_id: u64) -> Result<(), String> {
-        let entry = self
-            .permission_pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&request_id)
-            .ok_or_else(|| format!("权限请求 {request_id} 不存在或已响应"))?;
+        let (entry, notifications) = {
+            let mut ledger = self.permission_ledger.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entry = ledger.permissions.remove(&request_id)
+                .ok_or_else(|| format!("权限请求 {request_id} 不存在或已响应"))?;
+            let notifications = ledger.resume(&entry.session_id, Instant::now());
+            (entry, notifications)
+        };
+        wake_prompts(notifications);
         self.send_permission_outcome(request_id, &entry.session_id, "cancelled", None)
     }
 
-    /// Trigger B (turn-terminal linkage), called by the event forwarding loops
-    /// in commands.rs when a turn-terminal event for `session_id` is forwarded:
-    /// drop every pending permission entry of that session and report each one
-    /// to the frontend as [`BridgeEvent::PermissionCancelled`]. Once the turn is
-    /// over the kernel cancels its own pending interactions, so those requests
-    /// can never be answered - the ids are deliberately NOT re-pushed.
-    /// No response is written back to the agent: the turn already ended.
-    /// Returns the number of dropped entries (0 = nothing to do).
+    /// 桥内在回合结束时清理,外部转发器的重复调用仍为幂等。
+    /// 内核已结束回合,不再向它发送权限应答;返回被移除的审批数。
     pub fn expire_permissions_for_session(&self, session_id: &str, reason: &str) -> usize {
-        let dropped = {
-            let mut guard = self
-                .permission_pending
-                .lock()
+        let (permissions, notifications) = {
+            let mut ledger = self.permission_ledger.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let ids: Vec<u64> = guard
-                .iter()
-                .filter(|(_, entry)| entry.session_id == session_id)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in &ids {
-                guard.remove(id);
-            }
-            ids.len()
+            let permissions = ledger.take_permissions(session_id);
+            let notifications = ledger.resume(session_id, Instant::now());
+            (permissions, notifications)
         };
-        for _ in 0..dropped {
+        wake_prompts(notifications);
+        let count = permissions.len();
+        self.finish_permissions(permissions, reason, false);
+        count
+    }
+
+    fn remove_pending_prompts(&self, ids: Vec<u64>) {
+        let removed: Vec<_> = {
+            let mut pending = self.pending.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            ids.into_iter().filter_map(|id| pending.remove(&id)).collect()
+        };
+        // 出锁后关闭应答通道,唤醒被删除/结束的 prompt 等待者。
+        drop(removed);
+    }
+
+    fn finish_permissions(&self, permissions: Vec<(u64, PermissionEntry)>, reason: &str, reply: bool) {
+        for (id, entry) in permissions {
+            if reply {
+                if let Err(e) = self.send_permission_outcome(id, &entry.session_id, "cancelled", None) {
+                    tracing::warn!(request_id = id, "权限清理应答发送失败(忽略): {e}");
+                }
+            }
             let _ = self.event_tx.send(BridgeEvent::PermissionCancelled {
-                session_id: session_id.to_string(),
-                request_id: None, // 整会话失效:前端清空该会话队列
+                session_id: entry.session_id,
+                request_id: None,
                 reason: reason.to_string(),
             });
         }
-        dropped
     }
 
-    /// 为一条已落表的权限请求挂超时任务:到期仍 pending → 按**拒绝**回填
-    /// (无 reject 选项则走 `cancelled`),并广播 `PermissionCancelled{reason:"timeout"}`。
-    ///
-    /// **绝不自动 allow**。与其他三方(`resolve_permission` / `cancel_permission` /
-    /// `expire_permissions_for_session`)共用 `permission_pending` 锁:先到者移除
-    /// 条目,本任务到期加锁时查无此项即静默退出(先到者生效,后到者 no-op)。
-    /// 不保存 JoinHandle:任务自行 no-op 结束;`transport` 只持 `Weak`,
-    /// 超时任务绝不延长传输层寿命(kill_on_drop:桥弃则进程可即刻回收)。
-    fn spawn_permission_timeout(&self, request_id: u64, deadline: Instant) {
-        let pending = Arc::clone(&self.permission_pending);
-        let transport = Arc::downgrade(&self.transport);
-        let event_tx = self.event_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep_until(deadline).await;
-            // 复核 + 摘除同处一锁:期间若被回填/取消/清表,条目已不在 → 不动手。
-            let entry = {
-                let mut guard = pending
-                    .lock()
+    /// 每次唤醒先标记通知版本,再在同一账本锁内检查最新预算。
+    /// sleep 只是唤醒来源,旧 deadline 或被合并的 watch 通知都不能决定超时。
+    async fn wait_prompt(
+        &self,
+        id: u64,
+        mut rx: oneshot::Receiver<Result<serde_json::Value, (i64, String)>>,
+        mut changed: watch::Receiver<()>,
+    ) -> Result<Result<serde_json::Value, (i64, String)>, ()> {
+        loop {
+            changed.borrow_and_update();
+            let deadline = {
+                let mut ledger = self.permission_ledger.lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let due = guard
-                    .get(&request_id)
-                    .map(|entry| entry.deadline <= Instant::now())
-                    .unwrap_or(false);
-                if due {
-                    guard.remove(&request_id)
-                } else {
-                    None
-                }
-            };
-            let Some(entry) = entry else {
-                return;
-            };
-            tracing::warn!(
-                request_id,
-                session_id = %entry.session_id,
-                "权限请求超时,按拒绝处理"
-            );
-            // 有 reject 选项 → selected(reject);否则 cancelled。两条都不是 allow。
-            let (outcome, option_id) = match entry.reject_option.as_deref() {
-                Some(reject) => ("selected", Some(reject)),
-                None => ("cancelled", None),
-            };
-            match transport.upgrade() {
-                Some(transport) => {
-                    if let Err(e) = send_permission_outcome_on(
-                        transport.as_ref(),
-                        request_id,
-                        &entry.session_id,
-                        outcome,
-                        option_id,
-                    ) {
-                        tracing::warn!(request_id, "权限超时应答发送失败(忽略): {e}");
+                let Some(budget) = ledger.prompts.get(&id) else {
+                    return rx.try_recv().map_err(|_| ());
+                };
+                match budget.running_since {
+                    Some(start) => {
+                        let deadline = start + budget.remaining;
+                        if Instant::now() >= deadline {
+                            // 到期判定与摘账本同锁,审批不可能插入这两步之间。
+                            ledger.prompts.remove(&id);
+                            return Err(());
+                        }
+                        Some(deadline)
                     }
+                    None => None,
                 }
-                // 桥/进程已销毁:无对象可应答,只剩清表与前端通知。
-                None => {
-                    tracing::warn!(request_id, "权限超时但 transport 已弃,跳过应答");
-                }
+            };
+            tokio::select! {
+                biased;
+                result = &mut rx => return result.map_err(|_| ()),
+                _ = changed.changed() => {},
+                _ = async {
+                    match deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {},
             }
-            let _ = event_tx.send(BridgeEvent::PermissionCancelled {
-                session_id: entry.session_id,
-                request_id: Some(request_id), // 单条失效:前端只移除该条
-                reason: "timeout".to_string(),
-            });
-        });
+        }
     }
 
     fn send_permission_outcome(
@@ -1086,8 +1041,8 @@ impl AcpBridge {
 
     /// 发起回合:立即返回,回合完成经 [`BridgeEvent::TurnCompleted`] 通知
     /// (GUI 调用不应阻塞数分钟)。`self: &Arc<Self>` 以便等待任务克隆桥。
-    /// 注意:30 分钟超时 ≠ 取消——超时只发错误事件,agent 仍在跑,
-    /// 真正中断需 `cancel`(M4 编排)。
+    /// 仅累计非审批运行时间;30 分钟预算耗尽 ≠ 取消,只发错误事件,
+    /// agent 仍在跑,真正中断需 `cancel`(M4 编排)。
     pub fn prompt(
         self: &Arc<Self>,
         session_id: &str,
@@ -1103,6 +1058,7 @@ impl AcpBridge {
         });
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
+        let (changed, changes) = watch::channel(());
         {
             // known 检查、在途登记与发送同处一锁:否则通过检查后被 forget,请求仍会下发。
             let sessions = self
@@ -1117,8 +1073,25 @@ impl AcpBridge {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(id, tx);
 
+            {
+                let mut ledger = self.permission_ledger.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let running_since = if ledger.has_permission(session_id) {
+                    None
+                } else {
+                    Some(Instant::now())
+                };
+                ledger.prompts.insert(id, PromptBudget {
+                    session_id: session_id.to_string(),
+                    remaining: PROMPT_TIMEOUT,
+                    running_since,
+                    changed,
+                });
+            }
             let msg = jsonrpc::request(id, "session/prompt", params);
             if let Err(e) = self.transport.send(msg.to_string()) {
+                self.permission_ledger.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()).prompts.remove(&id);
                 self.pending
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1130,8 +1103,13 @@ impl AcpBridge {
         let this = Arc::clone(self);
         let session = session_id.to_string();
         tokio::spawn(async move {
-            match tokio::time::timeout(PROMPT_TIMEOUT, rx).await {
-                Ok(Ok(Ok(result))) => {
+            let result = this.wait_prompt(id, rx, changes).await;
+            this.permission_ledger.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()).prompts.remove(&id);
+            this.remove_pending_prompts(vec![id]);
+            this.expire_permissions_for_session(&session, "turn_ended");
+            match result {
+                Ok(Ok(result)) => {
                     let stop = result
                         .get("stopReason")
                         .and_then(|s| s.as_str())
@@ -1166,7 +1144,7 @@ impl AcpBridge {
                         },
                     );
                 }
-                Ok(Ok(Err((code, message)))) => {
+                Ok(Err((code, message))) => {
                     tracing::error!(%session, code, %message, "session/prompt 失败");
                     this.send_event_if_known(
                         &session,
@@ -1176,7 +1154,7 @@ impl AcpBridge {
                         },
                     );
                 }
-                Ok(Err(_)) | Err(_) => {
+                Err(()) => {
                     tracing::error!(%session, "session/prompt 超时或断开");
                     this.send_event_if_known(
                         &session,
@@ -1198,7 +1176,36 @@ impl AcpBridge {
         );
         self.transport
             .send(note.to_string())
-            .map_err(|e| format!("发送 session/cancel 失败: {e}"))
+            .map_err(|e| format!("发送 session/cancel 失败: {e}"))?;
+        // 发送失败原样保留审批/预算;成功只清审批,恢复原 prompt 的剩余预算。
+        let (permissions, notifications) = {
+            let mut ledger = self.permission_ledger.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let permissions = ledger.take_permissions(session_id);
+            let notifications = ledger.resume(session_id, Instant::now());
+            (permissions, notifications)
+        };
+        wake_prompts(notifications);
+        self.finish_permissions(permissions, "cancelled", true);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_wait_counts(&self) -> (usize, usize, usize) {
+        let (permissions, prompts) = {
+            let ledger = self.permission_ledger.try_lock().expect("账本锁不得跨发送持有");
+            (ledger.permissions.len(), ledger.prompts.len())
+        };
+        (permissions, prompts, self.pending.try_lock().expect("RPC 锁不得跨发送持有").len())
+    }
+
+    /// 测试在不调度 router/prompt task 的临界时序内调用真实入站处理器。
+    #[cfg(test)]
+    pub(crate) fn permission_without_polling(&self, id: u64, session_id: &str) {
+        self.handle_agent_request(id, "session/request_permission".into(), serde_json::json!({
+            "sessionId": session_id,
+            "options": [{"optionId": "allow", "kind": "allow_once"}]
+        }));
     }
 
     /// 从 session/new|load 应答缓存 models 字段并透传给前端(缺字段=旧内核
@@ -1552,8 +1559,7 @@ mod tests {
         assert!(v.get("request_id").is_none(), "None 不得出现在线上: {v}");
     }
 
-    /// The timeout trigger carries the single void request id (frontend removes
-    /// only that entry and keeps `busy`).
+    /// 保留既有单条失效事件的序列化契约;不代表桥仍会生成审批超时。
     #[test]
     fn permission_cancelled_timeout_carries_request_id() {
         let v = serde_json::to_value(BridgeEvent::PermissionCancelled {
@@ -1789,13 +1795,9 @@ mod tests {
         }
     }
 
-    /// §P:权限请求 per-request 超时 → 拒绝。
-    ///
-    /// 独立子模块:自带「记录下发帧」的 mock(既有 `MockTransport` 只吞帧,
-    /// 断言不了回给 agent 的 outcome),并统一放行测试专用的
-    /// unwrap/expect/panic 告警(与 `jsonrpc.rs` 测试模块同一风格,
-    /// 非测试代码仍受 `[lints.clippy]` 约束)。
-    mod permission_timeout {
+    /// 权限无截止机制:只允许显式应答或生命周期清理。
+    /// 虚拟时间的长等待/竞争回归在独立源码 harness 中执行。
+    mod permission_wait {
         #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
         use super::super::*;
@@ -1803,7 +1805,6 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::Arc;
         use tokio::sync::{broadcast, mpsc};
-        use tokio::time::{sleep, Duration};
 
         /// 记录型 mock:喂入站行的同时收集桥下发到 agent 的帧。
         struct RecordingTransport {
@@ -1852,10 +1853,8 @@ mod tests {
             }
         }
 
-        /// 起一座注入短超时的桥,并登记会话 `s1`(权限请求的前提)。
-        fn boot(
-            timeout: Duration,
-        ) -> (
+        /// 使用普通 attach 并登记会话 `s1`。
+        fn boot() -> (
             Arc<AcpBridge>,
             Arc<RecordingTransport>,
             mpsc::Sender<String>,
@@ -1865,7 +1864,7 @@ mod tests {
                 lines: std::sync::Mutex::new(Some(line_rx)),
                 sent: std::sync::Mutex::new(Vec::new()),
             });
-            let bridge = AcpBridge::new_with_timeout(transport.clone(), timeout).expect("attach");
+            let bridge = AcpBridge::attach(transport.clone()).expect("attach");
             bridge
                 .sessions
                 .lock()
@@ -1900,209 +1899,65 @@ mod tests {
             ])
         }
 
-        /// 等 route_loop 把入站帧落表(1ms 轮询,不赌固定 sleep)。
-        async fn wait_pending(bridge: &AcpBridge, request_id: u64) {
-            for _ in 0..500 {
-                if bridge
-                    .permission_pending
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .contains_key(&request_id)
-                {
-                    return;
-                }
-                sleep(Duration::from_millis(1)).await;
-            }
-            panic!("权限请求 {request_id} 未在 500ms 内落表");
-        }
-
-        /// 等 `reason="timeout"` 的 `PermissionCancelled`,返回
-        /// (session_id, reason, request_id)。
-        async fn wait_timeout_event(
-            events: &mut broadcast::Receiver<BridgeEvent>,
-        ) -> (String, String, Option<u64>) {
-            let wait = async {
-                loop {
-                    match events.recv().await {
-                        Ok(BridgeEvent::PermissionCancelled {
-                            session_id,
-                            reason,
-                            request_id,
-                        }) => {
-                            if reason == "timeout" {
-                                return (session_id, reason, request_id);
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => panic!("事件流中断: {e}"),
-                    }
-                }
-            };
-            tokio::time::timeout(Duration::from_millis(1500), wait)
-                .await
-                .expect("1.5s 内必须收到 reason=timeout 的 PermissionCancelled")
-        }
-
-        fn pending_len(bridge: &AcpBridge) -> usize {
-            bridge
-                .permission_pending
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len()
-        }
-
-        /// P.4-1:到期 → `selected` + reject optionId,pending 清空,事件带 timeout。
-        #[tokio::test]
-        async fn permission_timeout_rejects() {
-            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
+        async fn register(bridge: &AcpBridge, lines: &mpsc::Sender<String>, id: u64, options: serde_json::Value) {
             let mut events = bridge.subscribe();
-            line_tx
-                .send(permission_frame(7, allow_and_reject()))
-                .await
-                .expect("send frame");
-
-            let (session_id, reason, request_id) = wait_timeout_event(&mut events).await;
-            assert_eq!(session_id, "s1");
-            assert_eq!(reason, "timeout");
-            // 超时事件必须精确带出失效的请求 id(前端只移除该条,不动 busy)
-            assert_eq!(request_id, Some(7));
-
-            let frames = transport.sent_frames();
-            assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
-            assert_eq!(frames[0]["id"], serde_json::json!(7));
-            assert_eq!(frames[0]["result"]["outcome"]["outcome"], "selected");
-            assert_eq!(
-                frames[0]["result"]["outcome"]["optionId"], "reject-once",
-                "超时只能选 reject 选项: {frames:?}"
-            );
-            assert_eq!(pending_len(&bridge), 0, "超时后条目必须移除");
+            lines.send(permission_frame(id, options)).await.unwrap();
+            assert!(matches!(events.recv().await.unwrap(), BridgeEvent::PermissionRequest { request_id, .. } if request_id == id));
         }
 
-        /// P.4-2:先 resolve → 超时任务到点查无此项,不得有第二条应答。
         #[tokio::test]
-        async fn permission_resolved_before_timeout_no_second_response() {
-            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
-            line_tx
-                .send(permission_frame(9, allow_and_reject()))
-                .await
-                .expect("send frame");
-            wait_pending(&bridge, 9).await;
-
-            bridge
-                .resolve_permission(9, "allow-once")
-                .expect("合法选项应回填成功");
-            // 6 倍超时窗口:sleep_until 早已到期,任务应已 no-op 退出。
-            sleep(Duration::from_millis(120)).await;
-
+        async fn explicit_rejection_selects_only_requested_option() {
+            let (bridge, transport, lines) = boot();
+            register(&bridge, &lines, 7, allow_and_reject()).await;
+            assert!(transport.sent_frames().is_empty());
+            bridge.resolve_permission(7, "reject-once").unwrap();
             let frames = transport.sent_frames();
-            assert_eq!(frames.len(), 1, "resolve 后不得再有超时应答: {frames:?}");
-            assert_eq!(frames[0]["result"]["outcome"]["outcome"], "selected");
-            assert_eq!(frames[0]["result"]["outcome"]["optionId"], "allow-once");
-            assert_eq!(pending_len(&bridge), 0);
-            assert!(
-                bridge.cancel_permission(9).is_err(),
-                "已回填的请求不可再取消(后到者 no-op)"
-            );
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0]["result"]["outcome"]["optionId"], "reject-once");
+            assert!(bridge.resolve_permission(7, "allow-once").is_err());
         }
 
-        /// P.4-3:无 reject 选项(只有 allow)→ 到期走 cancelled,不带 optionId。
         #[tokio::test]
-        async fn permission_timeout_without_reject_option_cancels() {
-            let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
-            let mut events = bridge.subscribe();
-            line_tx
-                .send(permission_frame(
-                    11,
-                    serde_json::json!([
-                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}
-                    ]),
-                ))
-                .await
-                .expect("send frame");
-
-            let (_session_id, reason, request_id) = wait_timeout_event(&mut events).await;
-            assert_eq!(reason, "timeout");
-            assert_eq!(request_id, Some(11));
-
-            let frames = transport.sent_frames();
-            assert_eq!(frames.len(), 1, "超时只回一条应答: {frames:?}");
-            let outcome = &frames[0]["result"]["outcome"];
-            assert_eq!(outcome["outcome"], "cancelled");
-            assert!(
-                outcome.get("optionId").is_none(),
-                "cancelled 不得携带 optionId: {outcome}"
-            );
-            assert_eq!(pending_len(&bridge), 0);
+        async fn explicit_resolution_has_no_second_response() {
+            let (bridge, transport, lines) = boot();
+            register(&bridge, &lines, 9, allow_and_reject()).await;
+            bridge.resolve_permission(9, "allow-once").unwrap();
+            assert!(bridge.cancel_permission(9).is_err());
+            assert!(bridge.resolve_permission(9, "reject-once").is_err());
+            assert_eq!(transport.sent_frames().len(), 1);
+            assert_eq!(transport.sent_frames()[0]["result"]["outcome"]["optionId"], "allow-once");
+            assert_eq!(bridge.permission_wait_counts(), (0, 0, 0));
         }
 
-        /// P.4-4:所有超时路径下发的 optionId 均不属于 allow 集合。
         #[tokio::test]
-        async fn timeout_never_allows() {
-            let cases: [(&str, serde_json::Value); 4] = [
-                ("allow 在前", allow_and_reject()),
-                (
-                    "只有 allow",
-                    serde_json::json!([
-                        {"optionId": "allow-always", "name": "Always", "kind": "allow_always"}
-                    ]),
-                ),
-                ("空 options", serde_json::json!([])),
-                (
-                    "reject_always",
-                    serde_json::json!([
-                        {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                        {"optionId": "reject-always", "name": "Never", "kind": "reject_always"}
-                    ]),
-                ),
-            ];
+        async fn no_reject_option_requires_explicit_cancellation() {
+            let (bridge, transport, lines) = boot();
+            register(&bridge, &lines, 11, serde_json::json!([
+                {"optionId": "allow-once", "kind": "allow_once"}
+            ])).await;
+            assert!(transport.sent_frames().is_empty());
+            assert!(bridge.resolve_permission(11, "reject-once").is_err());
+            bridge.cancel_permission(11).unwrap();
+            assert_eq!(transport.sent_frames()[0]["result"]["outcome"], serde_json::json!({"outcome":"cancelled"}));
+            assert_eq!(bridge.permission_wait_counts(), (0, 0, 0));
+        }
 
-            for (idx, (label, options)) in cases.into_iter().enumerate() {
-                let allow_ids: Vec<String> = options
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter(|o| {
-                                o["kind"]
-                                    .as_str()
-                                    .unwrap_or("")
-                                    .to_ascii_lowercase()
-                                    .contains("allow")
-                            })
-                            .filter_map(|o| o["optionId"].as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let request_id = 100 + idx as u64;
-                let (bridge, transport, line_tx) = boot(Duration::from_millis(20));
-                let mut events = bridge.subscribe();
-                line_tx
-                    .send(permission_frame(request_id, options))
-                    .await
-                    .expect("send frame");
-
-                let (_session_id, reason, rid) = wait_timeout_event(&mut events).await;
-                assert_eq!(reason, "timeout", "[{label}]");
-                assert_eq!(rid, Some(request_id), "[{label}] 必须带出本条请求 id");
-
-                let frames = transport.sent_frames();
-                assert_eq!(frames.len(), 1, "[{label}] 超时只回一条: {frames:?}");
-                let outcome = &frames[0]["result"]["outcome"];
-                let kind = outcome["outcome"].as_str().unwrap_or("");
-                assert!(
-                    kind == "selected" || kind == "cancelled",
-                    "[{label}] 非法 outcome: {outcome}"
-                );
-                if let Some(option_id) = outcome["optionId"].as_str() {
-                    assert!(
-                        !allow_ids.iter().any(|allow| allow == option_id),
-                        "[{label}] 超时不得选择 allow 选项({option_id}): {outcome}"
-                    );
-                }
-                assert_eq!(pending_len(&bridge), 0, "[{label}] 条目必须移除");
-
-                // 任务已退出:静置一个超时窗口,仍不得出现第二条应答。
-                sleep(Duration::from_millis(60)).await;
-                assert_eq!(transport.sent_frames().len(), 1, "[{label}] 不得二次应答");
+        #[tokio::test]
+        async fn option_kinds_never_trigger_automatic_selection() {
+            for options in [
+                allow_and_reject(),
+                serde_json::json!([{"optionId":"allow", "kind":"allow_always"}]),
+                serde_json::json!([]),
+                serde_json::json!([{"optionId":"reject", "kind":"reject_always"}]),
+            ] {
+                let (bridge, transport, lines) = boot();
+                register(&bridge, &lines, 12, options).await;
+                assert!(transport.sent_frames().is_empty());
+                assert_eq!(bridge.permission_wait_counts(), (1, 0, 0));
+                assert_eq!(bridge.expire_permissions_for_session("s1", "turn_ended"), 1);
+                assert_eq!(bridge.expire_permissions_for_session("s1", "turn_ended"), 0);
+                assert!(transport.sent_frames().is_empty());
+                assert!(bridge.resolve_permission(12, "allow").is_err());
             }
         }
     }

@@ -8,6 +8,7 @@ www.qidiai.ltd 已从"单文件 index.html"重构为 **多页静态站**：写�
 qidi-portal/
 ├── src/
 │   ├── pages/index.html      首页模板（含 @PRODUCT_CARDS 等占位符）
+│   ├── pages/privacy.html    隐私政策页（构建到 /privacy/，页脚链接随模板生效）
 │   ├── assets/site.css|js    全站样式 / 运行时脚本（资讯流加载、终端动效）
 │   ├── data/products.json    产品矩阵卡片
 │   ├── data/cases.json       工程案例卡片

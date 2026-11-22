@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - System prompt identity changed from "Grok released by xAI" to "QIDI Code"
 - TUI menu items and status bar localized to bilingual (Chinese + English)
 - Provider switched to intern-s1 (InternLM/书生大模型) via OpenAI-compatible API
+- ACP permission requests wait indefinitely for an explicit response; the session's prompt budget pauses while waiting (replaces the 120s timeout-to-reject that forced users to stay at the computer)
+- GUI close button minimizes to tray instead of exiting; in-flight agent tasks keep running (tray menu: show window / quit)
+- Release chain optionally signs the installer via SignPath Foundation when SIGNPATH_API_TOKEN is configured; download center states the SignPath code-signing notice and updated SmartScreen guidance
 
 ### Security
 - Four rounds of security audit completed (62 findings total: 15 Critical, 15 High, 30 Medium, 5 Low)
@@ -33,10 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Compilation warnings: unreachable pattern, hidden lifetime, unused import, dead code
 - Ensure plan mode tools uses correct namespace prefix
 - TOML model ID with dots parsed as nested table (config.toml)
+- deploy.sh: MSYS/Git Bash path resolution (`pwd -W`) so npm finds package.json on Windows; `privacy/` added to the staging whitelist so new pages actually reach the server
 
 ### Added
 - GitHub Actions CI/CD workflow (ci.yml)
 - This CHANGELOG.md
+- tools/release/signpath-sign.py: SignPath Authenticode code signing (submit → poll approval → download signed artifact), stdlib-only HTTP
+- tools/release/test_signpath_sign.py: local mock self-test for the signing tool (7 cases)
+- docs/ops/code-signing.md: signing runbook (application, configuration, ordering rule, troubleshooting)
+- Privacy policy page on the portal (https://www.qidiai.ltd/privacy/)
 
 ### Known Issues
 - 18 remaining Medium/Low security findings (rate limiting, static encryption, HMAC, MCP tool override, hooks trust model, LLM truncation)

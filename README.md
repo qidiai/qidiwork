@@ -25,7 +25,7 @@ QIDI Code 是一个基于 Rust 构建的终端 AI 编码工具，支持多模型
 
 1. 打开下载中心：<https://qidiwork.qidiai.ltd/>
 2. 下载 `qidiwork-setup-0.1.0.exe`（约 34 MB，AI 内核已随包内置，安装即用）
-3. 安装时如遇 Windows SmartScreen 蓝色提示：点「更多信息」→「仍要运行」（未购买代码签名证书的正常现象，详见 [安装指引](docs/安装指引-SmartScreen.md)）
+3. 安装包由 [SignPath Foundation](https://signpath.org/) 提供代码签名（发布者信息可在安装包「属性 → 数字签名」页核验）；若使用早期未签名版本遇到 Windows SmartScreen 蓝色提示，点「更多信息」→「仍要运行」即可（详见 [安装指引](docs/安装指引-SmartScreen.md)）
 4. 安装完成后程序自动启动，在设置面板填入模型 API Key 即可开始对话
 
 版本清单（含 SHA-256 校验值）：<https://qidiwork.qidiai.ltd/releases/latest.json>

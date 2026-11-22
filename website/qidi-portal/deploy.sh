@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+# MSYS/Git Bash 下 pwd 输出 /g/qidiwork/... 风格路径,npm(Windows 程序)会当成
+# 相对路径拼出 G:\g\qidiwork\... 而找不到 package.json;pwd -W 输出 G:/... 的
+# Windows 路径。-W 不存在时(WSL/Linux)退回普通 pwd。
+ROOT="$(cd "$(dirname "$0")" && pwd -W 2>/dev/null || pwd)"
 HOST="ubuntu@111.231.166.204"
 
 npm --prefix "$ROOT" test
@@ -13,7 +16,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/public" "$STAGE/download" "$STAGE/server"
 cp "$ROOT/dist/index.html" "$ROOT/dist/sitemap.xml" "$ROOT/dist/robots.txt" "$ROOT/dist/og-cover.png" "$STAGE/public/"
-cp -R "$ROOT/dist/assets" "$ROOT/dist/tech" "$ROOT/dist/blog" "$ROOT/dist/admin" "$STAGE/public/"
+cp -R "$ROOT/dist/assets" "$ROOT/dist/tech" "$ROOT/dist/blog" "$ROOT/dist/admin" "$ROOT/dist/privacy" "$STAGE/public/"
 cp "$ROOT/dist/download/index.html" "$ROOT/dist/download/analytics.js" "$ROOT/dist/download/qidi-logo.svg" "$STAGE/download/"
 cp "$ROOT/server/analytics.py" "$ROOT/server/deploy.py" "$ROOT/server/qidi-analytics.service" "$ROOT/server/qidi-analytics.nginx" "$STAGE/server/"
 tar -czf "$STAGE/release.tar.gz" -C "$STAGE" public download server

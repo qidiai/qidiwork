@@ -10,7 +10,7 @@
 | 给谁看 | Windows SmartScreen、浏览器、`exe` 属性页的数字签名页签 | 应用内自动更新器（`updater.rs`） |
 | 解决什么 | 「未知发布者」蓝色拦截、下载安全风险提示 | 安装包被篡改/调包 |
 | 私钥在哪 | SignPath HSM（我们不碰私钥） | 自保管（`G:\qidiwork-secrets\`） |
-| 状态 | 待申请（本文档） | 0.1.12 起已上线 |
+| 状态 | **已申请**（2026-11-22 提交 SignPath Foundation，审批中） | 0.1.12 起已上线 |
 
 两者都要做，且**顺序固定**：先 Authenticode，再 Ed25519（见 §5）。
 
@@ -25,6 +25,12 @@
 若申请未过或周期不可接受，备选路线见 §8。
 
 ## 3. 申请（需要真人决策，无法代劳）
+
+**申请前置（2026-11-22 已就绪并部署上线）**：
+
+- 下载页 <https://qidiwork.qidiai.ltd/> 已声明「安装包由 SignPath Foundation 提供代码签名」；
+- 隐私政策页 <https://www.qidiai.ltd/privacy/> 已上线（应用有 OAuth 登录，属处理用户数据，
+  申请表 Privacy Policy URL 填它）。
 
 1. <https://signpath.org/apply> 提交项目信息：仓库地址、许可证、官网、
    项目简介、预计发布节奏；

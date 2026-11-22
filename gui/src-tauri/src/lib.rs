@@ -22,7 +22,7 @@ pub mod transcript;
 pub mod transport;
 pub mod updater;
 
-use tauri::{Manager, RunEvent};
+use tauri::{Manager, RunEvent, menu::{MenuBuilder, MenuItem}, tray::{MouseButton, MouseButtonState, TrayIconBuilder}};
 
 /// Tauri 应用装配与主循环,返回进程退出码。
 pub fn run() -> i32 {
@@ -36,6 +36,7 @@ pub fn run() -> i32 {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
                 let _ = window.set_focus();
             }
         }))
@@ -102,6 +103,61 @@ pub fn run() -> i32 {
                     Ok(added) => tracing::info!(count = added.len(), "内置技能释放"),
                     Err(e) => tracing::warn!(error = %e, "内置技能释放失败"),
                 }
+            }
+            // 托盘化(客户反馈"关窗口=丢在途任务"):X 键最小化到托盘而非退出,
+            // 内核子进程由 Job Object 托管继续跑;托盘右键「退出 QidiWork」才是真退出。
+            if let Some(window) = app.get_webview_window("main") {
+                let w = window.clone();
+                window.on_window_event(move |e| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                        api.prevent_close();
+                        let _ = w.hide();
+                    }
+                });
+            }
+            let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出 QidiWork", true, None::<&str>)?;
+            let menu = MenuBuilder::new(app).items(&[&show_item, &quit_item]).build()?;
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let _tray = TrayIconBuilder::with_id("main")
+                    .tooltip("QidiWork 办公台")
+                    .icon(icon)
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, e| match e.id.as_ref() {
+                        "quit" => {
+                            commands::terminate_current(&app.state::<commands::AgentState>());
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, e| {
+                        if let tauri::tray::TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = e
+                        {
+                            if let Some(w) = tray.app_handle().get_webview_window("main") {
+                                if w.is_visible().unwrap_or(false) {
+                                    let _ = w.hide();
+                                } else {
+                                    let _ = w.show();
+                                    let _ = w.set_focus();
+                                }
+                            }
+                        }
+                    })
+                    .build(app)?;
+                tracing::info!("托盘模式启用:X 键最小化到托盘");
+            } else {
+                tracing::warn!("缺默认窗口图标,托盘未启用");
             }
             Ok(())
         })

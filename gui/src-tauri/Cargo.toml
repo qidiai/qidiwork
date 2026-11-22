@@ -29,7 +29,7 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
 # 系统通知(方案 v2 P2:任务完成/需审批时提醒切走窗口的办公用户)

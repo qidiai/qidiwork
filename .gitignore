@@ -61,3 +61,7 @@ CUsers*
 
 # 根目录一次性渲染产物（不入库）
 .portal-tmp.html
+
+# Python 工具缓存(tools/release 等)
+__pycache__/
+*.pyc

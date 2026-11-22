@@ -4,6 +4,12 @@
 [`gui/src-tauri/src/updater.rs`](../../gui/src-tauri/src/updater.rs) 的
 `verify_ed25519` / `check_signature` **逐字节对齐**。
 
+> 本目录还有第二条互不相干的签名链：`signpath-sign.py` 做 **Authenticode
+> 代码签名**（给 Windows SmartScreen / 浏览器看的发布者身份），
+> 流程见 [`docs/ops/code-signing.md`](../../docs/ops/code-signing.md)。
+> 发版顺序：**先 Authenticode（signpath-sign.py），再 Ed25519（sign-update.py）**——
+> Authenticode 会改变文件字节，sha256/sig 必须签最终分发文件。
+
 ## 0. 契约（先读这一段，改工具前必须复读）
 
 | 项目 | 客户端要求 | 本工具做法 |
@@ -132,3 +138,24 @@ python G:/qidiwork/tools/release/sign-update.py --key update-signing-key.pem \
 ```
 
 预期：`SIGN OK` + JSON（`sha256` 与 `prod/releases/latest-0.1.11.json` 一致，可当交叉校验）。
+
+## 7. Authenticode 代码签名（signpath-sign.py，给 SmartScreen/浏览器看的签名）
+
+与上面的 Ed25519 链互不相干，**顺序固定：先 Authenticode，再 Ed25519**
+（Authenticode 改写 PE，sha256/sig 必须签最终分发文件）。完整流程、
+SignPath Foundation 申请、配置与排障见
+[`docs/ops/code-signing.md`](../../docs/ops/code-signing.md)。
+
+```bash
+# 配置走环境变量（SIGNPATH_API_TOKEN / _ORGANIZATION_ID / _PROJECT_SLUG /
+# _SIGNING_POLICY_SLUG），令牌绝不入库
+python tools/release/signpath-sign.py \
+  --file prod/releases/qidiwork-setup-0.1.13.exe \
+  --param productVersion=0.1.13 --verify
+
+# 自测（本地 mock，不联网、不需要真 token）
+python tools/release/test_signpath_sign.py        # 期望 7/7 passed
+```
+
+`build_release.ps1` 出包后检测到 `SIGNPATH_API_TOKEN` 会自动执行签名；
+未配置则维持无签名分发（旧行为）。

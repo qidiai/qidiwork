@@ -170,12 +170,13 @@ test('robots 复制原规则并禁止各爬虫抓取管理页，sitemap 保留�
   assert.match(robots, /Sitemap: https:\/\/www.qidiai.ltd\/sitemap.xml/);
   const sitemap = fs.readFileSync(path.join(dist, 'sitemap.xml'), 'utf8');
   const entries = [...sitemap.matchAll(/<url>\s*<loc>(.*?)<\/loc>\s*<lastmod>(.*?)<\/lastmod>\s*<\/url>/g)];
-  assert.equal(entries.length, 8);
+  assert.equal(entries.length, 9);
   assert.deepEqual(Object.fromEntries(entries.map(([, url, date]) => [new URL(url).pathname, date])), {
     '/': '2026-10-24', '/tech/': '2026-10-20',
     '/tech/rust-provider-abstraction/': '2026-09-21', '/tech/multitenant-credential-layers/': '2026-09-21',
     '/tech/free-token-resources/': '2026-10-21', '/blog/': '2026-10-21',
     '/blog/free-quota-cheatsheet/': '2026-10-21', '/blog/qwen-image-6gb/': '2026-10-21',
+    '/privacy/': '2026-11-22',
   });
 });
 

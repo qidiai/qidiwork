@@ -251,6 +251,11 @@ fs.cpSync(path.join(SRC, "assets"), path.join(DIST, "assets"), { recursive: true
 fs.copyFileSync(path.join(SRC, "assets/og-cover.png"), path.join(DIST, "og-cover.png"));
 fs.copyFileSync(path.join(SRC, "robots.txt"), path.join(DIST, "robots.txt"));
 write(path.join(DIST, "admin/index.html"), read(path.join(SRC, "pages/admin.html")));
+write(path.join(DIST, "privacy/index.html"), page({
+  title: "隐私政策", desc: "QidiWork / QIDI AI 软件与网站的隐私政策：本地优先、无遥测、匿名访问统计。",
+  canonical: "https://www.qidiai.ltd/privacy/",
+  body: read(path.join(SRC, "pages/privacy.html")),
+}));
 write(path.join(DIST, "download/index.html"), read(path.join(ROOT, "../qidiwork-download/index.html")));
 write(path.join(DIST, "download/analytics.js"), read(path.join(SRC, "assets/analytics.js")));
 fs.copyFileSync(path.join(SRC, "assets/qidi-logo.svg"), path.join(DIST, "download/qidi-logo.svg"));
@@ -266,6 +271,7 @@ const urls = [
   { url: "https://www.qidiai.ltd/tech/", lastmod: "2026-10-20" },
   ...posts.map(p => ({ url: `https://www.qidiai.ltd/tech/${p.slug}/`, lastmod: originalLastmod[p.slug] || p.date })),
   { url: "https://www.qidiai.ltd/blog/", lastmod: "2026-10-21" },
+  { url: "https://www.qidiai.ltd/privacy/", lastmod: "2026-11-22" },
   ...published.map(p => ({ url: p.canonical, lastmod: p.lastmod })),
 ];
 write(path.join(DIST, "sitemap.xml"),
